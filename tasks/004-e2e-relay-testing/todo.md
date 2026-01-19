@@ -167,9 +167,9 @@
 ## Phase 7: Documentation
 
 - [x] Write test README with instructions
-- [ ] Document test scenarios and expected results
-- [ ] Document metrics collection
-- [ ] Add troubleshooting guide
+- [x] Document test scenarios and expected results (`tasks/_context/testing-guide.md`)
+- [ ] Document metrics collection (Phase 6)
+- [x] Add troubleshooting guide (`tasks/_context/testing-guide.md`)
 
 ---
 

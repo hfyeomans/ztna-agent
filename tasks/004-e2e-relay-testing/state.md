@@ -130,8 +130,8 @@ Result: ✅ SUCCESS - Full round-trip verified
 | Return traffic | ✅ | Full round-trip working |
 
 ### What's NOT Tested Yet
-- ❌ ALPN validation (wrong protocol rejection)
-- ❌ MAX_DATAGRAM_SIZE boundary (1350 bytes)
+- ✅ ALPN validation (wrong protocol rejection) - Phase 2 DONE
+- ✅ MAX_DATAGRAM_SIZE boundary (~1307 bytes effective) - Phase 2 DONE
 - ❌ Connection recovery after timeout
 - ❌ Multiple concurrent agents
 - ❌ Various payload patterns
@@ -198,26 +198,29 @@ RUST_LOG=info tests/e2e/fixtures/quic-client/target/release/quic-test-client \
 
 ## What's Next
 
-1. **Phase 2: Protocol Validation**
-   - ALPN wrong-protocol rejection test
-   - MAX_DATAGRAM_SIZE boundary tests
-   - Malformed packet handling
+1. **Phase 4: Additional UDP Tests**
+   - Multiple concurrent flows (requires flow map enhancement)
+   - Various payload patterns (random, sequential, all-zeros)
+   - Long-running stream stability tests
+   - Burst traffic stress tests
 
-2. **Phase 3: Automated Test Suite**
-   - Integrate QUIC test client into `run-mvp.sh`
-   - Add relay test scenarios
+2. **Phase 5: Reliability Tests**
+   - Component restart scenarios
+   - Invalid packet/certificate handling
+   - Network impairment simulation (stretch)
 
-3. **Phase 4: Edge Cases**
-   - Multiple concurrent connections
-   - Idle timeout behavior
-   - Connection recovery
+3. **Phase 6: Performance Metrics**
+   - Latency measurement (baseline vs tunneled)
+   - Throughput measurement (Mbps + PPS)
+   - Time to first datagram
 
 ---
 
 ## Session Resume Instructions
 
 1. Read `tasks/_context/README.md` for project context
-2. Read this file for task state
-3. Check `todo.md` for current progress
-4. Ensure on branch: `feature/004-e2e-relay-testing`
-5. Continue with Phase 2 protocol validation tests
+2. Read `tasks/_context/testing-guide.md` for testing documentation
+3. Read this file for task state
+4. Check `todo.md` for current progress
+5. Ensure on branch: `feature/004-e2e-relay-testing`
+6. Continue with Phase 4+ tests (concurrent flows, performance, reliability)

@@ -94,7 +94,7 @@
 |-------|--------|-------|
 | Phase 1: Infrastructure | ✅ Done | 14 tests passing (component startup, direct echo) |
 | Phase 1.5: QUIC Test Client | ✅ Done | IP/UDP packet construction, E2E relay VERIFIED |
-| Phase 2: Protocol Validation | 🔲 Next | ALPN, registration, MAX_DATAGRAM_SIZE |
+| Phase 2: Protocol Validation | ✅ Done | 8 tests: ALPN, registration, DATAGRAM size, payloads |
 | Phase 3: Relay Validation | ✅ Done | Full relay path verified (Agent→Intermediate→Connector→Echo→back) |
 
 **Capabilities Built:**
@@ -104,8 +104,16 @@
   - Agent registration (`--service <id>`)
   - IP/UDP packet construction (`--send-udp --dst ip:port`)
   - IPv4 header checksum calculation (RFC 1071)
+  - **Phase 2:** Protocol validation (`--alpn`, `--payload-size`, `--expect-fail`)
 - Test scenarios for connectivity, echo, boundary conditions
+- Protocol validation test suite (`scenarios/protocol-validation.sh`)
+- Comprehensive testing guide (`tasks/_context/testing-guide.md`)
 - Architecture documentation (`tests/e2e/README.md`)
+
+**Key Protocol Discovery (Phase 2):**
+- Effective QUIC DATAGRAM limit is **~1307 bytes**, not 1350
+- QUIC overhead (headers, encryption, framing) reduces usable payload
+- Test verified: 1306 bytes OK, 1308 bytes → BufferTooShort
 
 **E2E Relay Verified (2026-01-19):**
 ```
@@ -230,7 +238,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. 🔄 004: E2E Testing (relay VERIFIED, protocol validation next)
+4. 🔄 004: E2E Testing (Phases 1-2 complete, Phase 4+ remaining)
 
 **Path to P2P (primary goal):**
 - All of above + 005: P2P Hole Punching
