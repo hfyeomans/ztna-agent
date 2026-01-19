@@ -1,7 +1,7 @@
 # Task State: E2E Relay Testing
 
 **Task ID:** 004-e2e-relay-testing
-**Status:** In Progress - Phase 2 Complete, Oracle Review Done, Phase 3.5 Fixes Pending
+**Status:** In Progress - Phase 2 Complete, Phase 3.5 Low Priority Fixes Done
 **Branch:** `feature/004-e2e-relay-testing`
 **Last Updated:** 2026-01-19
 
@@ -17,7 +17,25 @@ Comprehensive end-to-end testing of the relay infrastructure. Validates that tra
 
 ---
 
-## Current Phase: Phase 2 Complete - Protocol Validation Verified ✅
+## Current Phase: Phase 3.5 Low Priority Fixes Complete ✅
+
+### Phase 3.5 Fixes Applied (2026-01-19)
+
+**From Oracle Review:**
+- ✅ Fixed hard-coded `test-service` → uses `$SERVICE_ID`
+- ✅ Scoped `pkill -f` to `$PROJECT_ROOT` (prevents killing unrelated processes)
+- ✅ Added `wait_for_log_message()` function (reliable UDP service readiness)
+- ✅ Fixed testing guide function names
+- ✅ Clarified cert path in testing guide
+
+**Remaining for Future Phases:**
+- Programmatic DATAGRAM sizing via `dgram_max_writable_len()`
+- Boundary tests asserting `RECV:` for end-to-end delivery
+- Coverage gaps (connector registration, malformed headers, service ID edge cases)
+
+---
+
+## Phase 2 Complete - Protocol Validation Verified ✅
 
 ### Phase 2 Test Results (2026-01-19)
 
