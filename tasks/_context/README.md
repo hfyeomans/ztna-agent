@@ -35,7 +35,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 |------|-----------|--------|--------|
 | [001](../001-quic-tunnel-integration/) | Agent QUIC Client | ✅ Complete | `master` |
 | [002](../002-intermediate-server/) | Intermediate Server | ✅ Complete | `master` |
-| [003](../003-app-connector/) | App Connector | 🔄 In Progress | `feature/003-app-connector` |
+| [003](../003-app-connector/) | App Connector | ✅ Complete | `master` |
 | [004](../004-e2e-relay-testing/) | E2E Relay Testing | 🔲 Not Started | `feature/004-e2e-relay-testing` |
 | [005](../005-p2p-hole-punching/) | P2P Hole Punching | 🔲 Not Started | `feature/005-p2p-hole-punching` |
 
