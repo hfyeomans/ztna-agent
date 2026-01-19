@@ -15,7 +15,7 @@ Build the Intermediate System - a QUIC server that relays traffic between Agents
 
 ---
 
-## Current Phase: Phase 6 - Integration Testing
+## Current Phase: Phase 7 - PR Ready
 
 ### Phases Completed
 - ✅ Phase 1: Project Setup (crate, dependencies, TLS certs)
@@ -23,6 +23,7 @@ Build the Intermediate System - a QUIC server that relays traffic between Agents
 - ✅ Phase 3: QAD Implementation (7-byte format, DATAGRAM delivery)
 - ✅ Phase 4: Client Registry (Agent/Connector registration, routing)
 - ✅ Phase 5: DATAGRAM Relay (bidirectional forwarding)
+- ✅ Phase 6: Integration Testing (handshake + QAD verified)
 
 ### What's Done
 - Feature branch created: `feature/002-intermediate-server`
@@ -33,13 +34,13 @@ Build the Intermediate System - a QUIC server that relays traffic between Agents
   - `qad.rs`: build_observed_address() with 7-byte format
   - `registry.rs`: Bidirectional Agent-Connector routing
 - All 6 unit tests passing
-- Committed: `eaf1cfc`
+- Integration test passing:
+  - QUIC handshake completes
+  - QAD OBSERVED_ADDRESS (7 bytes) received and parsed correctly
 
 ### What's Next
-1. Start the server and verify it runs
-2. Test connection with Agent from Task 001
-3. Verify QAD messages are sent and received
-4. Test relay between Agent and Connector (requires Task 003)
+1. Create PR to merge into master
+2. Full relay testing with Agent + Connector (Task 003)
 
 ### Deferred
 - Stateless retry (anti-amplification) - Not needed for MVP localhost testing
@@ -89,6 +90,8 @@ From Oracle review - these MUST match Agent implementation:
 |--------|-------------|
 | `70d1e1d` | Oracle-reviewed plan and todo with critical fixes |
 | `eaf1cfc` | Phase 1-5 implementation complete |
+| `78431ae` | Update state.md to reflect Phase 1-5 completion |
+| `46a5451` | Add integration test for QUIC handshake and QAD |
 
 ---
 
