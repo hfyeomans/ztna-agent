@@ -63,40 +63,48 @@
 
 ---
 
-## Phase 1.5: Code Quality Fixes ← IN PROGRESS
+## Phase 1.5: Code Quality Fixes ✅ COMPLETE
 
-**Based on code review findings - must complete before Phase 2**
+**Commit:** 229448b
 
 ### Rust Fixes (CRITICAL)
-- [ ] Fix connection ID generation - use `ring::rand::SystemRandom` instead of time-based PRNG (lib.rs:307-318)
+- [x] Fix connection ID generation - use `ring::rand::SystemRandom` instead of time-based PRNG
 
 ### Rust Fixes (MEDIUM - Dead Code Removal)
-- [ ] Delete `outbound_queue` field (lib.rs:104)
-- [ ] Delete `current_outbound` field (lib.rs:106)
-- [ ] Delete `OutboundPacket` struct (lib.rs:77-85)
-- [ ] Delete empty if-block in `recv()` (lib.rs:180-183)
+- [x] Delete `outbound_queue` field
+- [x] Delete `current_outbound` field
+- [x] Delete `OutboundPacket` struct
+- [x] Delete empty if-block in `recv()`
 
 ### Swift Fixes (CRITICAL)
-- [ ] Fix data race on `isRunning` flag (use `OSAllocatedUnfairLock` or actor isolation)
+- [x] Fix data race on `isRunning` flag (now uses `OSAllocatedUnfairLock`)
 
 ### Swift Fixes (LOW)
-- [ ] Remove unreachable `default` case in switch (lines 82-83)
+- [x] Changed switch to if-else for C enum handling (compiler required this)
 
-### Performance (Defer to Phase 2.5)
+### Performance (Deferred to Phase 2.5)
 - [ ] Reuse buffer in `recv()` instead of `.to_vec()` (lib.rs:194)
 - [ ] Reuse `scratch_buffer` in `poll()` (lib.rs:213)
 
 ---
 
-## Phase 2: Swift UDP Integration
+## Phase 2: Swift UDP Integration ✅ COMPLETE
 
-- [ ] Create UDP socket/NWConnection in PacketTunnelProvider
-- [ ] Implement send loop: `agent_poll()` → UDP send
-- [ ] Implement receive loop: UDP recv → `agent_recv()`
-- [ ] Add timer for quiche timeout handling
-- [ ] Wire `readPackets` to `agent_send_datagram()`
-- [ ] Handle connection state changes (connected, failed, etc.)
-- [ ] Add server address configuration (hardcoded for MVP)
+**Implementation Verified (2026-01-18):**
+- Tunnel starts, settings applied
+- QUIC agent created successfully
+- Packets captured (ping 1.1.1.1 → 84 bytes)
+- Agent correctly reports "not connected" (no server yet)
+- Packets dropped appropriately when not connected
+
+**Tasks Completed:**
+- [x] Create UDP socket/NWConnection in PacketTunnelProvider
+- [x] Implement send loop: `agent_poll()` → UDP send
+- [x] Implement receive loop: UDP recv → `agent_recv()`
+- [x] Add timer for quiche timeout handling (DispatchSourceTimer)
+- [x] Wire `readPackets` to `agent_send_datagram()`
+- [x] Handle connection state changes (connected, failed, etc.)
+- [x] Add server address configuration (hardcoded 127.0.0.1:4433)
 
 ---
 

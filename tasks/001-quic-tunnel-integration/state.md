@@ -1,26 +1,35 @@
 # Project State: ZTNA Agent
 
-**Last Updated:** 2026-01-18 (Phase 1 Complete + Code Review → Phase 1.5 Fixes)
+**Last Updated:** 2026-01-18 (Phase 2 Complete)
 
 ## Overview
 
 Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encapsulates them in QUIC tunnels, and routes through an intermediate system to application connectors.
 
-## Current Phase: Phase 1.5 Code Quality Fixes → Phase 2 Swift UDP Integration
+## Current Phase: Phase 3 - Intermediate System
 
 ### What's Done
 - ✅ MVP packet interception working
 - ✅ Swift 6.2 / macOS 26+ modernization
 - ✅ Build system fixed (explicit modules disabled for Extension)
-- ✅ **Phase 1: Rust QUIC Client COMPLETE** (commit 958ce3f)
-- ✅ **Code Review Complete** - see `research.md` for findings
+- ✅ **Phase 1: Rust QUIC Client** (commit 958ce3f)
+- ✅ **Phase 1.5: Code Quality Fixes** (commit 229448b)
+  - Fixed Rust connection ID generation (security - now uses `ring::rand::SystemRandom`)
+  - Fixed Swift `isRunning` data race (now uses `OSAllocatedUnfairLock`)
+  - Removed dead code (OutboundPacket struct, outbound_queue, etc.)
+- ✅ **Phase 2: Swift UDP Integration** (commit pending)
+  - Full QUIC agent integration in PacketTunnelProvider
+  - NWConnection for UDP transport
+  - Send/receive loops, timeout handling
+  - Packet tunneling via agent_send_datagram
+  - **Note:** Build verified, functional testing requires Phase 3 server
 
 ### What's Next
-1. **Phase 1.5: Code Quality Fixes** - Address CRITICAL findings from code review
-   - Fix Rust connection ID generation (security)
-   - Fix Swift `isRunning` data race (thread safety)
-   - Remove dead code
-2. **Phase 2: Swift UDP Integration** - Wire Rust agent to NWConnection
+1. **Phase 3: Intermediate System** - Build QUIC server for testing and relay
+   - Create `intermediate-server/` crate
+   - Implement QUIC server with quiche (listens on 127.0.0.1:4433)
+   - Accept agent connections, echo OBSERVED_ADDRESS (QAD)
+   - Enable end-to-end testing of Phase 2 implementation
 - See `todo.md` for detailed tasks
 
 ---
