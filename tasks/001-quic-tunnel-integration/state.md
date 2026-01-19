@@ -173,18 +173,34 @@ private func processPacket(_ data: Data, isIPv6: Bool) {
 
 ## Architecture
 
+### Connection Strategy: Direct P2P First
+
+**Primary goal:** Direct peer-to-peer QUIC connections between Agent and Connector.
+**Intermediate role:** Bootstrap (QAD, signaling) and fallback relay.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CONNECTION PRIORITY                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  PRIORITY 1 (Goal):     Agent ◄────── Direct QUIC ──────► Connector         │
+│  PRIORITY 2 (Fallback): Agent ◄──► Intermediate ◄──► Connector              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Diagram
+
 ```
 ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
 │   macOS Endpoint    │     │  Intermediate System │     │  App Connector      │
 │                     │     │                      │     │                     │
 │  ┌───────────────┐  │     │  - QUIC Server       │     │  - QUIC Client      │
-│  │ SwiftUI App   │  │     │  - Address Discovery │     │  - Decapsulates     │
-│  └───────┬───────┘  │     │  - Relay/Rendezvous  │     │  - Forwards to App  │
-│          │          │     │                      │     │                     │
+│  │ SwiftUI App   │  │     │  - QAD (addr discov) │     │  - Decapsulates     │
+│  └───────┬───────┘  │     │  - Relay (fallback)  │     │  - Forwards to App  │
+│          │          │     │  - Signaling (P2P)   │     │                     │
 │  ┌───────▼───────┐  │     └──────────▲───────────┘     └──────────▲──────────┘
 │  │ NEPacketTun.  │  │                │                            │
 │  │ Provider      │──┼────────────────┴────────────────────────────┘
-│  └───────┬───────┘  │           QUIC Tunnel (planned)
+│  └───────┬───────┘  │           QUIC Tunnel (relay or direct)
 │          │ FFI      │
 │  ┌───────▼───────┐  │
 │  │ Rust Core     │  │
@@ -192,6 +208,13 @@ private func processPacket(_ data: Data, isIPv6: Bool) {
 │  └───────────────┘  │
 └─────────────────────┘
 ```
+
+### Implementation Phases
+
+| Phase | Mode | Status |
+|-------|------|--------|
+| Phase 3-5 | Relay only | Next |
+| Phase 6 | **Direct P2P (goal)** + relay fallback | Future |
 
 ---
 

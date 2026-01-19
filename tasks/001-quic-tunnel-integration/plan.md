@@ -1,8 +1,22 @@
 # Implementation Plan: QUIC Tunnel Integration
 
 **Task ID:** 001-quic-tunnel-integration
-**Status:** In Progress (Build Fixed)
-**Goal:** Integrate `quiche` QUIC library to tunnel intercepted packets through an Intermediate System using QUIC Address Discovery (QAD) instead of STUN.
+**Status:** In Progress (Phase 2 Complete, Phase 3 Next)
+
+## Architectural Goal: Direct P2P First
+
+**Primary objective:** Establish direct peer-to-peer QUIC connections between Agent and App Connector.
+
+**The Intermediate System serves two purposes:**
+1. **Bootstrap:** Initial connection establishment, address discovery (QAD)
+2. **Fallback:** Relay traffic when NAT/firewall prevents direct connection
+
+```
+PRIORITY 1 (Goal):     Agent ◄────── Direct QUIC ──────► Connector
+PRIORITY 2 (Fallback): Agent ◄──► Intermediate ◄──► Connector
+```
+
+**Implementation approach:** Build relay infrastructure first (Phases 3-5), then add hole punching to achieve direct P2P (Phase 6). This ensures we always have a working fallback while optimizing for the direct path.
 
 ---
 
@@ -64,91 +78,36 @@
 
 ---
 
-## Phase 1.5: Code Quality Fixes (Pre-Phase 2)
+## Phase 1.5: Code Quality Fixes ✅ COMPLETE
 
-**Status:** Required before Phase 2 implementation
+**Commit:** 229448b
 
-Based on code review findings (see `research.md`), these issues must be addressed:
+### Rust Fixes
+- [x] **Fix connection ID generation** - now uses `ring::rand::SystemRandom`
+- [x] **Remove dead code** - deleted OutboundPacket, outbound_queue, current_outbound, empty if-block
 
-### 1.5.1 Rust Fixes (CRITICAL/HIGH)
+### Swift Fixes
+- [x] **Fix data race on `isRunning`** - now uses `OSAllocatedUnfairLock<Bool>`
 
-- [ ] **Fix connection ID generation** (CRITICAL - security)
-  - Replace time-based PRNG with `ring::rand::SystemRandom`
-  - Location: `lib.rs:307-318`
-
-- [ ] **Remove dead code** (MEDIUM - cleanliness)
-  - Delete `outbound_queue` field (lib.rs:104)
-  - Delete `current_outbound` field (lib.rs:106)
-  - Delete `OutboundPacket` struct (lib.rs:77-85)
-  - Delete empty if-block (lib.rs:180-183)
-
-- [ ] **Optimize allocations** (HIGH - performance, can defer to Phase 2.5)
-  - Reuse buffer in `recv()` (lib.rs:194)
-  - Reuse `scratch_buffer` in `poll()` (lib.rs:213)
-
-### 1.5.2 Swift Fixes (CRITICAL)
-
-- [ ] **Fix data race on `isRunning`** (CRITICAL - thread safety)
-  - Option A: Add `@MainActor` to class
-  - Option B: Use `OSAllocatedUnfairLock<Bool>`
-  - Location: `PacketTunnelProvider.swift:8`
-
-- [ ] **Remove dead code** (LOW)
-  - Remove unreachable `default` case (lines 82-83)
+### Deferred to Phase 2.5
+- [ ] Buffer reuse optimizations in `recv()` and `poll()`
 
 ---
 
-## Phase 2: Swift Integration — UDP I/O (IN PROGRESS)
+## Phase 2: Swift Integration — UDP I/O ✅ COMPLETE
 
-### 2.1 Agent Lifecycle in Swift
-- [ ] Add `agent: OpaquePointer?` property to PacketTunnelProvider
-- [ ] Create agent in `startTunnel()` via `agent_create()`
-- [ ] Destroy agent in `stopTunnel()` via `agent_destroy()`
-- [ ] Add server address configuration (hardcoded for MVP: e.g., "127.0.0.1:4433")
+**Commit:** 286df2a
+**Verified:** Tunnel starts, packets captured, agent correctly reports "not connected" (expected - no server yet)
 
-### 2.2 Create UDP Socket
-- [ ] Create `NWConnection` with UDP protocol for QUIC transport
-- [ ] Configure for `requiredLocalEndpoint` on ephemeral port
-- [ ] Handle connection state changes (ready, failed, cancelled)
-- [ ] Store as `udpConnection: NWConnection?` property
-
-### 2.3 Connect to QUIC Server
-- [ ] Call `agent_connect(agent, host, port)` after UDP ready
-- [ ] Handle connection result codes
-
-### 2.4 Implement Send Loop (agent → network)
-- [ ] Create polling function to call `agent_poll()`
-- [ ] When data available, send via `udpConnection.send()`
-- [ ] Continue polling until `AgentResultNoData`
-- [ ] Trigger after: connection, packet send, timeout
-
-### 2.5 Implement Receive Loop (network → agent)
-- [ ] Set up `udpConnection.receiveMessage()` handler
-- [ ] On receive: call `agent_recv(data, from_ip, from_port)`
-- [ ] Re-arm receive handler for next packet
-- [ ] Trigger send loop after processing
-
-### 2.6 Timer Handling
-- [ ] Create `DispatchSourceTimer` for quiche timeouts
-- [ ] Call `agent_timeout_ms()` to get next timeout duration
-- [ ] On timer fire: call `agent_on_timeout()`, then poll
-- [ ] Reschedule timer after each timeout
-
-### 2.7 Packet Tunneling
-- [ ] In `processPacket()`, for `PacketActionForward`:
-  - Call `agent_send_datagram(agent, data, len)`
-  - Trigger send loop to flush QUIC packets
-- [ ] Handle `AgentResultNotConnected` gracefully
-
-### 2.8 Connection State Monitoring
-- [ ] Periodically check `agent_get_state()`
-- [ ] Log state transitions
-- [ ] Handle disconnection/error states
-
-### 2.9 Receive Tunneled Packets (from server)
-- [ ] Process received DATAGRAMs in agent (handled in Rust)
-- [ ] For MVP: log received tunneled packets
-- [ ] For full: write back to `packetFlow.writePackets()`
+### Implementation Summary
+- [x] Agent lifecycle (create/destroy) in PacketTunnelProvider
+- [x] NWConnection UDP socket for QUIC transport
+- [x] Send loop: `agent_poll()` → UDP send
+- [x] Receive loop: UDP recv → `agent_recv()`
+- [x] DispatchSourceTimer for quiche timeouts
+- [x] Packet tunneling via `agent_send_datagram()`
+- [x] Connection state monitoring and logging
+- [x] Server address hardcoded (127.0.0.1:4433 for local testing)
 
 ---
 
@@ -200,16 +159,45 @@ Based on code review findings (see `research.md`), these issues must be addresse
 
 ---
 
-## Phase 6: P2P Optimization (Future)
+## Phase 6: Direct P2P via Hole Punching ← PRIMARY GOAL
 
-### 6.1 Hole punching
-- Exchange observed addresses via Intermediate
-- Attempt direct connection between Agent and Connector
-- Fall back to relay if direct fails
+**This phase achieves the architectural goal: direct peer-to-peer connectivity.**
 
-### 6.2 Connection migration
-- Use quiche connection migration for seamless handoff
-- Handle network changes (WiFi → cellular)
+### 6.1 Address Exchange Protocol
+- [ ] Define message format for peer address exchange via Intermediate
+- [ ] Agent receives Connector's public IP:Port (from QAD on Connector's connection)
+- [ ] Connector receives Agent's public IP:Port (from QAD on Agent's connection)
+- [ ] Intermediate acts as signaling channel only
+
+### 6.2 Simultaneous Open (Hole Punching)
+- [ ] Agent sends QUIC packets to Connector's public IP:Port
+- [ ] Connector sends QUIC packets to Agent's public IP:Port
+- [ ] Both send simultaneously to create NAT bindings
+- [ ] Implement retry logic with exponential backoff
+- [ ] Detect successful direct path establishment
+
+### 6.3 QUIC Connection Migration
+- [ ] Migrate existing relay connection to direct path
+- [ ] Use quiche connection migration API
+- [ ] Verify packet delivery continues seamlessly
+- [ ] Handle migration failures gracefully (fall back to relay)
+
+### 6.4 Path Selection Logic
+- [ ] Prefer direct path when available
+- [ ] Monitor path quality (latency, packet loss)
+- [ ] Automatic fallback to relay if direct path degrades
+- [ ] Re-attempt hole punch on network changes (WiFi → cellular)
+
+### 6.5 NAT Type Detection (Optional Enhancement)
+- [ ] Detect NAT type (Full Cone, Restricted, Symmetric)
+- [ ] Skip hole punch attempts for Symmetric NAT (will fail)
+- [ ] Optimize hole punch timing based on NAT characteristics
+
+### Success Criteria for Phase 6
+- [ ] Agent and Connector establish direct QUIC connection
+- [ ] Intermediate only used for initial signaling
+- [ ] Latency matches direct network path (no relay hop)
+- [ ] Graceful fallback to relay when hole punch fails
 
 ---
 
@@ -237,7 +225,14 @@ Based on code review findings (see `research.md`), these issues must be addresse
 
 ## Success Criteria
 
+### Relay Mode (Phases 3-5)
 1. Agent connects to Intermediate via QUIC
 2. Agent learns its public IP via QAD (no STUN)
-3. Ping to routed IP reaches App Connector
-4. Round-trip latency < 50ms on local network
+3. Ping to routed IP reaches App Connector via relay
+4. Round-trip latency < 100ms via relay
+
+### Direct P2P Mode (Phase 6 - Primary Goal)
+5. Agent and Connector establish direct QUIC connection via hole punching
+6. Intermediate used only for initial signaling, not data relay
+7. Round-trip latency matches direct network path (< 50ms local, varies by distance)
+8. Automatic fallback to relay when direct path unavailable

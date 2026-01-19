@@ -4,6 +4,96 @@
 
 The Zero Trust Network Access (ZTNA) Agent provides secure, identity-aware access to private applications without exposing them to the public internet. Traffic is tunneled through QUIC, with NAT traversal handled natively via **QUIC Address Discovery (QAD)** — eliminating the need for traditional STUN/TURN servers.
 
+---
+
+## Connection Strategy: Direct P2P First
+
+**The primary architectural goal is direct peer-to-peer connectivity.** The Intermediate System serves as bootstrap and fallback, not the intended steady-state data path.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CONNECTION PRIORITY                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  PRIORITY 1: DIRECT P2P (preferred, lowest latency)                         │
+│  ════════════════════════════════════════════════                           │
+│     Agent ◄────────────── QUIC Direct ──────────────► App Connector         │
+│                                                                              │
+│     • Best performance (no relay hop)                                        │
+│     • No load on Intermediate System                                         │
+│     • Requires successful NAT hole punching                                  │
+│     • Uses QUIC connection migration from relay to direct                    │
+│                                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  PRIORITY 2: RELAYED (fallback, always works)                               │
+│  ════════════════════════════════════════════                               │
+│     Agent ◄───► Intermediate System ◄───► App Connector                     │
+│                                                                              │
+│     • Guaranteed connectivity (works behind strict NAT/firewall)             │
+│     • Higher latency (extra hop through relay)                               │
+│     • Intermediate bears relay bandwidth cost                                │
+│     • Used when hole punching fails or during initial connection             │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Connection Lifecycle
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CONNECTION LIFECYCLE                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  PHASE 1: BOOTSTRAP (via Intermediate)                                       │
+│  ─────────────────────────────────────                                       │
+│  1. Agent connects to Intermediate System                                    │
+│  2. App Connector connects to Intermediate System                            │
+│  3. Both learn their public IP:Port via QAD                                  │
+│  4. Intermediate facilitates initial routing (relay mode)                    │
+│  5. Data flows: Agent ↔ Intermediate ↔ Connector                            │
+│                                                                              │
+│  PHASE 2: HOLE PUNCH ATTEMPT (parallel to data flow)                         │
+│  ───────────────────────────────────────────────────                         │
+│  1. Intermediate shares peer addresses with both sides                       │
+│  2. Agent sends QUIC packets directly to Connector's public IP               │
+│  3. Connector sends QUIC packets directly to Agent's public IP               │
+│  4. If NAT bindings align → direct path opens                                │
+│                                                                              │
+│  PHASE 3: CONNECTION MIGRATION (on successful hole punch)                    │
+│  ────────────────────────────────────────────────────────                    │
+│  1. QUIC connection migrates from relay path to direct path                  │
+│  2. Intermediate drops out of data path (signaling only)                     │
+│  3. Data flows: Agent ↔ Connector (direct, optimal latency)                  │
+│                                                                              │
+│  FALLBACK: CONTINUE RELAY (if hole punch fails)                              │
+│  ──────────────────────────────────────────────                              │
+│  • Strict NAT/firewall prevents direct connection                            │
+│  • Continue using relay path indefinitely                                    │
+│  • Periodically retry hole punch on network changes                          │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation Phases
+
+| Phase | Milestone | Connection Mode |
+|-------|-----------|-----------------|
+| **Phase 2** ✅ | Agent UDP integration | N/A (no server yet) |
+| **Phase 3** | Intermediate System relay | Relay only |
+| **Phase 4** | App Connector | Relay only |
+| **Phase 5** | End-to-end testing | Relay only |
+| **Phase 6** | **Hole punching + migration** | **Direct preferred, relay fallback** |
+
+### Why This Matters
+
+| Metric | Relay Mode | Direct P2P |
+|--------|------------|------------|
+| Latency | +20-100ms (relay hop) | Optimal |
+| Bandwidth Cost | Intermediate pays | Peers only |
+| Scalability | Limited by relay capacity | Unlimited |
+| Privacy | Intermediate sees metadata | End-to-end only |
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                              ZTNA Architecture                                   │
