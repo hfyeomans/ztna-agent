@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__codex-cli__codex",
+      "Bash(codex -p:*)",
+      "mcp__codex-cli__review",
+      "Bash(rg:*)",
+      "Bash(xcodebuild:*)",
+      "Bash(nm:*)",
+      "Bash(find:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

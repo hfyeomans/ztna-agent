@@ -4,10 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["staticlib"]
 
 [dependencies]
 etherparse = "0.13"
 libc = "0.2"
 log = "0.4"
-env_logger = "0.10"
+
+# QUIC implementation
+quiche = "0.22"
+
+# For ring crypto (quiche dependency) - ensure static linking
+ring = "0.17"
+
+# Removed env_logger - not useful in Network Extensions

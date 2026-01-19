@@ -1,0 +1,173 @@
+# Implementation Plan: QUIC Tunnel Integration
+
+**Task ID:** 001-quic-tunnel-integration
+**Status:** In Progress (Build Fixed)
+**Goal:** Integrate `quiche` QUIC library to tunnel intercepted packets through an Intermediate System using QUIC Address Discovery (QAD) instead of STUN.
+
+---
+
+## Phase 0: Build System Fix ✅ COMPLETE
+
+**Problem:** swift-frontend hangs during compilation with explicit modules enabled.
+**Root Cause:** Compiler deadlock between Explicit Modules and NonisolatedNonsendingByDefault.
+**Resolution:** `SWIFT_ENABLE_EXPLICIT_MODULES = NO` + clear caches.
+**Research:** See `research.md` for full analysis.
+
+### 0.1 Environment Reset ✅
+- [x] Clear DerivedData: `rm -rf ~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*`
+- [x] Clear Module Cache: `rm -rf ~/Library/Developer/Xcode/ModuleCache.noindex/`
+
+### 0.2 Build Setting Fixes ✅
+- [x] `SWIFT_ENABLE_EXPLICIT_MODULES = NO` already set for Extension target
+- [x] No bridging header was set (added back for FFI)
+
+### 0.3 Verify Build ✅
+- [x] Build from xcodebuild: BUILD SUCCEEDED
+- [x] No swift-frontend hang
+- [x] Test: start tunnel, ping 1.1.1.1 - packets captured
+
+### 0.4 Re-enable Rust FFI ✅
+- [x] Added bridging header to Extension target (Debug + Release)
+- [x] Restored FFI calls in `PacketTunnelProvider.swift`
+- [x] Verified: `_process_packet` symbol linked, packets processed
+
+### 0.5 Commit & Document
+- [ ] Commit all modernization changes with build fix
+- [ ] File Apple Feedback about explicit modules + NetworkExtension hang (optional)
+
+---
+
+## Phase 1: Rust Core — QUIC Client (Agent Side)
+
+### 1.1 Add quiche dependency
+- Add `quiche` to `core/packet_processor/Cargo.toml`
+- Configure for static linking (no BoringSSL dynamic deps)
+- Build and verify compilation
+
+### 1.2 Create Agent QUIC state machine
+- Implement `Agent` struct with lifecycle:
+  - `agent_create() -> *mut Agent`
+  - `agent_destroy(agent: *mut Agent)`
+  - `agent_connect(agent, server_addr) -> Result`
+  - `agent_process_packet(agent, data, len) -> Action`
+  - `agent_poll(agent) -> Vec<UdpPacket>` (outbound QUIC packets)
+  - `agent_recv(agent, data, len)` (inbound QUIC packets from network)
+
+### 1.3 QUIC DATAGRAM support
+- Use QUIC DATAGRAM frames for IP packet encapsulation (not streams)
+- Avoids head-of-line blocking for UDP-like traffic
+- Configure `quiche::Config` with `enable_dgram(true, ...)`
+
+### 1.4 Panic safety
+- Wrap all FFI entry points with `std::panic::catch_unwind`
+- Return safe defaults on panic
+
+---
+
+## Phase 2: Swift Integration — UDP I/O
+
+### 2.1 Create UDP socket in extension
+- Use `NWConnection` or raw BSD sockets for UDP
+- Bind to ephemeral port for QUIC transport
+
+### 2.2 Wire QUIC I/O loop
+- Call `agent_poll()` to get outbound QUIC packets → send via UDP
+- Receive UDP packets → call `agent_recv()` to feed quiche
+- Drive quiche timers (call `agent_on_timeout()` periodically)
+
+### 2.3 Encapsulate intercepted packets
+- On `readPackets`: pass IP packet to `agent_send_datagram()`
+- quiche queues it as a DATAGRAM frame
+- Poll and send via UDP socket
+
+---
+
+## Phase 3: Intermediate System (Relay Server)
+
+### 3.1 Create standalone Rust binary
+- New crate: `intermediate-server/`
+- Uses `quiche` as QUIC server
+- Listens on public UDP port
+
+### 3.2 Implement Address Discovery (QAD)
+- On client connect: observe source IP:Port from UDP packet
+- Send `OBSERVED_ADDRESS` in a custom application frame or initial stream
+- Client now knows its public address without STUN
+
+### 3.3 Basic relay mode
+- Accept connections from Agents and Connectors
+- Route DATAGRAMs between matched pairs
+- Use connection metadata (auth token, destination ID) for routing
+
+---
+
+## Phase 4: Application Connector
+
+### 4.1 Create connector binary
+- New crate: `app-connector/`
+- QUIC client that dials Intermediate System
+- Registers as destination for specific service
+
+### 4.2 Decapsulate and forward
+- Receive DATAGRAM (encapsulated IP packet)
+- For MVP: extract payload and forward to localhost TCP/UDP port
+- For full implementation: inject into local TUN or NAT
+
+---
+
+## Phase 5: End-to-End Testing
+
+### 5.1 Local testing setup
+- Run Intermediate System locally
+- Run App Connector pointing to local service (e.g., `nc -l 8080`)
+- Connect Agent, send traffic to routed IP
+- Verify data reaches local service
+
+### 5.2 NAT testing
+- Deploy Intermediate System to cloud (public IP)
+- Test Agent behind NAT
+- Verify Address Discovery reports correct public IP
+
+---
+
+## Phase 6: P2P Optimization (Future)
+
+### 6.1 Hole punching
+- Exchange observed addresses via Intermediate
+- Attempt direct connection between Agent and Connector
+- Fall back to relay if direct fails
+
+### 6.2 Connection migration
+- Use quiche connection migration for seamless handoff
+- Handle network changes (WiFi → cellular)
+
+---
+
+## Dependencies
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `quiche` | latest | QUIC protocol implementation |
+| `ring` | (quiche dep) | Cryptography |
+| `mio` | optional | Event loop for server |
+| `etherparse` | 0.13 | IP packet parsing |
+
+---
+
+## Risks & Mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| quiche static build complexity | Use vendored BoringSSL, test on CI |
+| DATAGRAM MTU issues | Fragment large packets or configure tunnel MTU |
+| Timer driving in extension | Use `DispatchSource.timer` in Swift |
+| Sandbox restrictions | All I/O through standard APIs (NWConnection/sockets) |
+
+---
+
+## Success Criteria
+
+1. Agent connects to Intermediate via QUIC
+2. Agent learns its public IP via QAD (no STUN)
+3. Ping to routed IP reaches App Connector
+4. Round-trip latency < 50ms on local network
