@@ -12,6 +12,9 @@
 //! Phase 4 - Advanced Testing:
 //!   quic-test-client --service test --payload-size 100 --payload-pattern random --repeat 10
 //!   quic-test-client --service test --burst 50 --payload-size 100
+//!
+//! Phase 6 - Performance Metrics:
+//!   quic-test-client --service test --measure-rtt --rtt-count 100 --dst 127.0.0.1:9999
 
 use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, SocketAddrV4};
@@ -83,6 +86,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
+    // Phase 6: Performance metrics options
+    let measure_rtt = args.iter().any(|a| a == "--measure-rtt");
+    let rtt_count: usize = parse_arg(&args, "--rtt-count")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    let measure_handshake = args.iter().any(|a| a == "--measure-handshake");
+
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print_usage();
         return Ok(());
@@ -109,13 +119,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut client = QuicTestClient::new(server_addr, &alpn_bytes)?;
 
-    // Connect and establish QUIC session
+    // Connect and establish QUIC session (with optional handshake timing)
+    let handshake_start = Instant::now();
     client.connect()?;
     match client.wait_for_connection(Duration::from_secs(5)) {
         Ok(_) => {
+            let handshake_elapsed = handshake_start.elapsed();
             if expect_connect_fail {
                 log::error!("Connection succeeded but expected failure!");
                 std::process::exit(1);
+            }
+            if measure_handshake {
+                let handshake_us = handshake_elapsed.as_micros();
+                log::info!("Handshake completed in {} µs ({:.3} ms)", handshake_us, handshake_us as f64 / 1000.0);
+                println!("HANDSHAKE_US:{}", handshake_us);
             }
         }
         Err(e) => {
@@ -168,6 +185,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         client.register_as_agent(svc)?;
         // Brief wait for registration to propagate
         client.wait_for_responses(Duration::from_millis(200))?;
+    }
+
+    // Phase 6: RTT measurement mode
+    if measure_rtt {
+        let size = payload_size.unwrap_or(64);
+        let rng = SystemRandom::new();
+        let pattern_str = payload_pattern.as_deref();
+
+        let dst: SocketAddrV4 = dst_addr.as_ref()
+            .ok_or("RTT measurement requires --dst address")?
+            .parse()
+            .map_err(|_| "Invalid --dst address")?;
+        let src: SocketAddrV4 = src_addr
+            .clone()
+            .unwrap_or_else(|| "10.0.0.100:12345".to_string())
+            .parse()
+            .map_err(|_| "Invalid --src address")?;
+
+        log::info!("RTT measurement: {} samples, {} byte payload", rtt_count, size);
+
+        let mut rtts: Vec<u128> = Vec::with_capacity(rtt_count);
+        let mut timeouts = 0;
+
+        for i in 0..rtt_count {
+            let payload = generate_payload(size, pattern_str, &rng);
+            let packet = build_ip_udp_packet(src, dst, &payload);
+
+            let send_time = Instant::now();
+            client.send_datagram(&packet)?;
+
+            // Wait for response with timeout
+            match client.wait_for_first_response(Duration::from_millis(1000)) {
+                Ok(true) => {
+                    let rtt_us = send_time.elapsed().as_micros();
+                    rtts.push(rtt_us);
+                    log::debug!("RTT sample {}: {} µs", i + 1, rtt_us);
+                }
+                Ok(false) => {
+                    timeouts += 1;
+                    log::debug!("RTT sample {}: timeout", i + 1);
+                }
+                Err(e) => {
+                    log::warn!("RTT sample {} error: {}", i + 1, e);
+                    timeouts += 1;
+                }
+            }
+
+            // Small delay between samples to avoid overwhelming
+            if i + 1 < rtt_count {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        // Calculate statistics
+        if !rtts.is_empty() {
+            rtts.sort();
+            let count = rtts.len();
+            let min = rtts[0];
+            let max = rtts[count - 1];
+            let sum: u128 = rtts.iter().sum();
+            let avg = sum / count as u128;
+            let p50 = rtts[count * 50 / 100];
+            let p95 = rtts[count * 95 / 100];
+            let p99 = rtts[(count * 99 / 100).min(count - 1)];
+
+            log::info!("RTT Statistics ({} samples, {} timeouts):", count, timeouts);
+            log::info!("  Min: {} µs ({:.3} ms)", min, min as f64 / 1000.0);
+            log::info!("  Max: {} µs ({:.3} ms)", max, max as f64 / 1000.0);
+            log::info!("  Avg: {} µs ({:.3} ms)", avg, avg as f64 / 1000.0);
+            log::info!("  p50: {} µs ({:.3} ms)", p50, p50 as f64 / 1000.0);
+            log::info!("  p95: {} µs ({:.3} ms)", p95, p95 as f64 / 1000.0);
+            log::info!("  p99: {} µs ({:.3} ms)", p99, p99 as f64 / 1000.0);
+
+            // Output for parsing
+            println!("RTT_COUNT:{}", count);
+            println!("RTT_TIMEOUTS:{}", timeouts);
+            println!("RTT_MIN_US:{}", min);
+            println!("RTT_MAX_US:{}", max);
+            println!("RTT_AVG_US:{}", avg);
+            println!("RTT_P50_US:{}", p50);
+            println!("RTT_P95_US:{}", p95);
+            println!("RTT_P99_US:{}", p99);
+        } else {
+            log::error!("No successful RTT samples collected ({} timeouts)", timeouts);
+            println!("RTT_COUNT:0");
+            println!("RTT_TIMEOUTS:{}", timeouts);
+        }
+
+        return Ok(());
     }
 
     if interactive {
@@ -343,6 +449,11 @@ fn print_usage() {
     eprintln!("  --burst N            Burst mode: send N packets as fast as possible");
     eprintln!("  --verify-echo        Verify echoed responses match sent data");
     eprintln!();
+    eprintln!("Phase 6 - Performance Metrics:");
+    eprintln!("  --measure-rtt        Measure round-trip time (outputs RTT_* statistics)");
+    eprintln!("  --rtt-count N        Number of RTT samples to collect (default: 10)");
+    eprintln!("  --measure-handshake  Measure QUIC handshake time (outputs HANDSHAKE_US)");
+    eprintln!();
     eprintln!("  -h, --help         Show this help");
     eprintln!();
     eprintln!("Examples:");
@@ -361,6 +472,12 @@ fn print_usage() {
     eprintln!();
     eprintln!("  # Phase 4: Burst stress test (50 packets)");
     eprintln!("  quic-test-client --service test-service --burst 50 --payload-size 100 --dst 127.0.0.1:9999");
+    eprintln!();
+    eprintln!("  # Phase 6: Measure RTT with 100 samples");
+    eprintln!("  quic-test-client --service test-service --measure-rtt --rtt-count 100 --dst 127.0.0.1:9999");
+    eprintln!();
+    eprintln!("  # Phase 6: Measure handshake time");
+    eprintln!("  quic-test-client --measure-handshake --service test-service --send-udp 'test' --dst 127.0.0.1:9999");
     eprintln!();
     eprintln!("  # Just connect (no relay, receives QAD only)");
     eprintln!("  quic-test-client --server 127.0.0.1:4433");
@@ -818,6 +935,54 @@ impl QuicTestClient {
 
         log::info!("Collected {} responses", responses.len());
         Ok(responses)
+    }
+
+    /// Wait for first data response (for RTT measurement)
+    /// Returns Ok(true) if data response received, Ok(false) if timeout, Err on error
+    /// Ignores QAD responses (7 bytes starting with 0x01)
+    fn wait_for_first_response(&mut self, timeout: Duration) -> Result<bool, Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let mut events = Events::with_capacity(64);
+
+        while start.elapsed() < timeout {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let poll_timeout = self.conn.as_ref()
+                .and_then(|c| c.timeout())
+                .map(|t| t.min(remaining))
+                .or(Some(remaining.min(Duration::from_millis(10))));
+
+            self.poll.poll(&mut events, poll_timeout)?;
+
+            // Process incoming
+            self.process_socket()?;
+
+            // Check for DATAGRAMs
+            if let Some(ref mut conn) = self.conn {
+                let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
+                while let Ok(len) = conn.dgram_recv(&mut buf) {
+                    // Skip QAD responses (7 bytes starting with 0x01)
+                    if len == 7 && buf[0] == 0x01 {
+                        log::trace!("Ignoring QAD response for RTT measurement");
+                        continue;
+                    }
+                    // Data response received - RTT complete
+                    log::trace!("RTT response: {} bytes", len);
+                    return Ok(true);
+                }
+
+                conn.on_timeout();
+            }
+
+            self.flush()?;
+
+            if let Some(ref conn) = self.conn {
+                if conn.is_closed() {
+                    return Err("Connection closed".into());
+                }
+            }
+        }
+
+        Ok(false)  // Timeout
     }
 
     fn run_interactive(&mut self) -> Result<(), Box<dyn std::error::Error>> {

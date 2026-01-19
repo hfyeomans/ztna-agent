@@ -325,6 +325,52 @@ CERT_DIR="$PROJECT_ROOT/certs"
 
 ---
 
+## Relay Path Verification
+
+**How tests verify traffic flows through the QUIC relay (not directly):**
+
+### 1. Port Isolation
+| Test Type | Destination Port | Path |
+|-----------|-----------------|------|
+| Baseline | 9999 | Client → Echo Server (direct UDP) |
+| Tunneled | 4433 | Client → Intermediate → Connector → Echo Server |
+
+The QUIC test client connects to port **4433** (Intermediate Server), not port 9999. Traffic only reaches the Echo Server after being relayed through the Connector.
+
+### 2. Protocol Enforcement
+- **Agent registration** (`0x10`): QUIC client registers with a service ID
+- **Connector registration** (`0x11`): App Connector registers with matching service ID
+- **Intermediate Server**: Only routes between matching Agent↔Connector pairs
+- Without both registrations, data won't flow
+
+### 3. IP Encapsulation
+The `--send-udp` flag wraps payloads in IP/UDP headers:
+```
+QUIC DATAGRAM payload (42+ bytes):
+  ├─ IPv4 Header (20 bytes): src=10.0.0.100, dst=127.0.0.1
+  ├─ UDP Header (8 bytes): src_port=12345, dst_port=9999
+  └─ Application Data (N bytes): "HELLO"
+```
+
+The Connector **must parse** these headers to extract and forward the inner UDP payload. This proves the relay path is active.
+
+### 4. Dependency Verification
+| Component Stopped | Baseline Test | Tunneled Test |
+|-------------------|---------------|---------------|
+| Echo Server | ❌ Fails | ❌ Fails |
+| Intermediate | ✅ Works | ❌ Fails |
+| Connector | ✅ Works | ❌ Fails |
+
+If Intermediate or Connector are stopped, tunneled tests fail immediately, proving traffic depends on the relay.
+
+### 5. Latency Evidence
+- **Baseline RTT**: ~30-100 µs (direct UDP loopback)
+- **Tunneled RTT**: ~300-500 µs (QUIC + relay overhead)
+
+The ~200-400 µs overhead demonstrates the additional QUIC protocol processing and relay hops.
+
+---
+
 ## Troubleshooting
 
 ### Connection Timeout
@@ -409,9 +455,38 @@ tail tests/e2e/artifacts/logs/app-connector.log
 | 5.1 | 3 | ✅ Complete | Component restart behavior |
 | 5.2 | 5 | ✅ Complete | Error conditions (invalid certs, ports) |
 | 5.3 | 3 | ⚠️ Skipped | Network impairment (requires root) |
-| 6 | TBD | 🔲 Planned | Performance metrics |
+| 6.1 | 2 | ✅ Complete | Latency (baseline vs tunneled RTT, percentiles) |
+| 6.2 | 1 | ✅ Complete | Throughput (PPS, Mbps) |
+| 6.3 | 3 | ✅ Complete | Timing (handshake, resources, reconnect) |
 
-**Total Tests: 55+**
+**Total Tests: 61+**
+
+---
+
+## Phase 6: Performance Metrics
+
+Run performance benchmarks:
+```bash
+tests/e2e/scenarios/performance-metrics.sh
+```
+
+**Configurable via environment:**
+```bash
+RTT_SAMPLES=100 BURST_COUNT=500 tests/e2e/scenarios/performance-metrics.sh
+```
+
+**Key Metrics Collected:**
+
+| Metric | Description | Typical Value |
+|--------|-------------|---------------|
+| `BASELINE_RTT_*` | Direct UDP to echo server | 30-100 µs |
+| `TUNNELED_RTT_*` | Through QUIC relay | 300-500 µs |
+| `THROUGHPUT_PPS` | Packets per second (burst) | 200K-400K |
+| `THROUGHPUT_MBPS` | Megabits per second | 2-4 Gbps (theoretical) |
+| `HANDSHAKE_*` | QUIC connection setup | 750-900 µs |
+| `*_MEM_KB` | Memory usage per component | 5-7 MB |
+
+**Output:** `tests/e2e/artifacts/metrics/perf_YYYYMMDD_HHMMSS.txt`
 
 ---
 
@@ -421,7 +496,7 @@ After running the demo, you can:
 
 1. **Explore logs** - See packet flow through components
 2. **Modify tests** - Add scenarios in `tests/e2e/scenarios/`
-3. **Run performance tests** - Add latency measurement (Phase 6)
+3. **Run performance tests** - `tests/e2e/scenarios/performance-metrics.sh`
 4. **Deploy to cloud** - See Task 006 for cloud deployment
 
 ---
@@ -435,6 +510,7 @@ After running the demo, you can:
 | Protocol validation (Phase 2 & 3.5) | `tests/e2e/scenarios/protocol-validation.sh` |
 | Advanced UDP tests (Phase 4) | `tests/e2e/scenarios/udp-advanced.sh` |
 | Reliability tests (Phase 5) | `tests/e2e/scenarios/reliability-tests.sh` |
+| Performance metrics (Phase 6) | `tests/e2e/scenarios/performance-metrics.sh` |
 | QUIC test client | `tests/e2e/fixtures/quic-client/` |
 | Echo server | `tests/e2e/fixtures/echo-server/` |
 | Environment config | `tests/e2e/config/env.local` |

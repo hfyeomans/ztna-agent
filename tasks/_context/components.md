@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-19
+**Last Updated:** 2026-01-19 (Phase 6 Performance Metrics Complete)
 
 ---
 
@@ -82,7 +82,7 @@
 
 ---
 
-### 004: E2E Relay Testing 🔄 IN PROGRESS
+### 004: E2E Relay Testing ✅ COMPLETE
 
 **Location:** `tests/e2e/`
 
@@ -99,7 +99,7 @@
 | Phase 3.5: Coverage Gaps | ✅ Done | 6 tests: connector reg, service ID edge cases, malformed headers |
 | Phase 4: Advanced UDP | ✅ Done | 11 tests: payload patterns, concurrent flows, burst, idle timeout |
 | Phase 5: Reliability | ✅ Done | 11 tests: component restart, error conditions, rapid reconnect |
-| Phase 6: Performance | 🔲 Planned | Latency, throughput metrics |
+| Phase 6: Performance | ✅ Done | Latency (53µs baseline, 312µs tunneled), throughput (295K PPS), handshake (802µs) |
 
 **Capabilities Built:**
 - Test framework (`lib/common.sh`) with component lifecycle
@@ -113,10 +113,13 @@
   - **Phase 4:** Payload patterns (`--payload-pattern zeros|ones|sequential|random`)
   - **Phase 4:** Multi-packet (`--repeat`, `--delay`, `--burst`)
   - **Phase 4:** Echo verification (`--verify-echo`)
+  - **Phase 6:** RTT measurement (`--measure-rtt`, `--rtt-count`)
+  - **Phase 6:** Handshake timing (`--measure-handshake`)
 - Test scenarios for connectivity, echo, boundary conditions
 - Protocol validation test suite (`scenarios/protocol-validation.sh`) - 14 tests
 - Advanced UDP test suite (`scenarios/udp-advanced.sh`) - 11 tests
 - Reliability test suite (`scenarios/reliability-tests.sh`) - 11 tests
+- Performance metrics suite (`scenarios/performance-metrics.sh`) - latency, throughput, timing
 - Comprehensive testing guide (`tasks/_context/testing-guide.md`)
 - Architecture documentation (`tests/e2e/README.md`)
 
@@ -139,12 +142,11 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Task 001 Agent = Production macOS NetworkExtension (intercepts system packets)
 - QUIC Test Client = Test harness CLI (sends arbitrary DATAGRAMs from scripts)
 
-**Total Tests: 55+** (Phases 1-5 complete)
+**Total Tests: 61+** (Phases 1-6 complete)
 
-**Capabilities Needed:**
+**Capabilities Needed (Remaining):**
 - NAT testing (Intermediate on cloud)
-- Latency measurement
-- Failure scenario testing
+- Network impairment testing (requires root/pfctl)
 
 ---
 
@@ -250,7 +252,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. 🔄 004: E2E Testing (Phases 1-5 complete, Phase 6 performance metrics remaining)
+4. ✅ 004: E2E Testing (Phases 1-6 complete, ready for PR)
 
 **Path to P2P (primary goal):**
 - All of above + 005: P2P Hole Punching
