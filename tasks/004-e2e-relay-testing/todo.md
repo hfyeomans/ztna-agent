@@ -104,15 +104,15 @@
 > **Oracle Review:** 2026-01-19 - See `research.md` for full findings
 
 ### 3.5.1 Medium Priority Fixes
-- [ ] Fix hard-coded `test-service` in `protocol-validation.sh:150-154` → use `$SERVICE_ID`
+- [x] Fix hard-coded `test-service` in `protocol-validation.sh:150-154` → use `$SERVICE_ID`
 - [ ] Replace hard-coded DATAGRAM sizes with programmatic sizing via `dgram_max_writable_len()`
 
 ### 3.5.2 Low Priority Fixes
 - [ ] Enhance boundary tests to assert `RECV:` (end-to-end delivery, not just queue)
-- [ ] Replace `pkill -f` with PID-based cleanup (track known PIDs only)
-- [ ] Replace `nc -z -u` readiness check with probe/echo or log-based signal
-- [ ] Fix testing guide function names (`start_intermediate_server` → `start_intermediate`)
-- [ ] Clarify canonical cert path in testing guide (`certs/` vs `intermediate-server/certs`)
+- [x] Replace `pkill -f` with PID-based cleanup (scoped to `$PROJECT_ROOT`)
+- [x] Add `wait_for_log_message` as reliable alternative to `nc -z -u`
+- [x] Fix testing guide function names (`start_intermediate_server` → `start_intermediate`)
+- [x] Clarify canonical cert path in testing guide (`certs/` vs `intermediate-server/certs`)
 
 ### 3.5.3 Coverage Gaps to Address
 - [ ] Add connector registration (0x11) validation tests

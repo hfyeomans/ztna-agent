@@ -150,7 +150,7 @@ test_registration_valid() {
     local output
     if output=$("$QUIC_CLIENT_BIN" \
         --server "$INTERMEDIATE_HOST:$INTERMEDIATE_PORT" \
-        --service "test-service" \
+        --service "$SERVICE_ID" \
         --wait 1000 2>&1); then
 
         if echo "$output" | grep -q "Registering as Agent"; then

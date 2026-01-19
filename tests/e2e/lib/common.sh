@@ -275,9 +275,10 @@ stop_all_components() {
         stop_component "$name"
     done
 
-    # Also kill any orphaned processes
-    pkill -f "intermediate-server" 2>/dev/null || true
-    pkill -f "app-connector" 2>/dev/null || true
+    # Kill any orphaned processes started from this project (scoped to PROJECT_ROOT)
+    # This prevents accidentally killing unrelated processes on shared hosts
+    pkill -f "$PROJECT_ROOT/intermediate-server" 2>/dev/null || true
+    pkill -f "$PROJECT_ROOT/app-connector" 2>/dev/null || true
 
     log_info "All components stopped"
 }
@@ -304,9 +305,12 @@ wait_for_port() {
 
     log_info "Waiting for $host:$port (timeout: ${timeout}s)..."
 
+    # Note: nc -z -u is unreliable for UDP (no handshake).
+    # For production, prefer log-based readiness checks via wait_for_log_message.
+    # This function is kept for backward compatibility but may give false positives.
     while [[ $elapsed -lt $timeout ]]; do
         if nc -z -u "$host" "$port" 2>/dev/null; then
-            log_info "Port $host:$port is ready"
+            log_info "Port $host:$port appears ready (UDP probe sent)"
             return 0
         fi
         sleep 1
@@ -314,6 +318,29 @@ wait_for_port() {
     done
 
     log_error "Timeout waiting for $host:$port"
+    return 1
+}
+
+# Log-based readiness check - more reliable than port probing for UDP services
+# Usage: wait_for_log_message "$LOG_DIR/intermediate-server.log" "Listening on" 10
+wait_for_log_message() {
+    local log_file="$1"
+    local pattern="$2"
+    local timeout="${3:-10}"
+    local elapsed=0
+
+    log_info "Waiting for '$pattern' in $log_file (timeout: ${timeout}s)..."
+
+    while [[ $elapsed -lt $timeout ]]; do
+        if [[ -f "$log_file" ]] && grep -q "$pattern" "$log_file" 2>/dev/null; then
+            log_info "Found '$pattern' in log - service ready"
+            return 0
+        fi
+        sleep 1
+        : $((elapsed++))
+    done
+
+    log_error "Timeout waiting for '$pattern' in $log_file"
     return 1
 }
 
