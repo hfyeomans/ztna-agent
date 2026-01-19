@@ -27,23 +27,18 @@
 
 ---
 
-### 002: Intermediate Server 🔄 IN PROGRESS (PR Ready)
+### 002: Intermediate Server ✅ COMPLETE
 
 **Location:** `intermediate-server/`
-**Branch:** `feature/002-intermediate-server`
 
-**Dependencies:** None
+**Capabilities:**
+- QUIC server accepting connections (mio event loop)
+- QAD: report observed address to clients (7-byte format)
+- DATAGRAM relay between agent/connector pairs
+- Client registry for routing (connection-based)
+- Integration test (handshake + QAD verified)
 
-**Current Phase:** Phase 7 - PR Ready
-
-**Capabilities implemented:**
-- ✅ QUIC server accepting connections (mio event loop)
-- ✅ QAD: report observed address to clients (7-byte format)
-- ✅ DATAGRAM relay between agent/connector pairs
-- ✅ Client registry for routing (connection-based)
-- ✅ Integration test (handshake + QAD verified)
-
-**Critical Compatibility (verified):**
+**Critical Compatibility:**
 - ALPN: `b"ztna-v1"` (matches Agent)
 - QAD: DATAGRAM only, 7-byte IPv4 format
 
