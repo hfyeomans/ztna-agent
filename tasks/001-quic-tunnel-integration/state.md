@@ -1,22 +1,27 @@
 # Project State: ZTNA Agent
 
-**Last Updated:** 2026-01-18 (Phase 1 Complete - Ready for Phase 2)
+**Last Updated:** 2026-01-18 (Phase 1 Complete + Code Review → Phase 1.5 Fixes)
 
 ## Overview
 
 Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encapsulates them in QUIC tunnels, and routes through an intermediate system to application connectors.
 
-## Current Phase: Phase 1 QUIC Client ✅ COMPLETE → Phase 2 Swift UDP Integration (NEXT)
+## Current Phase: Phase 1.5 Code Quality Fixes → Phase 2 Swift UDP Integration
 
 ### What's Done
 - ✅ MVP packet interception working
 - ✅ Swift 6.2 / macOS 26+ modernization
 - ✅ Build system fixed (explicit modules disabled for Extension)
-- ✅ **Phase 1: Rust QUIC Client COMPLETE**
+- ✅ **Phase 1: Rust QUIC Client COMPLETE** (commit 958ce3f)
+- ✅ **Code Review Complete** - see `research.md` for findings
 
 ### What's Next
-- **Phase 2: Swift UDP Integration** - Wire Rust agent to NWConnection for actual UDP transport
-- See `todo.md` for detailed Phase 2 tasks
+1. **Phase 1.5: Code Quality Fixes** - Address CRITICAL findings from code review
+   - Fix Rust connection ID generation (security)
+   - Fix Swift `isRunning` data race (thread safety)
+   - Remove dead code
+2. **Phase 2: Swift UDP Integration** - Wire Rust agent to NWConnection
+- See `todo.md` for detailed tasks
 
 ---
 

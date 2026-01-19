@@ -63,7 +63,32 @@
 
 ---
 
-## Phase 2: Swift UDP Integration ← NEXT
+## Phase 1.5: Code Quality Fixes ← IN PROGRESS
+
+**Based on code review findings - must complete before Phase 2**
+
+### Rust Fixes (CRITICAL)
+- [ ] Fix connection ID generation - use `ring::rand::SystemRandom` instead of time-based PRNG (lib.rs:307-318)
+
+### Rust Fixes (MEDIUM - Dead Code Removal)
+- [ ] Delete `outbound_queue` field (lib.rs:104)
+- [ ] Delete `current_outbound` field (lib.rs:106)
+- [ ] Delete `OutboundPacket` struct (lib.rs:77-85)
+- [ ] Delete empty if-block in `recv()` (lib.rs:180-183)
+
+### Swift Fixes (CRITICAL)
+- [ ] Fix data race on `isRunning` flag (use `OSAllocatedUnfairLock` or actor isolation)
+
+### Swift Fixes (LOW)
+- [ ] Remove unreachable `default` case in switch (lines 82-83)
+
+### Performance (Defer to Phase 2.5)
+- [ ] Reuse buffer in `recv()` instead of `.to_vec()` (lib.rs:194)
+- [ ] Reuse `scratch_buffer` in `poll()` (lib.rs:213)
+
+---
+
+## Phase 2: Swift UDP Integration
 
 - [ ] Create UDP socket/NWConnection in PacketTunnelProvider
 - [ ] Implement send loop: `agent_poll()` → UDP send

@@ -31,13 +31,13 @@
 - [x] Restored FFI calls in `PacketTunnelProvider.swift`
 - [x] Verified: `_process_packet` symbol linked, packets processed
 
-### 0.5 Commit & Document
-- [ ] Commit all modernization changes with build fix
+### 0.5 Commit & Document ✅
+- [x] Commit all modernization changes with build fix (958ce3f)
 - [ ] File Apple Feedback about explicit modules + NetworkExtension hang (optional)
 
 ---
 
-## Phase 1: Rust Core — QUIC Client (Agent Side)
+## Phase 1: Rust Core — QUIC Client (Agent Side) ✅ COMPLETE
 
 ### 1.1 Add quiche dependency
 - Add `quiche` to `core/packet_processor/Cargo.toml`
@@ -58,27 +58,97 @@
 - Avoids head-of-line blocking for UDP-like traffic
 - Configure `quiche::Config` with `enable_dgram(true, ...)`
 
-### 1.4 Panic safety
+### 1.4 Panic safety ✅
 - Wrap all FFI entry points with `std::panic::catch_unwind`
 - Return safe defaults on panic
 
 ---
 
-## Phase 2: Swift Integration — UDP I/O
+## Phase 1.5: Code Quality Fixes (Pre-Phase 2)
 
-### 2.1 Create UDP socket in extension
-- Use `NWConnection` or raw BSD sockets for UDP
-- Bind to ephemeral port for QUIC transport
+**Status:** Required before Phase 2 implementation
 
-### 2.2 Wire QUIC I/O loop
-- Call `agent_poll()` to get outbound QUIC packets → send via UDP
-- Receive UDP packets → call `agent_recv()` to feed quiche
-- Drive quiche timers (call `agent_on_timeout()` periodically)
+Based on code review findings (see `research.md`), these issues must be addressed:
 
-### 2.3 Encapsulate intercepted packets
-- On `readPackets`: pass IP packet to `agent_send_datagram()`
-- quiche queues it as a DATAGRAM frame
-- Poll and send via UDP socket
+### 1.5.1 Rust Fixes (CRITICAL/HIGH)
+
+- [ ] **Fix connection ID generation** (CRITICAL - security)
+  - Replace time-based PRNG with `ring::rand::SystemRandom`
+  - Location: `lib.rs:307-318`
+
+- [ ] **Remove dead code** (MEDIUM - cleanliness)
+  - Delete `outbound_queue` field (lib.rs:104)
+  - Delete `current_outbound` field (lib.rs:106)
+  - Delete `OutboundPacket` struct (lib.rs:77-85)
+  - Delete empty if-block (lib.rs:180-183)
+
+- [ ] **Optimize allocations** (HIGH - performance, can defer to Phase 2.5)
+  - Reuse buffer in `recv()` (lib.rs:194)
+  - Reuse `scratch_buffer` in `poll()` (lib.rs:213)
+
+### 1.5.2 Swift Fixes (CRITICAL)
+
+- [ ] **Fix data race on `isRunning`** (CRITICAL - thread safety)
+  - Option A: Add `@MainActor` to class
+  - Option B: Use `OSAllocatedUnfairLock<Bool>`
+  - Location: `PacketTunnelProvider.swift:8`
+
+- [ ] **Remove dead code** (LOW)
+  - Remove unreachable `default` case (lines 82-83)
+
+---
+
+## Phase 2: Swift Integration — UDP I/O (IN PROGRESS)
+
+### 2.1 Agent Lifecycle in Swift
+- [ ] Add `agent: OpaquePointer?` property to PacketTunnelProvider
+- [ ] Create agent in `startTunnel()` via `agent_create()`
+- [ ] Destroy agent in `stopTunnel()` via `agent_destroy()`
+- [ ] Add server address configuration (hardcoded for MVP: e.g., "127.0.0.1:4433")
+
+### 2.2 Create UDP Socket
+- [ ] Create `NWConnection` with UDP protocol for QUIC transport
+- [ ] Configure for `requiredLocalEndpoint` on ephemeral port
+- [ ] Handle connection state changes (ready, failed, cancelled)
+- [ ] Store as `udpConnection: NWConnection?` property
+
+### 2.3 Connect to QUIC Server
+- [ ] Call `agent_connect(agent, host, port)` after UDP ready
+- [ ] Handle connection result codes
+
+### 2.4 Implement Send Loop (agent → network)
+- [ ] Create polling function to call `agent_poll()`
+- [ ] When data available, send via `udpConnection.send()`
+- [ ] Continue polling until `AgentResultNoData`
+- [ ] Trigger after: connection, packet send, timeout
+
+### 2.5 Implement Receive Loop (network → agent)
+- [ ] Set up `udpConnection.receiveMessage()` handler
+- [ ] On receive: call `agent_recv(data, from_ip, from_port)`
+- [ ] Re-arm receive handler for next packet
+- [ ] Trigger send loop after processing
+
+### 2.6 Timer Handling
+- [ ] Create `DispatchSourceTimer` for quiche timeouts
+- [ ] Call `agent_timeout_ms()` to get next timeout duration
+- [ ] On timer fire: call `agent_on_timeout()`, then poll
+- [ ] Reschedule timer after each timeout
+
+### 2.7 Packet Tunneling
+- [ ] In `processPacket()`, for `PacketActionForward`:
+  - Call `agent_send_datagram(agent, data, len)`
+  - Trigger send loop to flush QUIC packets
+- [ ] Handle `AgentResultNotConnected` gracefully
+
+### 2.8 Connection State Monitoring
+- [ ] Periodically check `agent_get_state()`
+- [ ] Log state transitions
+- [ ] Handle disconnection/error states
+
+### 2.9 Receive Tunneled Packets (from server)
+- [ ] Process received DATAGRAMs in agent (handled in Rust)
+- [ ] For MVP: log received tunneled packets
+- [ ] For full: write back to `packetFlow.writePackets()`
 
 ---
 

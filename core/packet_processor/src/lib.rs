@@ -5,7 +5,6 @@
 //! - QUIC tunnel management via quiche
 //! - FFI interface for Swift integration
 
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::slice;
@@ -13,6 +12,7 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use quiche::{Config, Connection, ConnectionId};
+use ring::rand::{SecureRandom, SystemRandom};
 
 // ============================================================================
 // Constants
@@ -20,9 +20,6 @@ use quiche::{Config, Connection, ConnectionId};
 
 /// Maximum UDP payload size for QUIC packets
 const MAX_DATAGRAM_SIZE: usize = 1350;
-
-/// Maximum number of outbound packets to queue
-const MAX_OUTBOUND_QUEUE: usize = 1024;
 
 /// QUIC idle timeout in milliseconds
 const IDLE_TIMEOUT_MS: u64 = 30000;
@@ -70,21 +67,6 @@ pub enum AgentResult {
 }
 
 // ============================================================================
-// Outbound Packet Structure
-// ============================================================================
-
-/// Represents a UDP packet to be sent by Swift
-#[repr(C)]
-pub struct OutboundPacket {
-    /// Pointer to packet data (valid until next agent_poll call)
-    pub data: *const u8,
-    /// Length of packet data
-    pub len: usize,
-    /// Destination port (host byte order)
-    pub dst_port: u16,
-}
-
-// ============================================================================
 // Agent Structure
 // ============================================================================
 
@@ -100,10 +82,6 @@ pub struct Agent {
     local_addr: Option<SocketAddr>,
     /// Connection state
     state: AgentState,
-    /// Outbound UDP packet queue
-    outbound_queue: VecDeque<Vec<u8>>,
-    /// Buffer for current outbound packet (for FFI pointer stability)
-    current_outbound: Option<Vec<u8>>,
     /// Last activity time for timeout tracking
     last_activity: Instant,
     /// Observed public address from QAD (set by server)
@@ -144,8 +122,6 @@ impl Agent {
             server_addr: None,
             local_addr: None,
             state: AgentState::Disconnected,
-            outbound_queue: VecDeque::with_capacity(MAX_OUTBOUND_QUEUE),
-            current_outbound: None,
             last_activity: Instant::now(),
             observed_address: None,
             scratch_buffer: vec![0u8; MAX_DATAGRAM_SIZE],
@@ -177,11 +153,6 @@ impl Agent {
 
     /// Process received UDP packet (from network)
     fn recv(&mut self, data: &[u8], from: SocketAddr) -> Result<(), quiche::Error> {
-        // Update local address if not set
-        if self.local_addr.is_none() {
-            // We don't know our local addr from recv, but we can track the server
-        }
-
         let conn = self.conn.as_mut().ok_or(quiche::Error::InvalidState)?;
 
         // Create recv info
@@ -218,10 +189,7 @@ impl Agent {
                 self.last_activity = Instant::now();
                 Some((out, server_addr))
             }
-            Err(quiche::Error::Done) => {
-                // Check queued outbound packets
-                self.outbound_queue.pop_front().map(|pkt| (pkt, server_addr))
-            }
+            Err(quiche::Error::Done) => None, // No more packets to send
             Err(_) => None,
         }
     }
@@ -303,17 +271,12 @@ impl Agent {
 // Helper Functions
 // ============================================================================
 
-/// Generate a random connection ID
+/// Generate a cryptographically secure random connection ID
 fn rand_connection_id() -> [u8; 16] {
     let mut id = [0u8; 16];
-    // Simple PRNG using system time - not cryptographically secure but sufficient for conn IDs
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for (i, byte) in id.iter_mut().enumerate() {
-        *byte = ((seed >> (i * 8)) & 0xFF) as u8;
-    }
+    let rng = SystemRandom::new();
+    // Fill with secure random bytes; fall back to zeros on error (extremely unlikely)
+    let _ = rng.fill(&mut id);
     id
 }
 

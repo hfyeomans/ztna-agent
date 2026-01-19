@@ -174,6 +174,179 @@ Settings already identified for removal from Extension target:
 
 ---
 
+---
+
+## Code Review: Phase 1 Implementation (2026-01-18)
+
+### Overview
+
+After Phase 1 completion, a comprehensive code review was performed on:
+- **Rust:** `core/packet_processor/src/lib.rs` (~700 lines)
+- **Swift:** `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` (~87 lines)
+- **Bridging Header:** `ios-macos/Shared/PacketProcessor-Bridging-Header.h`
+
+### Rust Implementation Findings
+
+#### CRITICAL: Non-Cryptographic Connection ID Generation (Lines 307-318)
+
+```rust
+fn rand_connection_id() -> [u8; 16] {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for (i, byte) in id.iter_mut().enumerate() {
+        *byte = ((seed >> (i * 8)) & 0xFF) as u8;
+    }
+    id
+}
+```
+
+**Problem:** Uses only system time nanoseconds - predictable, non-unique, security risk.
+**Fix:** Use `ring::rand::SystemRandom` (ring is already a dependency via quiche).
+
+#### HIGH: Allocation on Every `recv()` Call (Line 194)
+
+```rust
+let mut buf = data.to_vec();  // Heap allocation for every UDP packet
+```
+
+**Problem:** At high packet rates, creates significant allocation pressure.
+**Fix:** Use a pre-allocated buffer in the Agent struct.
+
+#### HIGH: Allocation on Every `poll()` Call (Line 213)
+
+```rust
+let mut out = vec![0u8; MAX_DATAGRAM_SIZE];
+```
+
+**Problem:** Agent already has `scratch_buffer` - should reuse it.
+**Fix:** Use `self.scratch_buffer` or add a dedicated send buffer.
+
+#### MEDIUM: Dead Code
+
+| Item | Lines | Issue |
+|------|-------|-------|
+| `current_outbound` field | 106, 148 | Declared, never used |
+| `outbound_queue` | 104, 147 | Allocated with capacity 1024, never pushed to |
+| `OutboundPacket` struct | 77-85 | Defined, never used in FFI |
+| Empty if-block | 180-183 | Only contains comment |
+
+#### LOW: Missing IPv6 Support in FFI
+
+Lines 475-477 assume 4-byte IPv4 addresses:
+```rust
+let ip_bytes = slice::from_raw_parts(from_ip, 4);
+let ip = std::net::Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+```
+
+**Problem:** IPv6 packets are handled in Swift but can't be fed to Rust agent.
+
+#### POSITIVE: FFI Safety
+
+- All FFI functions properly check null pointers
+- `catch_unwind` wrappers prevent panics from unwinding into C
+- `#[repr(C)]` correctly applied to all cross-boundary types
+- Documentation is comprehensive
+
+---
+
+### Swift Implementation Findings
+
+#### CRITICAL: Data Race on `isRunning` (Lines 8, 20, 26, 55, 58)
+
+```swift
+private var isRunning = false  // Unprotected mutable state
+```
+
+**Problem:** Written in async contexts (startTunnel/stopTunnel), read in callback threads (readPackets closure). Thread Sanitizer WILL flag this.
+
+**Fix Options:**
+1. Use `@MainActor` isolation on the class
+2. Use `OSAllocatedUnfairLock<Bool>` for atomic access
+3. Use `nonisolated(unsafe)` with documentation (current pattern for similar cases)
+
+#### HIGH: Packets Not Actually Forwarded (Lines 77-84)
+
+```swift
+case PacketActionForward:
+    logger.debug("Forwarding packet...")
+    // Missing: Actually forward the packet!
+```
+
+**Problem:** Packets marked for forwarding are logged but not tunneled or written back.
+
+#### HIGH: Missing Actor Isolation (Lines 5-8)
+
+```swift
+final class PacketTunnelProvider: NEPacketTunnelProvider {
+```
+
+**Problem:** Class has mutable state but no actor isolation. NetworkExtension callbacks can come from arbitrary threads.
+
+#### MEDIUM: Callback Pattern vs Async/Await (Lines 54-68)
+
+```swift
+packetFlow.readPackets { [weak self] packets, protocols in
+    // Recursive callback pattern
+    self.readPackets()
+}
+```
+
+**Problem:** Creates implicit recursion. Modern Swift would use `AsyncSequence` if available.
+
+#### MEDIUM: Options Parameter Ignored (Line 12)
+
+```swift
+override func startTunnel(options: [String: NSObject]? = nil) async throws {
+    // options is ignored
+```
+
+**Problem:** Cannot pass server address, credentials, or configuration from app to extension.
+
+#### LOW: Dead Code
+
+- Line 82-83: Unreachable `default` case (enum is exhaustive)
+- Lines 29-31: `handleAppMessage` always returns nil
+
+---
+
+### Bridging Header Review
+
+**Status:** Well-structured, no issues found.
+
+- Clear separation between legacy and QUIC Agent APIs
+- Comprehensive documentation for each function
+- Proper opaque pointer usage (`typedef struct Agent Agent`)
+- Correct C enum representations matching Rust `#[repr(C)]`
+- NULL-safe function signatures documented
+
+---
+
+### Recommendations for Phase 2
+
+#### Must Fix Before Phase 2
+
+1. **Fix connection ID generation** - Security critical
+2. **Add thread synchronization** to Swift `isRunning` flag
+3. **Remove dead code** in Rust (outbound_queue, current_outbound, OutboundPacket)
+
+#### Address During Phase 2
+
+1. **Optimize allocations** in recv()/poll() paths
+2. **Implement actual packet forwarding** (Phase 2 main task)
+3. **Add IPv6 support** to FFI (or document limitation)
+4. **Consider async packet loop** with structured concurrency
+
+#### Tech Debt (Post-MVP)
+
+1. Add proper certificate verification (currently disabled)
+2. Implement app-to-extension messaging via handleAppMessage
+3. Add graceful connection close function (agent_close)
+4. Consider callback mechanism for async events vs polling
+
+---
+
 ## Appendix: Diagnostic Commands
 
 ```bash
