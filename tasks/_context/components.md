@@ -27,17 +27,24 @@
 
 ---
 
-### 002: Intermediate Server 🔲 NOT STARTED
+### 002: Intermediate Server 🔄 IN PROGRESS
 
 **Location:** `intermediate-server/` (to be created)
+**Branch:** `feature/002-intermediate-server`
 
 **Dependencies:** None (can start immediately)
 
+**Current Phase:** Phase 1 - Project Setup
+
 **Capabilities needed:**
 - QUIC server accepting connections
-- QAD: report observed address to clients
+- QAD: report observed address to clients (format: `0x01 + IPv4 + port`)
 - DATAGRAM relay between agent/connector pairs
-- Client registry for routing
+- Client registry for routing (connection-based, not packet header)
+
+**Critical Compatibility:**
+- ALPN: `b"ztna-v1"` (matches Agent)
+- QAD: DATAGRAM only, 7-byte IPv4 format
 
 ---
 
@@ -97,7 +104,7 @@
                     ┌─────────────────────────┐
                     │  002: Intermediate      │
                     │  Server                 │
-                    │  🔲 NOT STARTED         │
+                    │  🔄 IN PROGRESS         │
                     └───────────┬─────────────┘
                                 │
                     ┌───────────┴───────────┐
@@ -125,7 +132,7 @@
 
 **Shortest path to working relay:**
 1. ✅ 001: Agent Client (done)
-2. 🔲 002: Intermediate Server
+2. 🔄 002: Intermediate Server (in progress)
 3. 🔲 003: App Connector
 4. 🔲 004: E2E Testing
 

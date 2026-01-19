@@ -31,7 +31,8 @@ config.load_cert_chain_from_pem_file("cert.pem")?;
 config.load_priv_key_from_pem_file("key.pem")?;
 
 // QUIC settings
-config.set_application_protos(&[b"ztna"])?;
+// CRITICAL: Must match Agent ALPN at core/packet_processor/src/lib.rs:28
+config.set_application_protos(&[b"ztna-v1"])?;
 config.set_max_idle_timeout(30_000); // 30 seconds
 config.set_max_recv_udp_payload_size(1350);
 config.set_max_send_udp_payload_size(1350);
@@ -48,41 +49,49 @@ config.enable_dgram(true, 1000, 1000);
 
 ## QAD Message Format
 
-### Proposed Format
+### Format (Must Match Agent Parser)
+
+**CRITICAL:** The Agent at `core/packet_processor/src/lib.rs:255-262` parses QAD messages
+without an IP version byte. The server MUST use this exact format:
 
 ```
 +--------+--------+--------+--------+--------+--------+--------+
-| Type   | IP Version | IP Address (4 or 16 bytes) | Port    |
-| (1)    | (1)        | (variable)                 | (2)     |
+| Type   | IPv4 Address (4 bytes)            | Port (2 bytes)  |
+| (1)    |                                   | (big-endian)    |
 +--------+--------+--------+--------+--------+--------+--------+
 
 Type: 0x01 = OBSERVED_ADDRESS
-IP Version: 0x04 = IPv4, 0x06 = IPv6
-IP Address: 4 bytes (IPv4) or 16 bytes (IPv6)
+IP Address: 4 bytes (IPv4 only for now)
 Port: 2 bytes, network byte order (big-endian)
+
+Total: 7 bytes
 ```
 
 ### Example (IPv4)
 
 Client observed at 203.0.113.5:54321:
 ```
-01 04 CB 00 71 05 D4 31
-│  │  └──────────┘ └────┘
-│  │       │         │
-│  │       │         └─ Port: 54321 (0xD431)
-│  │       └─ IP: 203.0.113.5
-│  └─ IPv4
-└─ OBSERVED_ADDRESS type
+01 CB 00 71 05 D4 31
+│  └──────────┘ └────┘
+│       │         │
+│       │         └─ Port: 54321 (0xD431)
+│       └─ IP: 203.0.113.5
+└─ OBSERVED_ADDRESS type (0x01)
 ```
+
+### Future: IPv6 Support
+
+IPv6 support would require updating the Agent parser to accept a version byte.
+This is deferred to a future task.
 
 ### Delivery Method
 
-Options:
-1. **DATAGRAM frame** - unreliable but simple
-2. **Stream 0** - reliable, requires stream setup
-3. **Custom frame** - would require protocol negotiation
+**Decision:** Use DATAGRAM (required by Agent implementation).
 
-**Decision:** Use DATAGRAM for simplicity. Re-send periodically if needed.
+The Agent at `core/packet_processor/src/lib.rs:251` only processes QAD messages
+received via `conn.dgram_recv()`. Stream-based delivery would not be parsed.
+
+Re-send on NAT rebinding (address change detection).
 
 ---
 
@@ -123,19 +132,34 @@ struct Registry {
 
 ---
 
-## Async Runtime: tokio vs mio
+## Async Runtime: mio
 
-### Option 1: mio (low-level)
-- Used in quiche examples
-- Manual event loop
-- More control, more boilerplate
+**Decision:** Use mio (matches quiche examples and sans-IO model).
 
-### Option 2: tokio (high-level)
-- Higher-level async/await
-- Built-in timers, channels
-- Easier to extend later
+### Rationale
+- quiche examples use mio directly
+- Sans-IO model means quiche doesn't own the socket
+- mio provides the event loop without async/await complexity
+- Easier to understand connection ID routing
+- Can migrate to tokio later if needed for async features
 
-**Decision:** Start with mio (closer to quiche examples), consider tokio migration later.
+### Key mio Concepts
+```rust
+use mio::{Events, Poll, Token};
+use mio::net::UdpSocket;
+
+let mut poll = Poll::new()?;
+let mut socket = UdpSocket::bind(addr)?;
+poll.registry().register(&mut socket, Token(0), Interest::READABLE)?;
+
+let mut events = Events::with_capacity(1024);
+loop {
+    poll.poll(&mut events, timeout)?;
+    for event in events.iter() {
+        // Handle socket readable/writable
+    }
+}
+```
 
 ---
 
