@@ -34,7 +34,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | Task | Component | Status | Branch |
 |------|-----------|--------|--------|
 | [001](../001-quic-tunnel-integration/) | Agent QUIC Client | ✅ Complete | `master` |
-| [002](../002-intermediate-server/) | Intermediate Server | 🔲 Not Started | `feature/002-intermediate-server` |
+| [002](../002-intermediate-server/) | Intermediate Server | ✅ PR Ready | `feature/002-intermediate-server` |
 | [003](../003-app-connector/) | App Connector | 🔲 Not Started | `feature/003-app-connector` |
 | [004](../004-e2e-relay-testing/) | E2E Relay Testing | 🔲 Not Started | `feature/004-e2e-relay-testing` |
 | [005](../005-p2p-hole-punching/) | P2P Hole Punching | 🔲 Not Started | `feature/005-p2p-hole-punching` |
@@ -107,7 +107,8 @@ git push -u origin feature/XXX-task-name
 |-----------|------------|-------|
 | QUIC Library | `quiche` (Cloudflare) | Sans-IO model, Rust |
 | Agent | Swift 6.2 + Rust FFI | NetworkExtension framework |
-| Server/Connector | Rust + tokio | Async I/O |
+| Intermediate Server | Rust + mio | Event loop matches quiche examples |
+| Connector | Rust + mio/tokio | TBD |
 | Packet Encapsulation | QUIC DATAGRAM | RFC 9221 |
 | Address Discovery | QAD | Replaces STUN |
 
@@ -164,3 +165,43 @@ log stream --predicate 'subsystem CONTAINS "ztna"'
 | **Hole Punching** | NAT traversal technique for direct P2P connection |
 | **Intermediate** | Relay server for bootstrap and fallback |
 | **Connector** | Component that decapsulates packets and forwards to apps |
+
+---
+
+## Deferred Items / Technical Debt
+
+Items deferred from MVP implementation that must be addressed for production.
+
+### Priority 1: Security (Required for Production)
+
+| Item | Component | Description | Risk if Missing |
+|------|-----------|-------------|-----------------|
+| **Stateless Retry** | 002-Server | Anti-amplification protection via HMAC tokens | DoS amplification attacks |
+| **TLS Certificate Verification** | 001-Agent, 002-Server | Currently `verify_peer(false)` | MITM attacks |
+| **Client Authentication** | 002-Server | No auth - any client can connect | Unauthorized access |
+| **Rate Limiting** | 002-Server | No per-client DATAGRAM rate limits | Resource exhaustion |
+
+### Priority 2: Reliability (Recommended)
+
+| Item | Component | Description | Impact if Missing |
+|------|-----------|-------------|-------------------|
+| **Graceful Shutdown** | 002-Server | Connection draining on shutdown | Abrupt disconnects |
+| **Connection State Tracking** | 002-Server | Full state machine for connections | Edge case bugs |
+| **Error Recovery** | 001-Agent, 002-Server | Automatic reconnection logic | Manual intervention needed |
+
+### Priority 3: Operations (Nice to Have)
+
+| Item | Component | Description |
+|------|-----------|-------------|
+| **Metrics/Stats Endpoint** | 002-Server | Connection counts, packet rates, latency |
+| **Configuration File (TOML)** | 002-Server | Currently CLI args only |
+| **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported |
+| **IPv6 QAD Support** | 001-Agent, 002-Server | Currently IPv4 only (7-byte format) |
+| **Production Certificates** | All | Currently using self-signed dev certs |
+
+### Tracking
+
+When implementing deferred items:
+1. Create a task in `tasks/` (e.g., `tasks/006-security-hardening/`)
+2. Reference this section in the task's `plan.md`
+3. Update this table when complete (change to ✅ and add task reference)
