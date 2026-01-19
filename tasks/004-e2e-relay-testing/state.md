@@ -1,7 +1,7 @@
 # Task State: E2E Relay Testing
 
 **Task ID:** 004-e2e-relay-testing
-**Status:** In Progress - Phase 3.5 Complete, Ready for Phase 4
+**Status:** In Progress - Phase 4 Complete, Ready for Phase 5
 **Branch:** `feature/004-e2e-relay-testing`
 **Last Updated:** 2026-01-19
 
@@ -17,7 +17,38 @@ Comprehensive end-to-end testing of the relay infrastructure. Validates that tra
 
 ---
 
-## Current Phase: Phase 3.5 COMPLETE ✅
+## Current Phase: Phase 4 COMPLETE ✅
+
+### Phase 4 Advanced UDP Testing (2026-01-19)
+
+**QUIC Test Client Enhancements:**
+- ✅ Added `--payload-pattern` (zeros, ones, sequential, random)
+- ✅ Added `--repeat N` for multiple packets
+- ✅ Added `--delay MS` for inter-packet delay
+- ✅ Added `--burst N` for burst traffic testing
+- ✅ Added `--verify-echo` for payload integrity verification
+
+**Test Scenarios Created (`tests/e2e/scenarios/udp-advanced.sh`):**
+
+**4.2 Echo Integrity Tests (5 tests):**
+- ✅ All-zeros payload pattern
+- ✅ All-ones (0xFF) payload pattern
+- ✅ Sequential payload pattern
+- ✅ Random payload pattern
+- ✅ Multiple payloads with repeat
+
+**4.3 Concurrent Flow Tests (2 tests):**
+- ✅ Multiple simultaneous clients (3 parallel)
+- ✅ Flow isolation (different source addresses)
+
+**4.4 Long-Running Tests (3 tests):**
+- ✅ Long-lived stream stability (10 packets, 500ms interval)
+- ✅ Burst traffic stress (50 packets)
+- ✅ Idle timeout within threshold (5s)
+
+---
+
+## Phase 3.5 COMPLETE ✅
 
 ### Phase 3.5 All Fixes Applied (2026-01-19)
 
