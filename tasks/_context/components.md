@@ -44,17 +44,41 @@
 
 ---
 
-### 003: App Connector 🔲 NOT STARTED
+### 003: App Connector 🔄 IN PROGRESS (PR #3)
 
-**Location:** `app-connector/` (to be created)
+**Location:** `app-connector/`
 
 **Dependencies:** 002 (Intermediate Server)
 
-**Capabilities needed:**
-- QUIC client connecting to Intermediate
-- Receive DATAGRAMs, decapsulate IP packets
-- Forward to local application (TCP/UDP)
-- Handle return traffic
+| Milestone | Status | Commit |
+|-----------|--------|--------|
+| Phase 1: QUIC Client + UDP Forwarding | ✅ Done | `7ec1708` |
+
+**Capabilities:**
+- QUIC client via quiche (mio event loop, not tokio)
+- Registers as Connector (0x11 protocol)
+- Parses QAD OBSERVED_ADDRESS messages
+- Decapsulates IPv4/UDP packets from DATAGRAMs
+- Forwards UDP payload to configurable local service
+- Constructs return IP/UDP packets with proper checksums
+- Integration test (handshake + QAD + registration verified)
+
+**Critical Compatibility:**
+- ALPN: `b"ztna-v1"` (matches Agent/Intermediate)
+- MAX_DATAGRAM_SIZE: 1350
+- Registration: `[0x11][len][service_id]`
+- QAD: 7-byte IPv4 format (0x01 + IP + port)
+
+**Key Design Decisions:**
+- **mio over tokio**: Matches Intermediate Server's sans-IO model
+- **UDP-only for MVP**: TCP requires TUN/TAP or TCP state tracking (deferred)
+- **No registration ACK**: Server doesn't acknowledge; treat as best-effort
+
+**Deferred to Post-MVP:**
+- TCP support (requires TUN/TAP)
+- ICMP support
+- Automatic reconnection
+- Config file (TOML)
 
 ---
 
@@ -100,7 +124,7 @@
                     ┌─────────────────────────┐
                     │  002: Intermediate      │
                     │  Server                 │
-                    │  🔄 IN PROGRESS         │
+                    │  ✅ COMPLETE            │
                     └───────────┬─────────────┘
                                 │
                     ┌───────────┴───────────┐
@@ -108,7 +132,7 @@
                     ▼                       ▼
     ┌─────────────────────────┐   ┌─────────────────────────┐
     │  003: App Connector     │   │  004: E2E Testing       │
-    │  🔲 NOT STARTED         │   │  🔲 NOT STARTED         │
+    │  🔄 IN PROGRESS         │   │  🔲 NOT STARTED         │
     └───────────┬─────────────┘   └───────────┬─────────────┘
                 │                             │
                 └─────────────┬───────────────┘
@@ -128,8 +152,8 @@
 
 **Shortest path to working relay:**
 1. ✅ 001: Agent Client (done)
-2. 🔄 002: Intermediate Server (in progress)
-3. 🔲 003: App Connector
+2. ✅ 002: Intermediate Server (done)
+3. 🔄 003: App Connector (PR #3)
 4. 🔲 004: E2E Testing
 
 **Path to P2P (primary goal):**

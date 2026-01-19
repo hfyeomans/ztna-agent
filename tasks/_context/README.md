@@ -108,7 +108,7 @@ git push -u origin feature/XXX-task-name
 | QUIC Library | `quiche` (Cloudflare) | Sans-IO model, Rust |
 | Agent | Swift 6.2 + Rust FFI | NetworkExtension framework |
 | Intermediate Server | Rust + mio | Event loop matches quiche examples |
-| Connector | Rust + mio/tokio | TBD |
+| Connector | Rust + mio | Matches Intermediate (mio chosen over tokio) |
 | Packet Encapsulation | QUIC DATAGRAM | RFC 9221 |
 | Address Discovery | QAD | Replaces STUN |
 
@@ -122,6 +122,8 @@ git push -u origin feature/XXX-task-name
 | Agent Extension | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` |
 | Rust QUIC Client | `core/packet_processor/src/lib.rs` |
 | Bridging Header | `ios-macos/Shared/PacketProcessor-Bridging-Header.h` |
+| Intermediate Server | `intermediate-server/src/main.rs` |
+| App Connector | `app-connector/src/main.rs` |
 
 ---
 
@@ -187,17 +189,21 @@ Items deferred from MVP implementation that must be addressed for production.
 |------|-----------|-------------|-------------------|
 | **Graceful Shutdown** | 002-Server | Connection draining on shutdown | Abrupt disconnects |
 | **Connection State Tracking** | 002-Server | Full state machine for connections | Edge case bugs |
-| **Error Recovery** | 001-Agent, 002-Server | Automatic reconnection logic | Manual intervention needed |
+| **Error Recovery** | 001-Agent, 002-Server, 003-Connector | Automatic reconnection logic | Manual intervention needed |
+| **TCP Support** | 003-Connector | Requires TUN/TAP or TCP state tracking | UDP-only forwarding |
+| **Registration Acknowledgment** | 002-Server, 003-Connector | Server doesn't ACK registration | Silent registration failures |
 
 ### Priority 3: Operations (Nice to Have)
 
 | Item | Component | Description |
 |------|-----------|-------------|
-| **Metrics/Stats Endpoint** | 002-Server | Connection counts, packet rates, latency |
-| **Configuration File (TOML)** | 002-Server | Currently CLI args only |
+| **Metrics/Stats Endpoint** | 002-Server, 003-Connector | Connection counts, packet rates, latency |
+| **Configuration File (TOML)** | 002-Server, 003-Connector | Currently CLI args only |
 | **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported |
-| **IPv6 QAD Support** | 001-Agent, 002-Server | Currently IPv4 only (7-byte format) |
+| **IPv6 QAD Support** | 001-Agent, 002-Server, 003-Connector | Currently IPv4 only (7-byte format) |
 | **Production Certificates** | All | Currently using self-signed dev certs |
+| **ICMP Support** | 003-Connector | Ping replies for connectivity testing |
+| **Multiple Service Registration** | 003-Connector | Currently single service ID only |
 
 ### Tracking
 
