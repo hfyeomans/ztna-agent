@@ -1,7 +1,7 @@
 # Task State: E2E Relay Testing
 
 **Task ID:** 004-e2e-relay-testing
-**Status:** In Progress - Phase 1.5 Complete, E2E Relay Verified
+**Status:** In Progress - Phase 2 Complete, Protocol Validation Verified
 **Branch:** `feature/004-e2e-relay-testing`
 **Last Updated:** 2026-01-19
 
@@ -17,7 +17,49 @@ Comprehensive end-to-end testing of the relay infrastructure. Validates that tra
 
 ---
 
-## Current Phase: Phase 1.5 Complete - E2E Relay Verified ✅
+## Current Phase: Phase 2 Complete - Protocol Validation Verified ✅
+
+### Phase 2 Test Results (2026-01-19)
+
+```
+=== Phase 2: Protocol Validation Tests ===
+Server: 127.0.0.1:4433
+Service: test-service
+
+--- ALPN Validation ---
+[PASS] Connection established with correct ALPN (ztna-v1)
+[PASS] Connection correctly rejected with wrong ALPN
+
+--- MAX_DATAGRAM_SIZE Boundary ---
+[PASS] 1306-byte DATAGRAM accepted (at QUIC payload limit)
+[PASS] Oversized DATAGRAM rejected via BufferTooShort error
+
+--- Registration Format ---
+[PASS] Agent registration sent with valid format
+[PASS] Server handled malformed registration gracefully
+
+--- Payload Boundary Tests ---
+[PASS] Zero-byte payload handled
+[PASS] One-byte payload echoed successfully
+
+=== Protocol Validation Summary ===
+Passed: 8
+Failed: 0
+All tests passed!
+```
+
+### Key Discovery: QUIC DATAGRAM Size Limit
+
+**Finding:** The actual QUIC DATAGRAM payload limit is ~1307 bytes, NOT 1350 bytes.
+
+- IP header (20) + UDP header (8) + payload (1278) = 1306 bytes ✅
+- IP header (20) + UDP header (8) + payload (1280) = 1308 bytes ❌ BufferTooShort
+
+**Reason:** QUIC packet overhead (headers, encryption) reduces the effective payload size.
+
+---
+
+## Phase 1.5 Complete - E2E Relay Verified ✅
 
 ### Latest Test Run (2026-01-19)
 

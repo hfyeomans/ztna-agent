@@ -70,6 +70,29 @@ log_test() {
 }
 
 # ============================================================================
+# Test Helpers (Phase 2)
+# ============================================================================
+
+# Convenience alias for TEST_SERVICE_ID
+SERVICE_ID="${TEST_SERVICE_ID:-test-service}"
+
+test_start() {
+    echo -e "${BLUE}[TEST]${NC} $(date '+%H:%M:%S') $*"
+}
+
+test_pass() {
+    echo -e "${GREEN}[PASS]${NC} $(date '+%H:%M:%S') $*"
+}
+
+test_fail() {
+    echo -e "${RED}[FAIL]${NC} $(date '+%H:%M:%S') $*"
+}
+
+test_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $(date '+%H:%M:%S') $*"
+}
+
+# ============================================================================
 # Directory Setup
 # ============================================================================
 

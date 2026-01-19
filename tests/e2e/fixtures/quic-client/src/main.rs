@@ -59,6 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wait_ms: u64 = parse_arg(&args, "--wait")
         .and_then(|s| s.parse().ok())
         .unwrap_or(2000);
+    // Phase 2: Protocol validation options
+    let alpn_override = parse_arg(&args, "--alpn");
+    let payload_size: Option<usize> = parse_arg(&args, "--payload-size")
+        .and_then(|s| s.parse().ok());
+    let expect_connect_fail = args.iter().any(|a| a == "--expect-fail");
 
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print_usage();
@@ -68,18 +73,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_addr: SocketAddr = server_addr.parse()
         .map_err(|_| "Invalid server address")?;
 
+    // Determine ALPN to use
+    let alpn_bytes: Vec<u8> = alpn_override.as_ref()
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_else(|| ALPN_PROTOCOL.to_vec());
+    let alpn_str = String::from_utf8_lossy(&alpn_bytes);
+
     log::info!("QUIC Test Client");
     log::info!("  Server: {}", server_addr);
-    log::info!("  ALPN:   {:?}", std::str::from_utf8(ALPN_PROTOCOL));
+    log::info!("  ALPN:   {:?}", alpn_str);
     if let Some(ref svc) = service_id {
         log::info!("  Service: {} (will register as Agent)", svc);
     }
+    if expect_connect_fail {
+        log::info!("  Mode: Expecting connection to FAIL (negative test)");
+    }
 
-    let mut client = QuicTestClient::new(server_addr)?;
+    let mut client = QuicTestClient::new(server_addr, &alpn_bytes)?;
 
     // Connect and establish QUIC session
     client.connect()?;
-    client.wait_for_connection(Duration::from_secs(5))?;
+    match client.wait_for_connection(Duration::from_secs(5)) {
+        Ok(_) => {
+            if expect_connect_fail {
+                log::error!("Connection succeeded but expected failure!");
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            if expect_connect_fail {
+                log::info!("Connection failed as expected: {}", e);
+                println!("EXPECTED_FAIL:connection_rejected");
+                return Ok(());
+            }
+            return Err(e);
+        }
+    }
 
     // Register as Agent if service specified
     if let Some(ref svc) = service_id {
@@ -91,6 +120,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if interactive {
         // Interactive mode: read from stdin
         client.run_interactive()?;
+    } else if let Some(size) = payload_size {
+        // Generate payload of specified size (for boundary testing)
+        let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        log::info!("Generated payload: {} bytes", payload.len());
+
+        // If dst specified, wrap in IP/UDP
+        if let Some(ref dst_str) = dst_addr {
+            let dst: SocketAddrV4 = dst_str.parse()
+                .map_err(|_| "Invalid --dst address (expected ip:port)")?;
+            let src: SocketAddrV4 = src_addr
+                .unwrap_or_else(|| "10.0.0.100:12345".to_string())
+                .parse()
+                .map_err(|_| "Invalid --src address (expected ip:port)")?;
+            let packet = build_ip_udp_packet(src, dst, &payload);
+            log::info!("Built IP/UDP packet: {} bytes total", packet.len());
+            client.send_datagram(&packet)?;
+        } else {
+            // Send raw payload
+            client.send_datagram(&payload)?;
+        }
+        client.wait_for_responses(Duration::from_millis(wait_ms))?;
     } else if let Some(data) = send_udp {
         // Send data wrapped in IP/UDP packet (for relay testing)
         let dst: SocketAddrV4 = dst_addr
@@ -132,32 +182,35 @@ fn print_usage() {
     eprintln!("  quic-test-client [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --server ADDR    Intermediate server address (default: 127.0.0.1:4433)");
-    eprintln!("  --service ID     Register as Agent for this service (required for relay)");
-    eprintln!("  --send TEXT      Send text data as raw DATAGRAM");
-    eprintln!("  --send-hex HEX   Send hex-encoded data as raw DATAGRAM");
-    eprintln!("  --send-udp TEXT  Send text wrapped in IP/UDP packet (for full E2E relay)");
-    eprintln!("  --dst IP:PORT    Destination address for --send-udp (required with --send-udp)");
-    eprintln!("  --src IP:PORT    Source address for --send-udp (default: 10.0.0.100:12345)");
-    eprintln!("  --interactive    Interactive mode (read lines from stdin)");
-    eprintln!("  --wait MS        Wait time for responses (default: 2000)");
-    eprintln!("  -h, --help       Show this help");
+    eprintln!("  --server ADDR      Intermediate server address (default: 127.0.0.1:4433)");
+    eprintln!("  --service ID       Register as Agent for this service (required for relay)");
+    eprintln!("  --send TEXT        Send text data as raw DATAGRAM");
+    eprintln!("  --send-hex HEX     Send hex-encoded data as raw DATAGRAM");
+    eprintln!("  --send-udp TEXT    Send text wrapped in IP/UDP packet (for full E2E relay)");
+    eprintln!("  --dst IP:PORT      Destination address for --send-udp (required with --send-udp)");
+    eprintln!("  --src IP:PORT      Source address for --send-udp (default: 10.0.0.100:12345)");
+    eprintln!("  --interactive      Interactive mode (read lines from stdin)");
+    eprintln!("  --wait MS          Wait time for responses (default: 2000)");
+    eprintln!();
+    eprintln!("Protocol Validation (Phase 2):");
+    eprintln!("  --alpn PROTO       Override ALPN protocol (default: ztna-v1)");
+    eprintln!("  --payload-size N   Generate N-byte payload for boundary tests");
+    eprintln!("  --expect-fail      Expect connection to fail (negative test)");
+    eprintln!();
+    eprintln!("  -h, --help         Show this help");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  # Full E2E relay test: send IP/UDP packet through relay to echo server");
     eprintln!("  quic-test-client --service test-service --send-udp 'Hello' --dst 127.0.0.1:9999");
     eprintln!();
-    eprintln!("  # Test relay with raw data (connector expects IP packets)");
-    eprintln!("  quic-test-client --service test-service --send 'Hello'");
+    eprintln!("  # Test ALPN validation (negative test - expect failure)");
+    eprintln!("  quic-test-client --alpn 'wrong-protocol' --expect-fail");
+    eprintln!();
+    eprintln!("  # Test MAX_DATAGRAM_SIZE boundary (1350 bytes)");
+    eprintln!("  quic-test-client --service test-service --payload-size 1322 --dst 127.0.0.1:9999");
     eprintln!();
     eprintln!("  # Just connect (no relay, receives QAD only)");
     eprintln!("  quic-test-client --server 127.0.0.1:4433");
-    eprintln!();
-    eprintln!("  # Send hex-encoded data");
-    eprintln!("  quic-test-client --service test-service --send-hex '48454c4c4f'");
-    eprintln!();
-    eprintln!("  # Interactive mode");
-    eprintln!("  quic-test-client --service test-service --interactive");
 }
 
 fn parse_arg(args: &[String], flag: &str) -> Option<String> {
@@ -274,12 +327,12 @@ struct QuicTestClient {
 }
 
 impl QuicTestClient {
-    fn new(server_addr: SocketAddr) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(server_addr: SocketAddr, alpn: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         // Create quiche client configuration
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
-        // CRITICAL: ALPN must match server
-        config.set_application_protos(&[ALPN_PROTOCOL])?;
+        // Set ALPN (allows override for testing)
+        config.set_application_protos(&[alpn])?;
 
         // Enable DATAGRAM support
         config.enable_dgram(true, 1000, 1000);

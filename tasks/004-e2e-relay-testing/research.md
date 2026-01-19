@@ -75,6 +75,46 @@ let flow_key = self.flow_map.keys().next().cloned();
 
 ---
 
+## Key Discoveries (Phase 2)
+
+### Effective QUIC DATAGRAM Size Limit
+
+**Finding:** The actual QUIC DATAGRAM payload limit is ~1307 bytes, NOT 1350 bytes.
+
+**Test Results:**
+```
+IP header (20) + UDP header (8) + payload (1278) = 1306 bytes ✅ OK
+IP header (20) + UDP header (8) + payload (1280) = 1308 bytes ❌ BufferTooShort
+```
+
+**Reason:** QUIC packet overhead includes:
+- QUIC packet header (variable, ~20-30 bytes)
+- DATAGRAM frame header (~2-3 bytes)
+- AEAD authentication tag (16 bytes for AES-GCM)
+- Padding for minimum packet size
+
+**Implication:** When designing payloads, account for ~43 bytes of QUIC overhead:
+- `MAX_DATAGRAM_SIZE` (1350) - QUIC overhead (~43) ≈ 1307 bytes effective payload
+
+### ALPN Rejection Behavior
+
+**Finding:** Server correctly rejects connections with wrong ALPN.
+
+- Correct ALPN (`ztna-v1`): Connection established
+- Wrong ALPN (`wrong-protocol`): Connection closed during handshake
+
+**Mechanism:** QUIC handshake fails when ALPN negotiation fails (no common protocol).
+
+### Malformed Registration Handling
+
+**Finding:** Server handles malformed registration messages gracefully.
+
+- Invalid length byte (claiming 255 bytes but only 4 present)
+- Server does not crash
+- Connection may be closed but no server errors
+
+---
+
 ## Test Environment Options
 
 ### Option 1: Docker Compose
