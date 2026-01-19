@@ -98,7 +98,7 @@
 | Phase 3: Relay Validation | ✅ Done | Full relay path verified |
 | Phase 3.5: Coverage Gaps | ✅ Done | 6 tests: connector reg, service ID edge cases, malformed headers |
 | Phase 4: Advanced UDP | ✅ Done | 11 tests: payload patterns, concurrent flows, burst, idle timeout |
-| Phase 5: Reliability | 🔲 Planned | Component restart, error conditions |
+| Phase 5: Reliability | ✅ Done | 11 tests: component restart, error conditions, rapid reconnect |
 | Phase 6: Performance | 🔲 Planned | Latency, throughput metrics |
 
 **Capabilities Built:**
@@ -116,6 +116,7 @@
 - Test scenarios for connectivity, echo, boundary conditions
 - Protocol validation test suite (`scenarios/protocol-validation.sh`) - 14 tests
 - Advanced UDP test suite (`scenarios/udp-advanced.sh`) - 11 tests
+- Reliability test suite (`scenarios/reliability-tests.sh`) - 11 tests
 - Comprehensive testing guide (`tasks/_context/testing-guide.md`)
 - Architecture documentation (`tests/e2e/README.md`)
 
@@ -138,7 +139,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Task 001 Agent = Production macOS NetworkExtension (intercepts system packets)
 - QUIC Test Client = Test harness CLI (sends arbitrary DATAGRAMs from scripts)
 
-**Total Tests: 44+** (Phases 1-4 complete)
+**Total Tests: 55+** (Phases 1-5 complete)
 
 **Capabilities Needed:**
 - NAT testing (Intermediate on cloud)
@@ -249,7 +250,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. 🔄 004: E2E Testing (Phases 1-4 complete, Phase 5-6 remaining)
+4. 🔄 004: E2E Testing (Phases 1-5 complete, Phase 6 performance metrics remaining)
 
 **Path to P2P (primary goal):**
 - All of above + 005: P2P Hole Punching

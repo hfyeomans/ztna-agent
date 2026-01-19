@@ -1,7 +1,7 @@
 # ZTNA Testing & Demo Guide
 
 **Last Updated:** 2026-01-19
-**Status:** Phase 4 Complete (Advanced UDP Scenarios)
+**Status:** Phase 5 Complete (Reliability Tests)
 
 ---
 
@@ -134,6 +134,38 @@ tests/e2e/scenarios/udp-advanced.sh
 | Stream stability | 10 packets, 500ms interval | ≥80% success |
 | Burst stress | 50 packets rapid-fire | All sent |
 | Idle timeout | 5s idle within 30s limit | Connection alive |
+
+### Phase 5: Reliability Tests
+
+```bash
+# Run reliability test suite (11 tests)
+tests/e2e/scenarios/reliability-tests.sh
+```
+
+**Tests included:**
+
+**5.1 Component Restart Tests:**
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Intermediate restart | Stop/restart server, reconnect | Connectivity restored |
+| Connector restart | Stop/restart connector | Data flow resumes |
+| Active flow restart | Restart connector during stream | Partial delivery (≥1 packet) |
+
+**5.2 Error Condition Tests:**
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Unknown service ID | Send to non-existent service | No data echo (QAD only) |
+| Unknown destination | Send to TEST-NET address | No data echo |
+| Invalid certificates | Start server with bad cert path | Server refuses to start |
+| Non-listening port | Connect to port 59999 | Connection fails/timeout |
+| Rapid reconnection | 5 connections in 2 seconds | All succeed |
+
+**5.3 Network Impairment Tests (Stretch):**
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Packet loss | Simulate with pfctl/tc | Skipped (requires root) |
+| Packet reorder | Simulate with tc netem | Skipped (requires root) |
+| NAT rebinding | Port change simulation | Skipped (needs namespace) |
 
 ---
 
@@ -374,9 +406,12 @@ tail tests/e2e/artifacts/logs/app-connector.log
 | 4.2 | 5 | ✅ Complete | Echo integrity (payload patterns) |
 | 4.3 | 2 | ✅ Complete | Concurrent flows, isolation |
 | 4.4 | 3 | ✅ Complete | Long-running, burst, idle timeout |
-| 5+ | TBD | 🔲 Planned | Reliability, performance metrics |
+| 5.1 | 3 | ✅ Complete | Component restart behavior |
+| 5.2 | 5 | ✅ Complete | Error conditions (invalid certs, ports) |
+| 5.3 | 3 | ⚠️ Skipped | Network impairment (requires root) |
+| 6 | TBD | 🔲 Planned | Performance metrics |
 
-**Total Tests: 44+**
+**Total Tests: 55+**
 
 ---
 
@@ -399,6 +434,7 @@ After running the demo, you can:
 | Test runner (Phase 1) | `tests/e2e/run-mvp.sh` |
 | Protocol validation (Phase 2 & 3.5) | `tests/e2e/scenarios/protocol-validation.sh` |
 | Advanced UDP tests (Phase 4) | `tests/e2e/scenarios/udp-advanced.sh` |
+| Reliability tests (Phase 5) | `tests/e2e/scenarios/reliability-tests.sh` |
 | QUIC test client | `tests/e2e/fixtures/quic-client/` |
 | Echo server | `tests/e2e/fixtures/echo-server/` |
 | Environment config | `tests/e2e/config/env.local` |

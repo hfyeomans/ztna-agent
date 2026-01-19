@@ -149,23 +149,27 @@
 
 ---
 
-## Phase 5: Reliability Tests
+## Phase 5: Reliability Tests ✅ COMPLETE
 
 ### 5.1 Component Restart
-- [ ] Restart Intermediate, verify reconnect behavior
-- [ ] Restart Connector, verify reconnect behavior
-- [ ] Test with active flows during restart
+- [x] Restart Intermediate, verify reconnect behavior
+- [x] Restart Connector, verify reconnect behavior
+- [x] Test with active flows during restart (partial delivery confirmed)
 
 ### 5.2 Error Conditions
-- [ ] Invalid packets (malformed headers)
-- [ ] Unknown destinations
-- [ ] Invalid certificates (negative test)
+- [x] Invalid packets (malformed headers - covered in Phase 3.5)
+- [x] Unknown destinations (no data echo, QAD-only expected)
+- [x] Invalid certificates (negative test - server refuses to start)
+- [x] Connection to non-listening port
+- [x] Rapid reconnection attempts (5/5 success)
 
-### 5.3 Network Impairment (Stretch)
-- [ ] Packet loss simulation
-- [ ] Packet reorder simulation
-- [ ] Packet duplication simulation
-- [ ] NAT rebinding (port change)
+### 5.3 Network Impairment (Stretch - Skipped, requires root)
+- [~] Packet loss simulation (skipped - requires pfctl/tc)
+- [~] Packet reorder simulation (skipped - requires root)
+- [~] Packet duplication simulation (not implemented)
+- [~] NAT rebinding (port change) (skipped - requires network namespace)
+
+**Test Script:** `tests/e2e/scenarios/reliability-tests.sh` (11 tests)
 
 ---
 
