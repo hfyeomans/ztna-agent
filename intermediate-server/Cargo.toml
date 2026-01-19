@@ -1,0 +1,19 @@
+[package]
+name = "intermediate-server"
+version = "0.1.0"
+edition = "2021"
+description = "ZTNA Intermediate Server - QUIC relay with QAD support"
+
+[dependencies]
+# QUIC implementation (same version as Agent)
+quiche = "0.22"
+
+# Event loop (matches quiche examples)
+mio = { version = "0.8", features = ["net", "os-poll"] }
+
+# Crypto for retry tokens
+ring = "0.17"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"

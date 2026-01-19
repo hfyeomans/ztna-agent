@@ -34,94 +34,194 @@ git push -u origin feature/002-intermediate-server
 
 ---
 
+## Critical Compatibility Requirements
+
+These must match the existing Agent implementation (`core/packet_processor/src/lib.rs`):
+
+| Parameter | Value | Agent Reference |
+|-----------|-------|-----------------|
+| **ALPN** | `b"ztna-v1"` | `lib.rs:28` |
+| **QAD Format** | `0x01 + IPv4(4 bytes) + port(2 bytes BE)` | `lib.rs:255-262` |
+| **QAD Transport** | DATAGRAM only (not Stream) | `lib.rs:251` |
+| **Max DATAGRAM** | 1350 bytes | `lib.rs:22` |
+| **Idle Timeout** | 30000ms | `lib.rs:25` |
+
+---
+
 ## Phase 1: Project Setup
 
 ### 1.1 Create Rust Crate
 - [ ] Create `intermediate-server/` directory at project root
 - [ ] Initialize with `cargo init --name intermediate-server`
+- [ ] Add to workspace `Cargo.toml` if using workspace
 - [ ] Add dependencies to Cargo.toml:
-  - `quiche` (QUIC library)
-  - `tokio` (async runtime)
-  - `mio` (event loop)
-  - `ring` (crypto)
-  - `log` + `env_logger` (logging)
+  - `quiche = "0.22"` (QUIC library - same version as Agent)
+  - `mio = "0.8"` (event loop - matches quiche examples)
+  - `ring = "0.17"` (crypto for retry tokens)
+  - `log = "0.4"` + `env_logger = "0.11"` (logging)
 
 ### 1.2 Basic Server Structure
-- [ ] Create main.rs with tokio runtime
+- [ ] Create main.rs with mio event loop
 - [ ] Create UDP socket binding to `0.0.0.0:4433`
-- [ ] Set up logging infrastructure
-- [ ] Add CLI arguments (port, cert paths)
+- [ ] Set up logging infrastructure with `env_logger`
+- [ ] Add CLI arguments (port, cert paths) via `std::env::args`
+
+### 1.3 TLS Certificates
+- [ ] Generate self-signed cert for development:
+  ```bash
+  openssl genrsa -out key.pem 2048
+  openssl req -new -x509 -key key.pem -out cert.pem -days 365 -subj "/CN=localhost"
+  ```
+- [ ] Store in `intermediate-server/certs/`
 
 ---
 
 ## Phase 2: QUIC Server Implementation
 
-### 2.1 TLS Configuration
-- [ ] Generate self-signed cert for development
-- [ ] Create `quiche::Config` with server settings
-- [ ] Enable DATAGRAM support
-- [ ] Set appropriate timeouts and limits
+### 2.1 quiche Configuration
+- [ ] Create `quiche::Config` with server settings:
+  ```rust
+  let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+  config.load_cert_chain_from_pem_file("certs/cert.pem")?;
+  config.load_priv_key_from_pem_file("certs/key.pem")?;
 
-### 2.2 Connection Management
-- [ ] Create `Client` struct to track each connection
+  // CRITICAL: Must match Agent ALPN
+  config.set_application_protos(&[b"ztna-v1"])?;
+
+  // Enable DATAGRAM support (for QAD and IP tunneling)
+  config.enable_dgram(true, 1000, 1000);
+
+  // Timeouts and limits (match Agent)
+  config.set_max_idle_timeout(30_000);
+  config.set_max_recv_udp_payload_size(1350);
+  config.set_max_send_udp_payload_size(1350);
+  config.set_initial_max_data(10_000_000);
+  config.set_initial_max_stream_data_bidi_local(1_000_000);
+  config.set_initial_max_stream_data_bidi_remote(1_000_000);
+  config.set_initial_max_streams_bidi(100);
+  ```
+
+### 2.2 QUIC Header Parsing
+- [ ] Parse incoming UDP packets with `quiche::Header::from_slice()`
+- [ ] Handle version negotiation for unsupported versions
+- [ ] Extract destination connection ID (DCID) for routing
+
+### 2.3 Stateless Retry (Anti-Amplification)
+- [ ] Generate retry token using HMAC with server secret
+- [ ] Validate retry token on subsequent Initial packets
+- [ ] Mint original DCID for connection tracking
+- [ ] Send `quiche::negotiate_version()` or `quiche::retry()` as needed
+
+### 2.4 Connection Management
+- [ ] Create `Client` struct to track each connection:
+  ```rust
+  struct Client {
+      conn: quiche::Connection,
+      observed_addr: SocketAddr,
+      client_type: Option<ClientType>,
+      registered_id: Option<String>,
+  }
+  ```
 - [ ] HashMap for connection ID → Client lookup
-- [ ] Handle QUIC handshake
+- [ ] Accept connections with `quiche::accept()`
 - [ ] Track connection state (connecting, established, draining)
 
-### 2.3 Packet Processing Loop
+### 2.5 Event Loop
+- [ ] mio-based UDP socket polling
 - [ ] Receive UDP packets from socket
-- [ ] Route to correct `quiche::Connection`
-- [ ] Process QUIC events
-- [ ] Send outbound packets
+- [ ] Route to correct `quiche::Connection` by DCID
+- [ ] Process QUIC events (handshake, streams, datagrams)
+- [ ] Send outbound packets via `conn.send()`
+- [ ] Handle timeouts via `conn.on_timeout()`
 
 ---
 
 ## Phase 3: QAD Implementation
 
 ### 3.1 Address Observation
-- [ ] Extract source IP:Port from each UDP packet
+- [ ] Extract source IP:Port from `RecvInfo.from`
 - [ ] Store observed address per connection
+- [ ] Detect address changes (NAT rebinding)
 
 ### 3.2 OBSERVED_ADDRESS Message
-- [ ] Define message format (type byte + IP + port)
-- [ ] Send via DATAGRAM or Stream 0
-- [ ] Send on connection establishment
+**Format (must match Agent parser at `lib.rs:255-262`):**
+```
++------+----------+----------+----------+----------+----------+----------+
+| 0x01 | IPv4[0]  | IPv4[1]  | IPv4[2]  | IPv4[3]  | Port[HI] | Port[LO] |
++------+----------+----------+----------+----------+----------+----------+
+  1 byte           4 bytes (IPv4)              2 bytes (big-endian)
+```
+
+- [ ] Create QAD message builder function
+- [ ] Send via DATAGRAM (NOT Stream) immediately after handshake
 - [ ] Resend on address change detection
 
 ### 3.3 Client Notification
-- [ ] Notify client immediately after handshake
+- [ ] Send QAD message when `conn.is_established()` becomes true
 - [ ] Log observed addresses for debugging
+- [ ] Re-send QAD if `RecvInfo.from` differs from stored address
 
 ---
 
 ## Phase 4: Client Registry
 
-### 4.1 Client Types
-- [ ] Define `ClientType` enum: Agent, Connector
-- [ ] Parse client type from ALPN or initial message
-- [ ] Store type in Client struct
+### 4.1 Client Registration Protocol
+Since ALPN is fixed to `ztna-v1`, client type must be communicated via a registration message.
+
+**Registration Message Format (sent by client after handshake):**
+```
++------+------+------------------+
+| Type | Len  | ID (UTF-8)       |
++------+------+------------------+
+  1      1      variable
+
+Type: 0x10 = Agent, 0x11 = Connector
+Len: Length of ID string (0-255)
+ID: Service/destination identifier
+```
+
+- [ ] Define `ClientType` enum: `Agent`, `Connector`
+- [ ] Parse registration message from first received DATAGRAM
+- [ ] Store type and ID in Client struct
 
 ### 4.2 Routing Table
-- [ ] Map destination IDs to Connector connections
-- [ ] Map Agent connections to their target destinations
+- [ ] Map service IDs to Connector connections
+- [ ] Map Agent connections to their target service ID
 - [ ] Handle connection cleanup on disconnect
+- [ ] Support multiple Agents connecting to same Connector
 
 ---
 
 ## Phase 5: DATAGRAM Relay
 
-### 5.1 Receive DATAGRAMs
-- [ ] Process incoming DATAGRAMs from connections
-- [ ] Parse routing header (destination ID)
+### 5.1 Relay Model
+**Key Decision:** Agent sends raw IP packets (no routing header). Routing is based on connection registration, not packet contents.
 
-### 5.2 Relay Logic
-- [ ] Look up destination in routing table
-- [ ] Forward DATAGRAM to destination connection
-- [ ] Handle destination not found (drop or queue)
+```
+Agent (registered for service "app1")
+    │
+    │ DATAGRAM: raw IP packet
+    ▼
+Intermediate looks up: Agent's target → "app1"
+Intermediate looks up: Connector for "app1" → conn_id_xyz
+    │
+    │ DATAGRAM: raw IP packet (forwarded unchanged)
+    ▼
+Connector (registered as "app1")
+```
 
-### 5.3 Bidirectional Relay
-- [ ] Agent → Intermediate → Connector
-- [ ] Connector → Intermediate → Agent
+### 5.2 Receive and Relay
+- [ ] Receive DATAGRAMs via `conn.dgram_recv()`
+- [ ] Skip QAD messages (type 0x01) and registration messages (type 0x10/0x11)
+- [ ] For other DATAGRAMs (raw IP packets):
+  - Look up sender in registry
+  - Find paired connection (Agent→Connector or Connector→Agent)
+  - Forward via `dest_conn.dgram_send()`
+
+### 5.3 Error Handling
+- [ ] Handle destination not found (log, drop packet)
+- [ ] Handle destination connection closed (clean up pairing)
+- [ ] Handle DATAGRAM send failures (buffer full, etc.)
 
 ---
 
@@ -129,24 +229,31 @@ git push -u origin feature/002-intermediate-server
 
 ### 6.1 Local Testing
 - [ ] Run server on localhost:4433
-- [ ] Start Agent, verify connection
-- [ ] Verify QAD message received by Agent
+- [ ] Start Agent (from Task 001)
+- [ ] Verify QUIC handshake succeeds
+- [ ] Verify Agent receives OBSERVED_ADDRESS (QAD)
 - [ ] Check logs on both sides
 
 ### 6.2 Connection Lifecycle
 - [ ] Test connect/disconnect cycles
 - [ ] Test multiple concurrent connections
-- [ ] Verify clean shutdown
+- [ ] Test idle timeout handling
+- [ ] Verify clean shutdown without resource leaks
+
+### 6.3 Basic Relay Test (Placeholder)
+- [ ] Create simple mock connector (can be done in Phase 3 task)
+- [ ] Verify DATAGRAM forwarding works bidirectionally
 
 ---
 
 ## Success Criteria
 
-1. [ ] Server starts and listens on UDP port
-2. [ ] Agent connects successfully via QUIC
-3. [ ] Agent receives OBSERVED_ADDRESS (QAD)
+1. [ ] Server starts and listens on UDP port 4433
+2. [ ] Agent connects successfully via QUIC (ALPN `ztna-v1`)
+3. [ ] Agent receives OBSERVED_ADDRESS in correct format
 4. [ ] Server logs show connection events
-5. [ ] Clean shutdown without resource leaks
+5. [ ] Stateless retry works (tested with high packet rate)
+6. [ ] Clean shutdown without resource leaks
 
 ---
 
@@ -156,11 +263,11 @@ git push -u origin feature/002-intermediate-server
 intermediate-server/
 ├── Cargo.toml
 ├── src/
-│   ├── main.rs           # Entry point, CLI, server loop
-│   ├── server.rs         # QUIC server implementation
+│   ├── main.rs           # Entry point, CLI, mio event loop
+│   ├── server.rs         # QUIC server: config, accept, send/recv
 │   ├── client.rs         # Client connection state
-│   ├── registry.rs       # Client registry and routing
-│   ├── qad.rs            # QAD message handling
+│   ├── registry.rs       # Client registry and routing table
+│   ├── qad.rs            # QAD message builder
 │   └── relay.rs          # DATAGRAM relay logic
 └── certs/
     ├── cert.pem          # Development certificate
@@ -173,10 +280,12 @@ intermediate-server/
 
 | Risk | Mitigation |
 |------|------------|
-| quiche API learning curve | Reference quiche examples |
-| Certificate handling | Use self-signed for dev, document production setup |
-| Connection ID management | Use quiche's built-in connection ID handling |
+| ALPN mismatch breaks handshake | Explicitly set `b"ztna-v1"` to match Agent |
+| QAD format incompatibility | Use exact format from Agent parser |
+| Amplification attacks | Implement stateless retry tokens |
+| Connection ID management | Use quiche's built-in handling via `accept()` |
 | Memory leaks from orphan connections | Implement timeout-based cleanup |
+| NAT rebinding goes undetected | Compare `RecvInfo.from` to stored address |
 
 ---
 
@@ -185,3 +294,4 @@ intermediate-server/
 - [quiche server example](https://github.com/cloudflare/quiche/blob/master/quiche/examples/server.rs)
 - [QUIC RFC 9000](https://datatracker.ietf.org/doc/html/rfc9000)
 - [QUIC DATAGRAM RFC 9221](https://datatracker.ietf.org/doc/html/rfc9221)
+- Agent implementation: `core/packet_processor/src/lib.rs`
