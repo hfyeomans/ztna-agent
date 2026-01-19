@@ -1,0 +1,19 @@
+[package]
+name = "app-connector"
+version = "0.1.0"
+edition = "2021"
+description = "ZTNA App Connector - QUIC client that forwards traffic to local services"
+
+[dependencies]
+# QUIC implementation (same version as Intermediate Server)
+quiche = "0.22"
+
+# Event loop (matches Intermediate Server - mio not tokio)
+mio = { version = "0.8", features = ["net", "os-poll"] }
+
+# Crypto for connection IDs
+ring = "0.17"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
