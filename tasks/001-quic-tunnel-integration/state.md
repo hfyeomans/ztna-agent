@@ -1,36 +1,59 @@
-# Project State: ZTNA Agent
+# Task State: QUIC Tunnel Integration
 
-**Last Updated:** 2026-01-18 (Phase 2 Complete)
+**Task ID:** 001-quic-tunnel-integration
+**Status:** ✅ COMPLETE
+**Last Updated:** 2026-01-18
+
+---
 
 ## Overview
 
-Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encapsulates them in QUIC tunnels, and routes through an intermediate system to application connectors.
+QUIC tunnel integration for the macOS ZTNA Agent - Rust packet processor with QUIC client and Swift UDP transport integration.
 
-## Current Phase: Phase 3 - Intermediate System
+**Note:** This task is COMPLETE. Subsequent phases (Intermediate Server, App Connector, etc.) have been migrated to separate tasks. See `tasks/_context/README.md` for the full task overview.
 
-### What's Done
-- ✅ MVP packet interception working
-- ✅ Swift 6.2 / macOS 26+ modernization
-- ✅ Build system fixed (explicit modules disabled for Extension)
-- ✅ **Phase 1: Rust QUIC Client** (commit 958ce3f)
-- ✅ **Phase 1.5: Code Quality Fixes** (commit 229448b)
-  - Fixed Rust connection ID generation (security - now uses `ring::rand::SystemRandom`)
-  - Fixed Swift `isRunning` data race (now uses `OSAllocatedUnfairLock`)
-  - Removed dead code (OutboundPacket struct, outbound_queue, etc.)
-- ✅ **Phase 2: Swift UDP Integration** (commit pending)
-  - Full QUIC agent integration in PacketTunnelProvider
-  - NWConnection for UDP transport
-  - Send/receive loops, timeout handling
-  - Packet tunneling via agent_send_datagram
-  - **Note:** Build verified, functional testing requires Phase 3 server
+---
 
-### What's Next
-1. **Phase 3: Intermediate System** - Build QUIC server for testing and relay
-   - Create `intermediate-server/` crate
-   - Implement QUIC server with quiche (listens on 127.0.0.1:4433)
-   - Accept agent connections, echo OBSERVED_ADDRESS (QAD)
-   - Enable end-to-end testing of Phase 2 implementation
-- See `todo.md` for detailed tasks
+## Completed Phases
+
+### Phase 1: Rust QUIC Client ✅
+**Commit:** 958ce3f
+
+- Full QUIC agent in Rust with quiche 0.22
+- FFI interface for Swift integration
+- QAD (QUIC Address Discovery) message parsing
+- DATAGRAM support for IP tunneling
+- Panic-safe FFI with `AssertUnwindSafe` wrappers
+- 3 unit tests passing
+
+### Phase 1.5: Code Quality Fixes ✅
+**Commit:** 229448b
+
+- Fixed Rust connection ID generation (security - now uses `ring::rand::SystemRandom`)
+- Fixed Swift `isRunning` data race (now uses `OSAllocatedUnfairLock`)
+- Removed dead code (OutboundPacket struct, outbound_queue, etc.)
+
+### Phase 2: Swift UDP Integration ✅
+**Commit:** 286df2a
+
+- Full QUIC agent integration in PacketTunnelProvider
+- NWConnection for UDP transport
+- Send/receive loops, timeout handling
+- Packet tunneling via agent_send_datagram
+- Build verified, functional testing validated (logs show expected "Agent not connected, dropping packet" behavior)
+
+---
+
+## Migrated to Separate Tasks
+
+| Original Phase | New Task | Description |
+|----------------|----------|-------------|
+| Phase 3 | 002-intermediate-server | QUIC server with QAD + relay |
+| Phase 4 | 003-app-connector | Client-side connector |
+| Phase 5 | 004-e2e-relay-testing | End-to-end validation |
+| Phase 6 | 005-p2p-hole-punching | Direct P2P connectivity |
+
+See `tasks/_context/README.md` for full task documentation
 
 ---
 
