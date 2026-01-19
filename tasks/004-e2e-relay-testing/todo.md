@@ -3,7 +3,7 @@
 **Task ID:** 004-e2e-relay-testing
 **Branch:** `feature/004-e2e-relay-testing`
 **Depends On:** Tasks 001, 002, 003
-**Last Updated:** 2026-01-19 (Oracle review integrated)
+**Last Updated:** 2026-01-19
 
 ---
 
@@ -11,15 +11,15 @@
 
 - [x] Task 002 (Intermediate Server) complete and merged
 - [x] Task 003 (App Connector) complete and merged
-- [ ] Create feature branch: `git checkout -b feature/004-e2e-relay-testing`
+- [x] Create feature branch: `git checkout -b feature/004-e2e-relay-testing`
 
 ---
 
-## Phase 1: Local Process Test Environment (MVP)
+## Phase 1: Local Process Test Environment (MVP) ✅ COMPLETE
 
 > **Note:** Use local processes, NOT Docker Compose for MVP. macOS Network Extension requires host execution. Docker Compose is optional for CI later.
 
-- [ ] Create `tests/e2e/` directory structure:
+- [x] Create `tests/e2e/` directory structure:
   ```
   tests/e2e/
   ├── run-mvp.sh           # Main orchestrator
@@ -27,19 +27,46 @@
   ├── scenarios/           # Test scripts
   │   ├── udp-echo.sh
   │   ├── udp-boundary.sh
-  │   └── udp-concurrent.sh
-  └── config/env.local     # Environment config
+  │   └── udp-connectivity.sh
+  ├── config/env.local     # Environment config
+  └── fixtures/echo-server/ # UDP echo server
   ```
-- [ ] Write `lib/common.sh` with component lifecycle helpers
-- [ ] Write `run-mvp.sh` orchestrator script
-- [ ] Create simple UDP echo server for testing
-- [ ] Configure test environment (ports, addresses, certs)
+- [x] Write `lib/common.sh` with component lifecycle helpers
+- [x] Write `run-mvp.sh` orchestrator script
+- [x] Create simple UDP echo server for testing
+- [x] Configure test environment (ports, addresses, certs)
+- [x] Generate test certificates
+- [x] Build and verify tests run (14/14 tests passing)
+
+---
+
+## Phase 1.5: QUIC Test Client (Required for Relay Testing) ✅ COMPLETE
+
+> **Blocker:** Phase 2+ tests require a QUIC client to test the relay path.
+> Current tests bypass the relay (send directly to Echo Server port 9999).
+
+- [x] Create `tests/e2e/fixtures/quic-client/` Rust crate
+  - [x] Use `quiche` crate for QUIC
+  - [x] Implement ALPN `b"ztna-v1"`
+  - [x] Send QUIC DATAGRAMs to Intermediate Server
+  - [x] Receive and print responses
+  - [x] **IP/UDP packet construction** (`--send-udp --dst ip:port`)
+- [x] Integrate QUIC client with test framework
+  - [x] Add `QUIC_CLIENT_BIN` to `common.sh`
+  - [x] Add `send_via_quic` helper
+- [x] Verify relay path works:
+  - [x] QUIC Client → Intermediate → Connector → Echo Server → back
+
+**Bug Fixes Applied:**
+- [x] App Connector: Initial QUIC handshake not sent (added `send_pending()` after connect)
+- [x] App Connector: Local socket not registered with mio poll (return traffic not received)
 
 ---
 
 ## Phase 2: Protocol Validation Tests
 
 > **Critical:** These tests validate core protocol invariants.
+> **Prerequisite:** QUIC Test Client from Phase 1.5 ✅
 
 - [ ] Test: ALPN validation (`b"ztna-v1"`)
   - [ ] Verify connection succeeds with correct ALPN
@@ -54,13 +81,13 @@
 
 ---
 
-## Phase 3: Basic UDP Connectivity
+## Phase 3: Basic UDP Connectivity (Partially Complete)
 
-- [ ] Test: Agent connects to Intermediate
-- [ ] Test: Connector connects to Intermediate
-- [ ] Test: QAD works (both receive observed addresses)
-- [ ] Test: DATAGRAM relay works (Agent → Intermediate → Connector)
-- [ ] Test: Return path works (Connector → Intermediate → Agent)
+- [x] Test: Agent connects to Intermediate
+- [x] Test: Connector connects to Intermediate
+- [x] Test: QAD works (both receive observed addresses)
+- [x] Test: DATAGRAM relay works (Agent → Intermediate → Connector)
+- [x] Test: Return path works (Connector → Intermediate → Agent)
 
 ---
 
@@ -73,8 +100,8 @@
 - [ ] 1351-byte payload (expect drop/reject)
 
 ### 4.2 Echo Integrity Tests
-- [ ] Send UDP packet through tunnel to echo server
-- [ ] Verify response matches request
+- [x] Send UDP packet through tunnel to echo server
+- [x] Verify response matches request
 - [ ] Test with various payload patterns (random, sequential, all-zeros)
 
 ### 4.3 Concurrent Flow Tests
@@ -131,7 +158,7 @@
 
 ## Phase 7: Documentation
 
-- [ ] Write test README with instructions
+- [x] Write test README with instructions
 - [ ] Document test scenarios and expected results
 - [ ] Document metrics collection
 - [ ] Add troubleshooting guide

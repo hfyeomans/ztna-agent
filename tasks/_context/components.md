@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-18
+**Last Updated:** 2026-01-19
 
 ---
 
@@ -82,14 +82,46 @@
 
 ---
 
-### 004: E2E Relay Testing 🔲 NOT STARTED
+### 004: E2E Relay Testing 🔄 IN PROGRESS
 
-**Location:** Test scripts + documentation
+**Location:** `tests/e2e/`
 
 **Dependencies:** 002, 003
 
-**Capabilities needed:**
-- Local test setup (all components on localhost)
+**Status:**
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: Infrastructure | ✅ Done | 14 tests passing (component startup, direct echo) |
+| Phase 1.5: QUIC Test Client | ✅ Done | IP/UDP packet construction, E2E relay VERIFIED |
+| Phase 2: Protocol Validation | 🔲 Next | ALPN, registration, MAX_DATAGRAM_SIZE |
+| Phase 3: Relay Validation | ✅ Done | Full relay path verified (Agent→Intermediate→Connector→Echo→back) |
+
+**Capabilities Built:**
+- Test framework (`lib/common.sh`) with component lifecycle
+- UDP echo server fixture (`fixtures/echo-server/`)
+- **QUIC test client** (`fixtures/quic-client/`) for sending DATAGRAMs
+  - Agent registration (`--service <id>`)
+  - IP/UDP packet construction (`--send-udp --dst ip:port`)
+  - IPv4 header checksum calculation (RFC 1071)
+- Test scenarios for connectivity, echo, boundary conditions
+- Architecture documentation (`tests/e2e/README.md`)
+
+**E2E Relay Verified (2026-01-19):**
+```
+QUIC Client → Intermediate → Connector → Echo Server → back
+✅ Full round-trip: 42-byte IP/UDP packet, 14-byte payload echoed
+```
+
+**Bug Fixes Applied:**
+- App Connector: Initial QUIC handshake not sent (added `send_pending()`)
+- App Connector: Local socket not registered with mio poll (return traffic lost)
+
+**Important Distinction:**
+- Task 001 Agent = Production macOS NetworkExtension (intercepts system packets)
+- QUIC Test Client = Test harness CLI (sends arbitrary DATAGRAMs from scripts)
+
+**Capabilities Needed:**
 - NAT testing (Intermediate on cloud)
 - Latency measurement
 - Failure scenario testing
@@ -168,7 +200,7 @@
                     ▼                       ▼
     ┌─────────────────────────┐   ┌─────────────────────────┐
     │  003: App Connector     │   │  004: E2E Testing       │
-    │  ✅ COMPLETE            │   │  🔲 READY TO START      │
+    │  ✅ COMPLETE            │   │  🔄 IN PROGRESS         │
     └───────────┬─────────────┘   └───────────┬─────────────┘
                 │                             │
                 └─────────────┬───────────────┘
@@ -198,7 +230,7 @@
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. 🔲 004: E2E Testing (ready to start)
+4. 🔄 004: E2E Testing (relay VERIFIED, protocol validation next)
 
 **Path to P2P (primary goal):**
 - All of above + 005: P2P Hole Punching

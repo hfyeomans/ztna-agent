@@ -36,7 +36,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [001](../001-quic-tunnel-integration/) | Agent QUIC Client | ✅ Complete | `master` |
 | [002](../002-intermediate-server/) | Intermediate Server | ✅ Complete | `master` |
 | [003](../003-app-connector/) | App Connector | ✅ Complete | `master` |
-| [004](../004-e2e-relay-testing/) | E2E Relay Testing | 🔲 Ready | `feature/004-e2e-relay-testing` |
+| [004](../004-e2e-relay-testing/) | E2E Relay Testing | 🔄 In Progress | `feature/004-e2e-relay-testing` |
 | [005](../005-p2p-hole-punching/) | P2P Hole Punching | 🔲 Not Started | `feature/005-p2p-hole-punching` |
 | [006](../006-cloud-deployment/) | Cloud Deployment | 🔲 Not Started | `feature/006-cloud-deployment` |
 
@@ -128,6 +128,8 @@ git push -u origin feature/XXX-task-name
 | Bridging Header | `ios-macos/Shared/PacketProcessor-Bridging-Header.h` |
 | Intermediate Server | `intermediate-server/src/main.rs` |
 | App Connector | `app-connector/src/main.rs` |
+| E2E Test Framework | `tests/e2e/README.md` |
+| E2E Test Runner | `tests/e2e/run-mvp.sh` |
 
 ---
 

@@ -1,0 +1,12 @@
+[package]
+name = "udp-echo"
+version = "0.1.0"
+edition = "2021"
+description = "Simple UDP echo server for E2E testing"
+
+[[bin]]
+name = "udp-echo"
+path = "main.rs"
+
+[dependencies]
+# No dependencies needed for simple echo server
