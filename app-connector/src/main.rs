@@ -9,8 +9,8 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
-use std::time::Instant;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::{Duration, Instant};
 
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token};
@@ -46,8 +46,7 @@ const QAD_OBSERVED_ADDRESS: u8 = 0x01;
 /// mio token for QUIC socket
 const QUIC_SOCKET_TOKEN: Token = Token(0);
 
-/// mio token for local forwarding socket (reserved for future use)
-#[allow(dead_code)]
+/// mio token for local forwarding socket
 const LOCAL_SOCKET_TOKEN: Token = Token(1);
 
 // ============================================================================
@@ -107,8 +106,8 @@ struct Connector {
     poll: Poll,
     /// UDP socket for QUIC communication
     quic_socket: UdpSocket,
-    /// Local UDP socket for forwarding
-    local_socket: StdUdpSocket,
+    /// Local UDP socket for forwarding (registered with mio poll)
+    local_socket: UdpSocket,
     /// QUIC connection
     conn: Option<quiche::Connection>,
     /// quiche configuration
@@ -174,9 +173,10 @@ impl Connector {
         poll.registry()
             .register(&mut quic_socket, QUIC_SOCKET_TOKEN, Interest::READABLE)?;
 
-        // Create local socket for forwarding (non-blocking)
-        let local_socket = StdUdpSocket::bind("0.0.0.0:0")?;
-        local_socket.set_nonblocking(true)?;
+        // Create local socket for forwarding and register with poll
+        let mut local_socket = UdpSocket::bind("0.0.0.0:0".parse()?)?;
+        poll.registry()
+            .register(&mut local_socket, LOCAL_SOCKET_TOKEN, Interest::READABLE)?;
 
         log::info!("QUIC socket bound to {}", quic_socket.local_addr()?);
         log::info!("Local socket bound to {}", local_socket.local_addr()?);
@@ -203,23 +203,36 @@ impl Connector {
         // Initiate QUIC connection
         self.connect()?;
 
+        // Send initial QUIC handshake packet immediately
+        self.send_pending()?;
+
         let mut events = Events::with_capacity(1024);
 
         loop {
             // Calculate timeout based on connection timeout
-            let timeout = self.conn.as_ref().and_then(|c| c.timeout());
+            // Use a reasonable minimum to ensure we check local socket frequently
+            let timeout = self.conn.as_ref()
+                .and_then(|c| c.timeout())
+                .map(|t| t.min(Duration::from_millis(100)))
+                .or(Some(Duration::from_millis(100)));
 
             // Poll for events
             self.poll.poll(&mut events, timeout)?;
 
-            // Process QUIC socket events
+            // Process events
             for event in events.iter() {
-                if event.token() == QUIC_SOCKET_TOKEN {
-                    self.process_quic_socket()?;
+                match event.token() {
+                    QUIC_SOCKET_TOKEN => {
+                        self.process_quic_socket()?;
+                    }
+                    LOCAL_SOCKET_TOKEN => {
+                        self.process_local_socket()?;
+                    }
+                    _ => {}
                 }
             }
 
-            // Process local socket (non-mio, just check for responses)
+            // Also check local socket even without events (for edge cases)
             self.process_local_socket()?;
 
             // Process timeouts

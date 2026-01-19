@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-18
+**Last Updated:** 2026-01-19 (Phase 6 Performance Metrics Complete)
 
 ---
 
@@ -82,17 +82,71 @@
 
 ---
 
-### 004: E2E Relay Testing 🔲 NOT STARTED
+### 004: E2E Relay Testing ✅ COMPLETE
 
-**Location:** Test scripts + documentation
+**Location:** `tests/e2e/`
 
 **Dependencies:** 002, 003
 
-**Capabilities needed:**
-- Local test setup (all components on localhost)
+**Status:**
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: Infrastructure | ✅ Done | 14 tests passing (component startup, direct echo) |
+| Phase 1.5: QUIC Test Client | ✅ Done | IP/UDP packet construction, E2E relay VERIFIED |
+| Phase 2: Protocol Validation | ✅ Done | 8 tests: ALPN, registration, DATAGRAM size, payloads |
+| Phase 3: Relay Validation | ✅ Done | Full relay path verified |
+| Phase 3.5: Coverage Gaps | ✅ Done | 6 tests: connector reg, service ID edge cases, malformed headers |
+| Phase 4: Advanced UDP | ✅ Done | 11 tests: payload patterns, concurrent flows, burst, idle timeout |
+| Phase 5: Reliability | ✅ Done | 11 tests: component restart, error conditions, rapid reconnect |
+| Phase 6: Performance | ✅ Done | Latency (53µs baseline, 312µs tunneled), throughput (295K PPS), handshake (802µs) |
+
+**Capabilities Built:**
+- Test framework (`lib/common.sh`) with component lifecycle
+- UDP echo server fixture (`fixtures/echo-server/`)
+- **QUIC test client** (`fixtures/quic-client/`) for sending DATAGRAMs
+  - Agent registration (`--service <id>`)
+  - IP/UDP packet construction (`--send-udp --dst ip:port`)
+  - IPv4 header checksum calculation (RFC 1071)
+  - **Phase 2:** Protocol validation (`--alpn`, `--payload-size`, `--expect-fail`)
+  - **Phase 3.5:** Programmatic DATAGRAM sizing (`--query-max-size`, `max`, `max-1`, `max+1`)
+  - **Phase 4:** Payload patterns (`--payload-pattern zeros|ones|sequential|random`)
+  - **Phase 4:** Multi-packet (`--repeat`, `--delay`, `--burst`)
+  - **Phase 4:** Echo verification (`--verify-echo`)
+  - **Phase 6:** RTT measurement (`--measure-rtt`, `--rtt-count`)
+  - **Phase 6:** Handshake timing (`--measure-handshake`)
+- Test scenarios for connectivity, echo, boundary conditions
+- Protocol validation test suite (`scenarios/protocol-validation.sh`) - 14 tests
+- Advanced UDP test suite (`scenarios/udp-advanced.sh`) - 11 tests
+- Reliability test suite (`scenarios/reliability-tests.sh`) - 11 tests
+- Performance metrics suite (`scenarios/performance-metrics.sh`) - latency, throughput, timing
+- Comprehensive testing guide (`tasks/_context/testing-guide.md`)
+- Architecture documentation (`tests/e2e/README.md`)
+
+**Key Protocol Discovery (Phase 2):**
+- Effective QUIC DATAGRAM limit is **~1307 bytes**, not 1350
+- QUIC overhead (headers, encryption, framing) reduces usable payload
+- Test verified: 1306 bytes OK, 1308 bytes → BufferTooShort
+
+**E2E Relay Verified (2026-01-19):**
+```
+QUIC Client → Intermediate → Connector → Echo Server → back
+✅ Full round-trip: 42-byte IP/UDP packet, 14-byte payload echoed
+```
+
+**Bug Fixes Applied:**
+- App Connector: Initial QUIC handshake not sent (added `send_pending()`)
+- App Connector: Local socket not registered with mio poll (return traffic lost)
+
+**Important Distinction:**
+- Task 001 Agent = Production macOS NetworkExtension (intercepts system packets)
+- QUIC Test Client = Test harness CLI (sends arbitrary DATAGRAMs from scripts)
+
+**Total Tests: 61+** (Phases 1-6 complete)
+
+**Capabilities Needed (Remaining):**
 - NAT testing (Intermediate on cloud)
-- Latency measurement
-- Failure scenario testing
+- Network impairment testing (requires root/pfctl)
 
 ---
 
@@ -108,6 +162,42 @@
 - QUIC connection migration
 - Path selection (prefer direct)
 - Fallback to relay
+
+---
+
+### 006: Cloud Deployment 🔲 NOT STARTED
+
+**Location:** Cloud infrastructure + deployment scripts
+
+**Dependencies:** 004 (E2E Testing - local validation first)
+
+**Purpose:**
+- Deploy Intermediate Server and App Connector to cloud
+- Enable NAT testing with real public IPs
+- Validate QAD with actual network conditions
+- Prepare infrastructure for production
+
+**Deployment Targets:**
+| Component | Target |
+|-----------|--------|
+| Intermediate Server | Cloud VM with public IP |
+| App Connector | Cloud VM (same or separate) |
+| Test Service | Cloud VM (localhost) |
+
+**Capabilities needed:**
+- Cloud VM provisioning (DigitalOcean/AWS/Vultr/GCP)
+- TLS certificate management (self-signed or Let's Encrypt)
+- Systemd service configuration
+- Firewall rules (UDP 4433)
+- Remote Agent testing (NAT traversal)
+
+**Key Decisions (TBD):**
+| Decision | Options | Status |
+|----------|---------|--------|
+| Cloud Provider | DO, AWS, Vultr, GCP | TBD |
+| Deployment | Single VM vs Separate VMs | TBD |
+| Certificates | Self-signed vs Let's Encrypt | TBD |
+| Automation | Manual, Terraform, Ansible | TBD |
 
 ---
 
@@ -132,17 +222,25 @@
                     ▼                       ▼
     ┌─────────────────────────┐   ┌─────────────────────────┐
     │  003: App Connector     │   │  004: E2E Testing       │
-    │  ✅ COMPLETE            │   │  🔲 NOT STARTED         │
+    │  ✅ COMPLETE            │   │  🔄 IN PROGRESS         │
     └───────────┬─────────────┘   └───────────┬─────────────┘
                 │                             │
                 └─────────────┬───────────────┘
                               │
-                              │ relay working
+                              │ relay working locally
                               ▼
                     ┌─────────────────────────┐
                     │  005: P2P Hole Punching │
                     │  🔲 NOT STARTED         │
                     │  ★ PRIMARY GOAL ★       │
+                    └───────────┬─────────────┘
+                                │
+                                │ needs NAT testing
+                                ▼
+                    ┌─────────────────────────┐
+                    │  006: Cloud Deployment  │
+                    │  🔲 NOT STARTED         │
+                    │  (NAT testing, prod)    │
                     └─────────────────────────┘
 ```
 
@@ -150,14 +248,17 @@
 
 ## Critical Path
 
-**Shortest path to working relay:**
+**Shortest path to working relay (local):**
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. 🔲 004: E2E Testing
+4. ✅ 004: E2E Testing (Phases 1-6 complete, ready for PR)
 
 **Path to P2P (primary goal):**
 - All of above + 005: P2P Hole Punching
+
+**Path to production deployment:**
+- All of above + 006: Cloud Deployment (NAT testing, production readiness)
 
 ---
 

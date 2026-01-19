@@ -12,7 +12,34 @@ Document intentional placeholder/scaffolding code that is part of planned featur
 
 ## Active Placeholders
 
-*None yet - task not started*
+### Simplified Flow Mapping (Single Flow Only)
+
+**File:** `app-connector/src/main.rs`
+**Line:** ~270 (in `process_local_socket()` method)
+**Added:** 2026-01-19
+**Status:** In Progress (works for MVP, needs enhancement for production)
+
+**Purpose:**
+Map return traffic from local services back to the correct QUIC connection. In production, this requires proper 5-tuple matching to support multiple concurrent flows.
+
+**Current Implementation:**
+```rust
+// Simplified lookup - gets first flow
+let flow_key = self.flow_map.keys().next().cloned();
+```
+Takes the first (and only) entry in the flow map. Works correctly with a single active flow.
+
+**Target Implementation:**
+Proper 5-tuple matching based on source IP:port from the local socket response:
+```rust
+// Proper lookup by 5-tuple
+let src_addr = recv_addr; // From local socket
+let flow_key = self.flow_map.get(&(src_addr.ip(), src_addr.port()));
+```
+
+**Blocked By:**
+- Multiple concurrent flows test scenario (Phase 4.3)
+- Decision on flow tracking data structure (HashMap vs custom index)
 
 ---
 

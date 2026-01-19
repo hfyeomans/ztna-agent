@@ -1,0 +1,23 @@
+[package]
+name = "quic-test-client"
+version = "0.1.0"
+edition = "2021"
+description = "QUIC test client for E2E relay testing"
+
+[[bin]]
+name = "quic-test-client"
+path = "src/main.rs"
+
+[dependencies]
+# QUIC implementation (matches other components)
+quiche = "0.22"
+
+# Event loop (matches other components)
+mio = { version = "0.8", features = ["net", "os-poll"] }
+
+# Crypto for connection IDs
+ring = "0.17"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"

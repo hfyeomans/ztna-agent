@@ -369,6 +369,7 @@ impl Server {
                 }
                 _ => {
                     // Raw IP packet - relay to paired connection
+                    log::info!("Received {} bytes to relay from {:?}", dgram.len(), conn_id);
                     self.relay_datagram(conn_id, &dgram)?;
                 }
             }
@@ -427,18 +428,22 @@ impl Server {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Find destination connection
         let dest_conn_id = match self.registry.find_destination(from_conn_id) {
-            Some(id) => id,
+            Some(id) => {
+                log::info!("Found destination {:?} for {:?}", id, from_conn_id);
+                id
+            }
             None => {
-                log::trace!("No destination for relay from {:?}", from_conn_id);
+                log::warn!("No destination for relay from {:?}", from_conn_id);
                 return Ok(());
             }
         };
 
         // Forward the datagram
         if let Some(dest_client) = self.clients.get_mut(&dest_conn_id) {
+            log::info!("Destination connection established: {}", dest_client.conn.is_established());
             match dest_client.conn.dgram_send(dgram) {
                 Ok(_) => {
-                    log::trace!(
+                    log::info!(
                         "Relayed {} bytes from {:?} to {:?}",
                         dgram.len(),
                         from_conn_id,
@@ -446,9 +451,11 @@ impl Server {
                     );
                 }
                 Err(e) => {
-                    log::debug!("Failed to relay datagram: {:?}", e);
+                    log::error!("Failed to relay datagram: {:?}", e);
                 }
             }
+        } else {
+            log::warn!("Destination client {:?} not found in clients map", dest_conn_id);
         }
 
         Ok(())
@@ -465,6 +472,7 @@ impl Server {
             loop {
                 match client.conn.send(&mut self.send_buf) {
                     Ok((len, send_info)) => {
+                        log::trace!("Sending {} bytes to {:?}", len, send_info.to);
                         self.socket.send_to(&self.send_buf[..len], send_info.to)?;
                     }
                     Err(quiche::Error::Done) => break,
