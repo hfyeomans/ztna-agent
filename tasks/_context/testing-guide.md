@@ -30,8 +30,9 @@ cd /Users/hank/dev/src/agent-driver/ztna-agent
 tests/e2e/fixtures/echo-server/target/release/udp-echo --port 9999
 
 # Terminal 2: Intermediate Server
+# Note: E2E tests use certs/ at project root (see tests/e2e/config/env.local)
 RUST_LOG=info intermediate-server/target/release/intermediate-server 4433 \
-  intermediate-server/certs/cert.pem intermediate-server/certs/key.pem
+  certs/cert.pem certs/key.pem
 
 # Terminal 3: App Connector
 RUST_LOG=info app-connector/target/release/app-connector \
@@ -185,8 +186,8 @@ RUST_LOG=debug intermediate-server/target/release/intermediate-server ...
 source tests/e2e/lib/common.sh
 
 # Component lifecycle
-start_intermediate_server    # Start with logging
-start_app_connector         # Start with service ID
+start_intermediate           # Start with logging
+start_connector             # Start with service ID
 start_echo_server           # Start UDP echo
 stop_all_components         # Clean shutdown
 

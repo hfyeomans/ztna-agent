@@ -354,6 +354,71 @@ netstat -an | grep 4433
 
 ---
 
+---
+
+## Configuration Scalability (From Task 004 Oracle Review)
+
+> **Note:** Recommendations from Phase 2 E2E testing Oracle review (2026-01-19)
+
+When migrating to cloud services, plan to address these hard-coded values:
+
+### Current Hard-Coded Values to Replace
+
+| Value | Current Location | Migration Strategy |
+|-------|------------------|-------------------|
+| `test-service` | protocol-validation.sh | Environment variable `$SERVICE_ID` |
+| `127.0.0.1:4433` | Multiple scripts | Config file or env var |
+| DATAGRAM sizes | quic-client, test scripts | Query `dgram_max_writable_len()` |
+| Cert paths | common.sh, testing-guide | Single canonical `$CERT_DIR` |
+
+### Recommended Configuration Architecture
+
+```
+# Environment-based (development)
+INTERMEDIATE_HOST=127.0.0.1
+INTERMEDIATE_PORT=4433
+SERVICE_ID=test-service
+CERT_DIR=/path/to/certs
+
+# Config file (production)
+config.toml:
+[relay]
+host = "relay.example.com"
+port = 4433
+
+[service]
+id = "production-service"
+token = "..."  # From secrets manager
+
+[tls]
+cert = "/etc/ztna/cert.pem"
+key = "/etc/ztna/key.pem"
+```
+
+### Production Scalability Requirements
+
+1. **Service Discovery**
+   - DNS-based relay endpoint resolution
+   - Health check integration
+   - Failover support
+
+2. **Certificate Management**
+   - Let's Encrypt with auto-renewal
+   - Or cloud KMS (AWS ACM, GCP Certificate Manager)
+   - Certificate rotation without downtime
+
+3. **Multi-Tenant Service IDs**
+   - Namespaced service IDs: `tenant-id/service-name`
+   - Token-based authentication per tenant
+   - Rate limiting per service ID
+
+4. **Dynamic DATAGRAM Sizing**
+   - Use `dgram_max_writable_len()` after handshake
+   - Adapt to MTU/network conditions
+   - Log effective limits for monitoring
+
+---
+
 ## References
 
 - [DigitalOcean API](https://docs.digitalocean.com/reference/api/)

@@ -260,6 +260,62 @@ QUIC Test Client receives echoed data
 
 ---
 
+---
+
+## Oracle Review Findings (Phase 2)
+
+**Date:** 2026-01-19
+
+### Confirmed Correct Patterns
+
+1. **quiche sans-IO pattern:** `quiche::connect()` followed by manual `flush()` is correct. The client calls `flush()` after `connect()` and in subsequent loops after processing.
+
+2. **zsh arithmetic fix:** `: $((var += 1))` is the correct fix for `set -e` with zsh. `((var++))` returns old value as exit status, tripping errexit when it evaluates to 0.
+
+3. **Programmatic DATAGRAM sizing:** quiche exposes `dgram_max_writable_len()` after handshake. Should use this to compute safe payload size and reduce flakiness across versions/MTU.
+
+### Issues Found
+
+**Medium Priority:**
+- `protocol-validation.sh:150-154` uses hard-coded `test-service` instead of `$SERVICE_ID`
+- `protocol-validation.sh:81-143` hard-codes datagram boundary sizes (brittle if QUIC overhead changes)
+
+**Low Priority:**
+- Boundary test only asserts "DATAGRAM queued" not actual relay (`RECV:`)
+- `pkill -f` cleanup can kill unrelated processes on same host
+- `nc -z -u` doesn't reliably confirm UDP service readiness
+- Testing guide has wrong function names (`start_intermediate_server` vs `start_intermediate`)
+- Testing guide has inconsistent cert paths (`intermediate-server/certs` vs `certs/`)
+
+### Coverage Gaps
+
+1. **Connector registration (0x11):** No validation tests (only agent 0x10 tested)
+2. **Malformed IP/UDP headers:** No tests for bad checksum, non-UDP protocol, length mismatch
+3. **Service ID edge cases:** No tests for zero-length or overlong (>255) service IDs
+4. **Unknown opcode handling:** No test for unrecognized registration opcodes
+5. **Multiple datagrams:** No test for back-to-back or interleaved send/recv
+
+### Open Questions from Oracle Review
+
+1. **End-to-end delivery assertion:** Should boundary tests assert `RECV:` (full relay verification) or is "DATAGRAM queued" (client-side acceptance) sufficient?
+   - **Recommendation:** Assert `RECV:` for production confidence; current tests catch client-side issues only
+
+2. **Canonical cert path:** Should scripts use `intermediate-server/certs/` or top-level `certs/`?
+   - **Decision:** E2E tests use `certs/` at project root (per `common.sh:30`)
+   - **Action:** Updated testing-guide.md to clarify
+
+### Recommendations for Task 006 (Cloud Deployment)
+
+When migrating to cloud services, plan for:
+- Removing hard-coded IDs, addresses, ports
+- Scalable configuration via environment/config files
+- Dynamic certificate management (Let's Encrypt or cloud KMS)
+- Service discovery for relay endpoints
+- Token-based authentication for agents/connectors
+- Multi-tenant service ID namespacing
+
+---
+
 ## References
 
 - [quiche documentation](https://docs.rs/quiche/)

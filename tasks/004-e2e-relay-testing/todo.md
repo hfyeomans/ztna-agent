@@ -99,13 +99,38 @@
 
 ---
 
+## Phase 3.5: Oracle Review Fixes (Priority)
+
+> **Oracle Review:** 2026-01-19 - See `research.md` for full findings
+
+### 3.5.1 Medium Priority Fixes
+- [ ] Fix hard-coded `test-service` in `protocol-validation.sh:150-154` → use `$SERVICE_ID`
+- [ ] Replace hard-coded DATAGRAM sizes with programmatic sizing via `dgram_max_writable_len()`
+
+### 3.5.2 Low Priority Fixes
+- [ ] Enhance boundary tests to assert `RECV:` (end-to-end delivery, not just queue)
+- [ ] Replace `pkill -f` with PID-based cleanup (track known PIDs only)
+- [ ] Replace `nc -z -u` readiness check with probe/echo or log-based signal
+- [ ] Fix testing guide function names (`start_intermediate_server` → `start_intermediate`)
+- [ ] Clarify canonical cert path in testing guide (`certs/` vs `intermediate-server/certs`)
+
+### 3.5.3 Coverage Gaps to Address
+- [ ] Add connector registration (0x11) validation tests
+- [ ] Add malformed IP/UDP header tests (bad checksum, non-UDP protocol, length mismatch)
+- [ ] Add zero-length service ID test (expect rejection)
+- [ ] Add overlong service ID (>255 bytes) test (expect rejection)
+- [ ] Add unknown opcode handling test
+- [ ] Add multiple back-to-back datagram test
+
+---
+
 ## Phase 4: UDP Test Scenarios
 
 ### 4.1 Size Boundary Tests
-- [ ] 0-byte payload
-- [ ] 1-byte payload
-- [ ] 1350-byte payload (MAX_DATAGRAM_SIZE)
-- [ ] 1351-byte payload (expect drop/reject)
+- [x] 0-byte payload (Phase 2)
+- [x] 1-byte payload (Phase 2)
+- [x] ~1306-byte payload (at effective limit) (Phase 2)
+- [x] ~1320-byte payload (over limit, BufferTooShort) (Phase 2)
 
 ### 4.2 Echo Integrity Tests
 - [x] Send UDP packet through tunnel to echo server
