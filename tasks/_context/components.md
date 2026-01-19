@@ -111,6 +111,42 @@
 
 ---
 
+### 006: Cloud Deployment 🔲 NOT STARTED
+
+**Location:** Cloud infrastructure + deployment scripts
+
+**Dependencies:** 004 (E2E Testing - local validation first)
+
+**Purpose:**
+- Deploy Intermediate Server and App Connector to cloud
+- Enable NAT testing with real public IPs
+- Validate QAD with actual network conditions
+- Prepare infrastructure for production
+
+**Deployment Targets:**
+| Component | Target |
+|-----------|--------|
+| Intermediate Server | Cloud VM with public IP |
+| App Connector | Cloud VM (same or separate) |
+| Test Service | Cloud VM (localhost) |
+
+**Capabilities needed:**
+- Cloud VM provisioning (DigitalOcean/AWS/Vultr/GCP)
+- TLS certificate management (self-signed or Let's Encrypt)
+- Systemd service configuration
+- Firewall rules (UDP 4433)
+- Remote Agent testing (NAT traversal)
+
+**Key Decisions (TBD):**
+| Decision | Options | Status |
+|----------|---------|--------|
+| Cloud Provider | DO, AWS, Vultr, GCP | TBD |
+| Deployment | Single VM vs Separate VMs | TBD |
+| Certificates | Self-signed vs Let's Encrypt | TBD |
+| Automation | Manual, Terraform, Ansible | TBD |
+
+---
+
 ## Dependency Graph
 
 ```
@@ -132,17 +168,25 @@
                     ▼                       ▼
     ┌─────────────────────────┐   ┌─────────────────────────┐
     │  003: App Connector     │   │  004: E2E Testing       │
-    │  ✅ COMPLETE            │   │  🔲 NOT STARTED         │
+    │  ✅ COMPLETE            │   │  🔲 READY TO START      │
     └───────────┬─────────────┘   └───────────┬─────────────┘
                 │                             │
                 └─────────────┬───────────────┘
                               │
-                              │ relay working
+                              │ relay working locally
                               ▼
                     ┌─────────────────────────┐
                     │  005: P2P Hole Punching │
                     │  🔲 NOT STARTED         │
                     │  ★ PRIMARY GOAL ★       │
+                    └───────────┬─────────────┘
+                                │
+                                │ needs NAT testing
+                                ▼
+                    ┌─────────────────────────┐
+                    │  006: Cloud Deployment  │
+                    │  🔲 NOT STARTED         │
+                    │  (NAT testing, prod)    │
                     └─────────────────────────┘
 ```
 
@@ -150,14 +194,17 @@
 
 ## Critical Path
 
-**Shortest path to working relay:**
+**Shortest path to working relay (local):**
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. 🔲 004: E2E Testing
+4. 🔲 004: E2E Testing (ready to start)
 
 **Path to P2P (primary goal):**
 - All of above + 005: P2P Hole Punching
+
+**Path to production deployment:**
+- All of above + 006: Cloud Deployment (NAT testing, production readiness)
 
 ---
 

@@ -1,9 +1,9 @@
 # Task State: E2E Relay Testing
 
 **Task ID:** 004-e2e-relay-testing
-**Status:** Not Started
+**Status:** Ready to Start
 **Branch:** `feature/004-e2e-relay-testing`
-**Last Updated:** 2026-01-18
+**Last Updated:** 2026-01-19
 
 ---
 
@@ -11,26 +11,29 @@
 
 Comprehensive end-to-end testing of the relay infrastructure. Validates that traffic flows correctly: Agent → Intermediate → Connector → Local Service and back.
 
+**Important:** App Connector is **UDP-only** (TCP support deferred). All tests must account for this constraint.
+
 **Read first:** [`tasks/_context/README.md`](../_context/README.md)
 
 ---
 
-## Current Phase: Not Started
+## Current Phase: Ready to Start
 
 ### Prerequisites
-- ✅ Task 001 complete (Agent)
-- 🔲 Task 002 complete (Intermediate Server)
-- 🔲 Task 003 complete (App Connector)
+- ✅ Task 001 complete (Agent QUIC Client)
+- ✅ Task 002 complete (Intermediate Server)
+- ✅ Task 003 complete (App Connector - UDP-only)
 
 ### What's Done
-- Nothing yet
+- Oracle review completed (2026-01-19)
+- Plan updated based on Oracle feedback
 
 ### What's Next
-1. Wait for Tasks 002 and 003 to complete
-2. Create feature branch: `git checkout -b feature/004-e2e-relay-testing`
-3. Set up local test environment
-4. Create test scripts
-5. Validate all scenarios
+1. Create feature branch: `git checkout -b feature/004-e2e-relay-testing`
+2. Set up local process test environment (not Docker for MVP)
+3. Create UDP-focused test scripts
+4. Validate protocol invariants (ALPN, registration, datagram size)
+5. Run UDP relay tests
 
 ---
 
@@ -38,9 +41,9 @@ Comprehensive end-to-end testing of the relay infrastructure. Validates that tra
 
 | Dependency | Status | Notes |
 |------------|--------|-------|
-| Task 001 (Agent) | ✅ Complete | Required for testing |
-| Task 002 (Intermediate) | 🔲 In Progress | Required for testing |
-| Task 003 (Connector) | 🔲 Not Started | Required for testing |
+| Task 001 (Agent) | ✅ Complete | QUIC client, QAD support |
+| Task 002 (Intermediate) | ✅ Complete | QUIC server, DATAGRAM relay |
+| Task 003 (Connector) | ✅ Complete | UDP-only forwarding, mio event loop |
 
 ---
 

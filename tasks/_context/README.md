@@ -36,8 +36,9 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [001](../001-quic-tunnel-integration/) | Agent QUIC Client | ✅ Complete | `master` |
 | [002](../002-intermediate-server/) | Intermediate Server | ✅ Complete | `master` |
 | [003](../003-app-connector/) | App Connector | ✅ Complete | `master` |
-| [004](../004-e2e-relay-testing/) | E2E Relay Testing | 🔲 Not Started | `feature/004-e2e-relay-testing` |
+| [004](../004-e2e-relay-testing/) | E2E Relay Testing | 🔲 Ready | `feature/004-e2e-relay-testing` |
 | [005](../005-p2p-hole-punching/) | P2P Hole Punching | 🔲 Not Started | `feature/005-p2p-hole-punching` |
+| [006](../006-cloud-deployment/) | Cloud Deployment | 🔲 Not Started | `feature/006-cloud-deployment` |
 
 ### Task Dependencies
 
@@ -45,14 +46,17 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 001 (Agent Client) ✅
          │
          ▼
-002 (Intermediate Server) ──────┐
+002 (Intermediate Server) ✅ ───┐
          │                      │
          ▼                      ▼
-003 (App Connector) ◄───── 004 (E2E Testing)
+003 (App Connector) ✅ ◄── 004 (E2E Testing)
          │                      │
          └──────────┬───────────┘
                     ▼
          005 (P2P Hole Punching)
+                    │
+                    ▼
+         006 (Cloud Deployment) ← NAT testing, production prep
 ```
 
 ---
@@ -211,3 +215,79 @@ When implementing deferred items:
 1. Create a task in `tasks/` (e.g., `tasks/006-security-hardening/`)
 2. Reference this section in the task's `plan.md`
 3. Update this table when complete (change to ✅ and add task reference)
+
+---
+
+## Cloud Deployment Strategy
+
+After E2E testing validates local relay functionality, components will be deployed to cloud infrastructure for NAT testing and production readiness.
+
+### Deployment Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        CLOUD DEPLOYMENT ARCHITECTURE                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────┐                ┌─────────────────────────────────────────┐ │
+│  │   Agent     │                │           Cloud Infrastructure           │ │
+│  │  (macOS)    │                │                                          │ │
+│  │             │                │  ┌─────────────────────────────────────┐ │ │
+│  │  Behind     │◄──── QUIC ────►│  │    Intermediate Server              │ │ │
+│  │   NAT       │                │  │    (Public IP: x.x.x.x:4433)        │ │ │
+│  │             │                │  │    - QAD (address discovery)        │ │ │
+│  └─────────────┘                │  │    - DATAGRAM relay                 │ │ │
+│                                  │  └─────────────────────────────────────┘ │ │
+│                                  │                    │                      │ │
+│                                  │                    │ QUIC                 │ │
+│                                  │                    ▼                      │ │
+│                                  │  ┌─────────────────────────────────────┐ │ │
+│                                  │  │    App Connector                    │ │ │
+│                                  │  │    (Cloud VM or Edge)               │ │ │
+│                                  │  │    - UDP forwarding                 │ │ │
+│                                  │  │    - Local service access           │ │ │
+│                                  │  └───────────────┬─────────────────────┘ │ │
+│                                  │                   │                       │ │
+│                                  │                   │ Local UDP             │ │
+│                                  │                   ▼                       │ │
+│                                  │  ┌─────────────────────────────────────┐ │ │
+│                                  │  │    Internal Services                │ │ │
+│                                  │  │    (DNS, API, etc.)                 │ │ │
+│                                  │  └─────────────────────────────────────┘ │ │
+│                                  └──────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Deployment Targets
+
+| Component | Deployment | Purpose |
+|-----------|------------|---------|
+| Intermediate Server | Cloud (public IP) | Bootstrap, QAD, relay fallback |
+| App Connector | Cloud/Edge | Service exposure, traffic termination |
+| Agent | Local (macOS) | Endpoint packet interception |
+
+### Cloud Provider Options
+
+| Provider | Service | Notes |
+|----------|---------|-------|
+| AWS | EC2, Lightsail | Flexible, well-documented |
+| GCP | Compute Engine | Good networking options |
+| DigitalOcean | Droplets | Simple, cost-effective |
+| Vultr | Cloud Compute | Low-cost, global |
+
+### Deployment Requirements
+
+**Intermediate Server:**
+- Public IPv4 address
+- UDP port 4433 open (QUIC)
+- TLS certificate (production: Let's Encrypt)
+- Minimal resources: 1 vCPU, 512MB RAM
+
+**App Connector:**
+- Network access to internal services
+- Can be same or different machine as Intermediate
+- UDP port range for local services
+
+### Task Reference
+
+See [Task 006: Cloud Deployment](../006-cloud-deployment/) for implementation details.
