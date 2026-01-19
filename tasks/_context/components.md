@@ -95,7 +95,11 @@
 | Phase 1: Infrastructure | ✅ Done | 14 tests passing (component startup, direct echo) |
 | Phase 1.5: QUIC Test Client | ✅ Done | IP/UDP packet construction, E2E relay VERIFIED |
 | Phase 2: Protocol Validation | ✅ Done | 8 tests: ALPN, registration, DATAGRAM size, payloads |
-| Phase 3: Relay Validation | ✅ Done | Full relay path verified (Agent→Intermediate→Connector→Echo→back) |
+| Phase 3: Relay Validation | ✅ Done | Full relay path verified |
+| Phase 3.5: Coverage Gaps | ✅ Done | 6 tests: connector reg, service ID edge cases, malformed headers |
+| Phase 4: Advanced UDP | ✅ Done | 11 tests: payload patterns, concurrent flows, burst, idle timeout |
+| Phase 5: Reliability | 🔲 Planned | Component restart, error conditions |
+| Phase 6: Performance | 🔲 Planned | Latency, throughput metrics |
 
 **Capabilities Built:**
 - Test framework (`lib/common.sh`) with component lifecycle
@@ -105,8 +109,13 @@
   - IP/UDP packet construction (`--send-udp --dst ip:port`)
   - IPv4 header checksum calculation (RFC 1071)
   - **Phase 2:** Protocol validation (`--alpn`, `--payload-size`, `--expect-fail`)
+  - **Phase 3.5:** Programmatic DATAGRAM sizing (`--query-max-size`, `max`, `max-1`, `max+1`)
+  - **Phase 4:** Payload patterns (`--payload-pattern zeros|ones|sequential|random`)
+  - **Phase 4:** Multi-packet (`--repeat`, `--delay`, `--burst`)
+  - **Phase 4:** Echo verification (`--verify-echo`)
 - Test scenarios for connectivity, echo, boundary conditions
-- Protocol validation test suite (`scenarios/protocol-validation.sh`)
+- Protocol validation test suite (`scenarios/protocol-validation.sh`) - 14 tests
+- Advanced UDP test suite (`scenarios/udp-advanced.sh`) - 11 tests
 - Comprehensive testing guide (`tasks/_context/testing-guide.md`)
 - Architecture documentation (`tests/e2e/README.md`)
 
@@ -128,6 +137,8 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 **Important Distinction:**
 - Task 001 Agent = Production macOS NetworkExtension (intercepts system packets)
 - QUIC Test Client = Test harness CLI (sends arbitrary DATAGRAMs from scripts)
+
+**Total Tests: 44+** (Phases 1-4 complete)
 
 **Capabilities Needed:**
 - NAT testing (Intermediate on cloud)
@@ -238,7 +249,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. 🔄 004: E2E Testing (Phases 1-2 complete, Phase 4+ remaining)
+4. 🔄 004: E2E Testing (Phases 1-4 complete, Phase 5-6 remaining)
 
 **Path to P2P (primary goal):**
 - All of above + 005: P2P Hole Punching

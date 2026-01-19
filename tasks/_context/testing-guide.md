@@ -1,7 +1,7 @@
 # ZTNA Testing & Demo Guide
 
 **Last Updated:** 2026-01-19
-**Status:** Phase 2 Complete (Protocol Validation)
+**Status:** Phase 4 Complete (Advanced UDP Scenarios)
 
 ---
 
@@ -79,10 +79,10 @@ tests/e2e/run-mvp.sh
 - Port configuration validation
 - Basic connectivity checks
 
-### Phase 2: Protocol Validation Tests
+### Phase 2 & 3.5: Protocol Validation Tests
 
 ```bash
-# Run protocol validation suite (8 tests)
+# Run protocol validation suite (14 tests)
 tests/e2e/scenarios/protocol-validation.sh
 ```
 
@@ -91,12 +91,49 @@ tests/e2e/scenarios/protocol-validation.sh
 |------|-------------|-----------------|
 | ALPN correct | Connect with `ztna-v1` | Connection established |
 | ALPN wrong | Connect with wrong ALPN | Connection rejected |
-| DATAGRAM at limit | 1306-byte packet | Accepted |
-| DATAGRAM over limit | 1320-byte packet | BufferTooShort |
+| DATAGRAM at limit | Programmatic `max-1` sizing | Accepted + E2E verified |
+| DATAGRAM over limit | Programmatic `max+1` sizing | BufferTooShort |
 | Registration valid | `[0x10][len][id]` format | Accepted |
 | Registration invalid | Malformed length | Handled gracefully |
 | Zero-byte payload | Empty payload relay | OK |
 | One-byte payload | Minimal payload relay | Echoed |
+| Connector registration | `[0x11][len][id]` format | Accepted |
+| Zero-length service ID | Empty ID (negative) | Handled gracefully |
+| Overlong service ID | >255 bytes (negative) | Rejected |
+| Unknown opcode | `0xFF` opcode | Handled gracefully |
+| Multiple datagrams | Back-to-back sends | All queued |
+| Malformed IP header | Non-UDP protocol | Dropped |
+
+### Phase 4: Advanced UDP Tests
+
+```bash
+# Run advanced UDP test suite (11 tests)
+tests/e2e/scenarios/udp-advanced.sh
+```
+
+**Tests included:**
+
+**4.2 Echo Integrity Tests:**
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| All-zeros payload | 64-byte zeros pattern | Echoed + verified |
+| All-ones payload | 64-byte 0xFF pattern | Echoed + verified |
+| Sequential payload | 256-byte 0x00..0xFF | Echoed + verified |
+| Random payload | 128-byte random | Echoed + verified |
+| Multiple payloads | 5 packets, 500ms delay | Multiple echoes |
+
+**4.3 Concurrent Flow Tests:**
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Parallel clients | 3 simultaneous clients | All receive responses |
+| Flow isolation | Different source addresses | Independent flows |
+
+**4.4 Long-Running Tests:**
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Stream stability | 10 packets, 500ms interval | ≥80% success |
+| Burst stress | 50 packets rapid-fire | All sent |
+| Idle timeout | 5s idle within 30s limit | Connection alive |
 
 ---
 
@@ -122,8 +159,18 @@ Options:
 
 Protocol Validation (Phase 2):
   --alpn PROTO       Override ALPN (default: ztna-v1)
-  --payload-size N   Generate N-byte payload
+  --payload-size N   Generate N-byte payload (or 'max', 'max-1', 'max+1')
   --expect-fail      Expect connection to fail
+
+Phase 3.5 - Programmatic DATAGRAM Sizing:
+  --query-max-size   Print MAX_DGRAM_SIZE and MAX_UDP_PAYLOAD after connection
+
+Phase 4 - Advanced Testing:
+  --payload-pattern P  Payload pattern: zeros, ones, sequential, random
+  --repeat N           Send N packets (default: 1)
+  --delay MS           Delay between packets in repeat mode (default: 0)
+  --burst N            Burst mode: send N packets as fast as possible
+  --verify-echo        Verify echoed responses match sent data
 ```
 
 **Examples:**
@@ -134,8 +181,15 @@ quic-test-client --service test-service --send-udp "Hello" --dst 127.0.0.1:9999
 # ALPN negative test
 quic-test-client --alpn "wrong" --expect-fail
 
-# Boundary test (1306 bytes = max)
-quic-test-client --service test-service --payload-size 1278 --dst 127.0.0.1:9999
+# Boundary test (programmatic max)
+quic-test-client --service test-service --payload-size max-1 --dst 127.0.0.1:9999
+
+# Phase 4: Echo integrity with random payload
+quic-test-client --service test-service --payload-size 100 --payload-pattern random \
+  --dst 127.0.0.1:9999 --verify-echo
+
+# Phase 4: Burst stress test (50 packets)
+quic-test-client --service test-service --burst 50 --payload-size 100 --dst 127.0.0.1:9999
 ```
 
 ### UDP Echo Server
@@ -315,7 +369,14 @@ tail tests/e2e/artifacts/logs/app-connector.log
 | 1 | 14 | ✅ Complete | Component lifecycle, direct UDP |
 | 1.5 | 1 | ✅ Complete | Full E2E relay path |
 | 2 | 8 | ✅ Complete | ALPN, boundaries, registration |
-| 3+ | TBD | 🔲 Planned | Concurrent flows, performance |
+| 3 | 5 | ✅ Complete | Relay validation, connectivity |
+| 3.5 | 6 | ✅ Complete | Coverage gaps (connector reg, malformed headers) |
+| 4.2 | 5 | ✅ Complete | Echo integrity (payload patterns) |
+| 4.3 | 2 | ✅ Complete | Concurrent flows, isolation |
+| 4.4 | 3 | ✅ Complete | Long-running, burst, idle timeout |
+| 5+ | TBD | 🔲 Planned | Reliability, performance metrics |
+
+**Total Tests: 44+**
 
 ---
 
@@ -336,7 +397,8 @@ After running the demo, you can:
 |---------|------|
 | Test framework | `tests/e2e/lib/common.sh` |
 | Test runner (Phase 1) | `tests/e2e/run-mvp.sh` |
-| Protocol validation (Phase 2) | `tests/e2e/scenarios/protocol-validation.sh` |
+| Protocol validation (Phase 2 & 3.5) | `tests/e2e/scenarios/protocol-validation.sh` |
+| Advanced UDP tests (Phase 4) | `tests/e2e/scenarios/udp-advanced.sh` |
 | QUIC test client | `tests/e2e/fixtures/quic-client/` |
 | Echo server | `tests/e2e/fixtures/echo-server/` |
 | Environment config | `tests/e2e/config/env.local` |
