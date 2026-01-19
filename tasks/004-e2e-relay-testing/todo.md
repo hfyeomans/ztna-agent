@@ -89,7 +89,7 @@
 
 ---
 
-## Phase 3: Basic UDP Connectivity (Partially Complete)
+## Phase 3: Basic UDP Connectivity ✅ COMPLETE
 
 - [x] Test: Agent connects to Intermediate
 - [x] Test: Connector connects to Intermediate
@@ -99,28 +99,28 @@
 
 ---
 
-## Phase 3.5: Oracle Review Fixes (Priority)
+## Phase 3.5: Oracle Review Fixes ✅ COMPLETE
 
 > **Oracle Review:** 2026-01-19 - See `research.md` for full findings
 
 ### 3.5.1 Medium Priority Fixes
 - [x] Fix hard-coded `test-service` in `protocol-validation.sh:150-154` → use `$SERVICE_ID`
-- [ ] Replace hard-coded DATAGRAM sizes with programmatic sizing via `dgram_max_writable_len()`
+- [x] Replace hard-coded DATAGRAM sizes with programmatic sizing via `dgram_max_writable_len()`
 
 ### 3.5.2 Low Priority Fixes
-- [ ] Enhance boundary tests to assert `RECV:` (end-to-end delivery, not just queue)
+- [x] Enhance boundary tests to assert `RECV:` (end-to-end delivery, not just queue)
 - [x] Replace `pkill -f` with PID-based cleanup (scoped to `$PROJECT_ROOT`)
 - [x] Add `wait_for_log_message` as reliable alternative to `nc -z -u`
 - [x] Fix testing guide function names (`start_intermediate_server` → `start_intermediate`)
 - [x] Clarify canonical cert path in testing guide (`certs/` vs `intermediate-server/certs`)
 
 ### 3.5.3 Coverage Gaps to Address
-- [ ] Add connector registration (0x11) validation tests
-- [ ] Add malformed IP/UDP header tests (bad checksum, non-UDP protocol, length mismatch)
-- [ ] Add zero-length service ID test (expect rejection)
-- [ ] Add overlong service ID (>255 bytes) test (expect rejection)
-- [ ] Add unknown opcode handling test
-- [ ] Add multiple back-to-back datagram test
+- [x] Add connector registration (0x11) validation tests
+- [x] Add malformed IP/UDP header tests (bad checksum, non-UDP protocol, length mismatch)
+- [x] Add zero-length service ID test (expect rejection)
+- [x] Add overlong service ID (>255 bytes) test (expect rejection)
+- [x] Add unknown opcode handling test
+- [x] Add multiple back-to-back datagram test
 
 ---
 

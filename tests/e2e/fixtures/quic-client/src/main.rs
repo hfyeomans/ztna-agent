@@ -61,9 +61,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(2000);
     // Phase 2: Protocol validation options
     let alpn_override = parse_arg(&args, "--alpn");
-    let payload_size: Option<usize> = parse_arg(&args, "--payload-size")
-        .and_then(|s| s.parse().ok());
+    let payload_size_arg = parse_arg(&args, "--payload-size");
     let expect_connect_fail = args.iter().any(|a| a == "--expect-fail");
+    // Phase 3.5: Query max DATAGRAM size programmatically
+    let query_max_size = args.iter().any(|a| a == "--query-max-size");
 
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print_usage();
@@ -109,6 +110,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e);
         }
     }
+
+    // Query and display max DATAGRAM size (Phase 3.5: programmatic sizing)
+    let max_dgram_size = client.get_max_datagram_size();
+    if query_max_size || max_dgram_size.is_some() {
+        if let Some(max_size) = max_dgram_size {
+            log::info!("Max DATAGRAM writable size: {} bytes", max_size);
+            // IP header (20) + UDP header (8) = 28 bytes overhead
+            let max_udp_payload = max_size.saturating_sub(28);
+            log::info!("Max UDP payload (after IP/UDP headers): {} bytes", max_udp_payload);
+            if query_max_size {
+                println!("MAX_DGRAM_SIZE:{}", max_size);
+                println!("MAX_UDP_PAYLOAD:{}", max_udp_payload);
+            }
+        } else {
+            log::warn!("DATAGRAM max size not available (connection may not support datagrams)");
+        }
+    }
+
+    // Resolve payload size: "max" uses programmatic max, otherwise parse as number
+    let payload_size: Option<usize> = match payload_size_arg.as_deref() {
+        Some("max") => {
+            // Use max writable size minus IP/UDP overhead (28 bytes)
+            max_dgram_size.map(|m| m.saturating_sub(28))
+        }
+        Some("max-1") => {
+            // One byte under max (boundary test: should succeed)
+            max_dgram_size.map(|m| m.saturating_sub(29))
+        }
+        Some("max+1") => {
+            // One byte over max (boundary test: should fail)
+            max_dgram_size.map(|m| m.saturating_sub(27))
+        }
+        Some(s) => s.parse().ok(),
+        None => None,
+    };
 
     // Register as Agent if service specified
     if let Some(ref svc) = service_id {
@@ -195,7 +231,11 @@ fn print_usage() {
     eprintln!("Protocol Validation (Phase 2):");
     eprintln!("  --alpn PROTO       Override ALPN protocol (default: ztna-v1)");
     eprintln!("  --payload-size N   Generate N-byte payload for boundary tests");
+    eprintln!("                     Special values: 'max', 'max-1', 'max+1' (programmatic sizing)");
     eprintln!("  --expect-fail      Expect connection to fail (negative test)");
+    eprintln!();
+    eprintln!("Phase 3.5 - Programmatic DATAGRAM Sizing:");
+    eprintln!("  --query-max-size   Print MAX_DGRAM_SIZE and MAX_UDP_PAYLOAD after connection");
     eprintln!();
     eprintln!("  -h, --help         Show this help");
     eprintln!();
@@ -434,6 +474,18 @@ impl QuicTestClient {
         }
 
         Err("Connection timeout".into())
+    }
+
+    /// Get the maximum DATAGRAM size that can be sent on this connection.
+    /// Returns None if the connection doesn't support DATAGRAMs or isn't established.
+    fn get_max_datagram_size(&self) -> Option<usize> {
+        self.conn.as_ref().and_then(|conn| {
+            if conn.is_established() {
+                conn.dgram_max_writable_len()
+            } else {
+                None
+            }
+        })
     }
 
     fn send_datagram(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {

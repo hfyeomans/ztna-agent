@@ -1,7 +1,7 @@
 # Task State: E2E Relay Testing
 
 **Task ID:** 004-e2e-relay-testing
-**Status:** In Progress - Phase 2 Complete, Phase 3.5 Low Priority Fixes Done
+**Status:** In Progress - Phase 3.5 Complete, Ready for Phase 4
 **Branch:** `feature/004-e2e-relay-testing`
 **Last Updated:** 2026-01-19
 
@@ -17,21 +17,30 @@ Comprehensive end-to-end testing of the relay infrastructure. Validates that tra
 
 ---
 
-## Current Phase: Phase 3.5 Low Priority Fixes Complete ✅
+## Current Phase: Phase 3.5 COMPLETE ✅
 
-### Phase 3.5 Fixes Applied (2026-01-19)
+### Phase 3.5 All Fixes Applied (2026-01-19)
 
-**From Oracle Review:**
+**3.5.1 Medium Priority Fixes:**
 - ✅ Fixed hard-coded `test-service` → uses `$SERVICE_ID`
+- ✅ **Programmatic DATAGRAM sizing** via `dgram_max_writable_len()` in quic-test-client
+  - Added `--query-max-size` flag to display max DATAGRAM size
+  - Added `--payload-size max`, `max-1`, `max+1` special values
+
+**3.5.2 Low Priority Fixes:**
 - ✅ Scoped `pkill -f` to `$PROJECT_ROOT` (prevents killing unrelated processes)
 - ✅ Added `wait_for_log_message()` function (reliable UDP service readiness)
 - ✅ Fixed testing guide function names
 - ✅ Clarified cert path in testing guide
+- ✅ **Enhanced boundary tests** to assert `RECV:` for E2E delivery verification
 
-**Remaining for Future Phases:**
-- Programmatic DATAGRAM sizing via `dgram_max_writable_len()`
-- Boundary tests asserting `RECV:` for end-to-end delivery
-- Coverage gaps (connector registration, malformed headers, service ID edge cases)
+**3.5.3 Coverage Gaps Addressed:**
+- ✅ Connector registration (0x11) validation test
+- ✅ Zero-length service ID test (negative test)
+- ✅ Overlong service ID (>255 bytes) test (negative test)
+- ✅ Unknown opcode (0xFF) handling test
+- ✅ Multiple back-to-back datagrams test
+- ✅ Malformed IP header (non-UDP protocol) test
 
 ---
 
