@@ -22,14 +22,14 @@
 > **Important:** This PoC/MVP runs entirely on localhost. Some features cannot be fully validated without cloud deployment (Task 006).
 
 ### Testable Locally
-- [x] All unit tests pass without network
+- [x] All unit tests pass without network (79 tests)
 - [x] Candidate gathering (enumerate interfaces)
-- [x] Signaling message encode/decode (19 tests)
+- [x] Signaling message encode/decode (13 tests)
+- [x] Binding request/response protocol (17 tests)
+- [x] Keepalive mechanism (12 tests)
 - [ ] Candidate exchange via Intermediate (localhost)
-- [ ] Binding request/response protocol
 - [ ] Direct QUIC connection Agent → Connector (localhost)
 - [ ] Fallback to relay when direct "fails" (simulated)
-- [ ] Keepalive mechanism
 
 ### Requires Cloud (Task 006)
 - [ ] Real NAT hole punching
@@ -183,25 +183,25 @@
 
 ---
 
-## Phase 5: Resilience
+## Phase 5: Resilience ✅ COMPLETE
 
 ### 5.1 Keepalive
-- [ ] Implement keepalive sender (15s interval)
-- [ ] Implement keepalive receiver
-- [ ] Track missed keepalives
+- [x] Implement keepalive sender (15s interval)
+- [x] Implement keepalive receiver
+- [x] Track missed keepalives
 
 ### 5.2 Failure Detection
-- [ ] Define "hole punch failed" criteria:
-  - [ ] All candidate pairs exhausted
-  - [ ] Total timeout (5s) exceeded
-- [ ] Implement failure detection state machine
-- [ ] Trigger fallback to relay
+- [x] Define "hole punch failed" criteria:
+  - [x] All candidate pairs exhausted
+  - [x] Total timeout (5s) exceeded
+- [x] Implement failure detection state machine
+- [x] Trigger fallback to relay
 
 ### 5.3 Fallback
-- [ ] Implement graceful fallback transition
-- [ ] Maintain session state during fallback
-- [ ] No packet loss during switch
-- [ ] Integration test: fallback to relay
+- [x] Implement graceful fallback transition
+- [x] Maintain session state during fallback
+- [x] No packet loss during switch (PathManager handles)
+- [x] Integration test: fallback to relay (test_path_manager_integration)
 
 ### 5.4 NAT Type Detection (Deferred for Cloud)
 - [ ] Design detection algorithm (QAD to multiple servers)
@@ -213,10 +213,13 @@
 ## Phase 6: Testing
 
 ### 6.1 Unit Tests
-- [ ] All candidate module tests pass
-- [ ] All signaling module tests pass
-- [ ] All connectivity module tests pass
-- [ ] All path selection tests pass
+- [x] All candidate module tests pass (11 tests)
+- [x] All signaling module tests pass (13 tests)
+- [x] All connectivity module tests pass (17 tests)
+- [x] All hole punch module tests pass (17 tests)
+- [x] All resilience module tests pass (12 tests)
+- [x] All agent integration tests pass (9 tests)
+- **Total: 79 tests passing**
 
 ### 6.2 Integration Tests (Localhost)
 - [ ] Candidate exchange via Intermediate

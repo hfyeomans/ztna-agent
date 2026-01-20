@@ -15,6 +15,7 @@
 //! │  signaling.rs    - Candidate exchange via Intermediate        │
 //! │  connectivity.rs - Binding request/response protocol          │
 //! │  hole_punch.rs   - Hole punching coordination                 │
+//! │  resilience.rs   - Keepalive and path fallback                │
 //! │                                                                │
 //! └───────────────────────────────────────────────────────────────┘
 //! ```
@@ -25,10 +26,12 @@
 //! - [x] `signaling.rs` - Phase 2 (Signaling Infrastructure)
 //! - [x] `connectivity.rs` - Phase 3 (Direct Path Establishment)
 //! - [x] `hole_punch.rs` - Phase 4 (Hole Punching Coordination)
+//! - [x] `resilience.rs` - Phase 5 (Path Resilience)
 
 pub mod candidate;
 pub mod connectivity;
 pub mod hole_punch;
+pub mod resilience;
 pub mod signaling;
 
 // Re-export commonly used types
@@ -76,4 +79,21 @@ pub use hole_punch::{
     HOLE_PUNCH_TIMEOUT,
     SIGNALING_TIMEOUT,
     DEFAULT_START_DELAY_MS,
+};
+
+pub use resilience::{
+    PathManager,
+    PathInfo,
+    PathState,
+    PathStats,
+    ActivePath,
+    encode_keepalive_request,
+    encode_keepalive_response,
+    decode_keepalive,
+    KEEPALIVE_INTERVAL,
+    KEEPALIVE_TIMEOUT,
+    MISSED_KEEPALIVES_THRESHOLD,
+    FALLBACK_COOLDOWN,
+    KEEPALIVE_REQUEST,
+    KEEPALIVE_RESPONSE,
 };

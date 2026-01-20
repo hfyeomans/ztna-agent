@@ -117,6 +117,8 @@ pub struct Agent {
     signaling_buffer: Vec<u8>,
     /// Active hole punch coordinator (if hole punching in progress)
     hole_punch: Option<p2p::HolePunchCoordinator>,
+    /// Path manager for keepalive and fallback
+    path_manager: p2p::PathManager,
 }
 
 impl Agent {
@@ -158,6 +160,7 @@ impl Agent {
             stream_buffer: vec![0u8; 65535],
             signaling_buffer: Vec::new(),
             hole_punch: None,
+            path_manager: p2p::PathManager::new(),
         })
     }
 
@@ -180,6 +183,9 @@ impl Agent {
         self.intermediate_addr = Some(server_addr);
         self.state = AgentState::Connecting;
         self.last_activity = Instant::now();
+
+        // Set relay address in path manager
+        self.path_manager.set_relay(server_addr);
 
         Ok(())
     }
@@ -335,6 +341,12 @@ impl Agent {
 
         // Remove closed P2P connections
         self.p2p_conns.retain(|_, p2p| !p2p.conn.is_closed());
+
+        // Check path manager for keepalive timeouts and potential fallback
+        self.path_manager.check_timeouts();
+
+        // Attempt recovery on failed paths after cooldown
+        self.path_manager.attempt_recovery();
     }
 
     /// Get time until next timeout event (minimum across all connections)
@@ -403,20 +415,35 @@ impl Agent {
 
     /// Process incoming DATAGRAM frames from P2P connection
     fn process_p2p_datagrams(&mut self, connector_addr: &SocketAddr) {
-        let p2p = match self.p2p_conns.get_mut(connector_addr) {
-            Some(p) => p,
-            None => return,
-        };
+        // First, collect all datagrams from the connection
+        let mut received_datagrams = Vec::new();
 
-        while let Ok(len) = p2p.conn.dgram_recv(&mut self.scratch_buffer) {
-            let data = &self.scratch_buffer[..len];
+        if let Some(p2p) = self.p2p_conns.get_mut(connector_addr) {
+            while let Ok(len) = p2p.conn.dgram_recv(&mut self.scratch_buffer) {
+                received_datagrams.push(self.scratch_buffer[..len].to_vec());
+            }
+        }
 
+        // Now process collected datagrams (avoiding borrow issues)
+        for data in received_datagrams {
             // Check for QAD message (Connector sends its observed address)
             if !data.is_empty() && data[0] == 0x01 {
                 // QAD from Connector - we could use this for diagnostics
                 // but for now we ignore it (we already know our own address from Intermediate)
                 continue;
             }
+
+            // Check for keepalive message
+            if data.len() >= 5 && (data[0] == p2p::KEEPALIVE_REQUEST || data[0] == p2p::KEEPALIVE_RESPONSE) {
+                if let Some(response) = self.path_manager.process_keepalive(*connector_addr, &data) {
+                    // Queue keepalive response to be sent
+                    if let Some(p2p) = self.p2p_conns.get_mut(connector_addr) {
+                        let _ = p2p.conn.dgram_send(&response);
+                    }
+                }
+                continue;
+            }
+
             // Other DATAGRAMs are tunneled IP packets - would be passed back to Swift
         }
     }
@@ -561,6 +588,10 @@ impl Agent {
         match state {
             p2p::HolePunchState::Connected => {
                 let addr = coordinator.working_address();
+                // Set direct path in path manager when hole punching succeeds
+                if let Some(a) = addr {
+                    self.path_manager.set_direct(a);
+                }
                 self.hole_punch = None;
                 (addr, true)
             }
@@ -596,6 +627,37 @@ impl Agent {
                 let _ = response;
             }
         }
+    }
+
+    // ========================================================================
+    // Path Resilience Methods
+    // ========================================================================
+
+    /// Poll for keepalive messages to send
+    ///
+    /// Returns (remote_address, keepalive_message) if a keepalive should be sent.
+    fn poll_keepalive(&mut self) -> Option<(SocketAddr, [u8; 5])> {
+        self.path_manager.poll_keepalive()
+    }
+
+    /// Get current active path type
+    fn active_path(&self) -> p2p::ActivePath {
+        self.path_manager.active_path_type()
+    }
+
+    /// Check if currently in fallback mode (using relay)
+    fn is_in_fallback(&self) -> bool {
+        self.path_manager.is_in_fallback()
+    }
+
+    /// Get path statistics for diagnostics
+    fn path_stats(&self) -> p2p::PathStats {
+        self.path_manager.stats()
+    }
+
+    /// Get the current active path address for sending data
+    fn active_send_addr(&self) -> Option<SocketAddr> {
+        self.path_manager.active_addr()
     }
 }
 
@@ -1277,6 +1339,120 @@ pub unsafe extern "C" fn agent_process_binding_response(
 }
 
 // ============================================================================
+// FFI Functions - Path Resilience
+// ============================================================================
+
+/// Poll for keepalive message to send
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `out_ip` - Buffer for destination IP (4 bytes)
+/// * `out_port` - Output destination port
+/// * `out_data` - Buffer for keepalive message (5 bytes minimum)
+///
+/// # Returns
+/// `AgentResult::Ok` if a keepalive should be sent, `AgentResult::NoData` otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn agent_poll_keepalive(
+    agent: *mut Agent,
+    out_ip: *mut u8,
+    out_port: *mut u16,
+    out_data: *mut u8,
+) -> AgentResult {
+    if agent.is_null() || out_ip.is_null() || out_port.is_null() || out_data.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &mut *agent;
+
+        match agent.poll_keepalive() {
+            Some((addr, msg)) => {
+                if let SocketAddr::V4(v4) = addr {
+                    std::ptr::copy_nonoverlapping(v4.ip().octets().as_ptr(), out_ip, 4);
+                }
+                *out_port = addr.port();
+                std::ptr::copy_nonoverlapping(msg.as_ptr(), out_data, 5);
+                AgentResult::Ok
+            }
+            None => AgentResult::NoData,
+        }
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
+/// Get current active path type
+///
+/// # Returns
+/// 0 = Direct, 1 = Relay, 2 = None
+#[no_mangle]
+pub unsafe extern "C" fn agent_get_active_path(agent: *const Agent) -> u8 {
+    if agent.is_null() {
+        return 2; // None
+    }
+
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &*agent;
+        match agent.active_path() {
+            p2p::ActivePath::Direct => 0,
+            p2p::ActivePath::Relay => 1,
+            p2p::ActivePath::None => 2,
+        }
+    }))
+    .unwrap_or(2)
+}
+
+/// Check if agent is in fallback mode
+#[no_mangle]
+pub unsafe extern "C" fn agent_is_in_fallback(agent: *const Agent) -> bool {
+    if agent.is_null() {
+        return false;
+    }
+
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &*agent;
+        agent.is_in_fallback()
+    }))
+    .unwrap_or(false)
+}
+
+/// Get path statistics
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `out_missed_keepalives` - Output missed keepalive count
+/// * `out_rtt_ms` - Output RTT in milliseconds (0 if not measured)
+/// * `out_in_fallback` - Output fallback status (1 = in fallback, 0 = not)
+///
+/// # Returns
+/// `AgentResult::Ok` on success
+#[no_mangle]
+pub unsafe extern "C" fn agent_get_path_stats(
+    agent: *const Agent,
+    out_missed_keepalives: *mut u32,
+    out_rtt_ms: *mut u64,
+    out_in_fallback: *mut u8,
+) -> AgentResult {
+    if agent.is_null() || out_missed_keepalives.is_null() || out_rtt_ms.is_null() || out_in_fallback.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &*agent;
+        let stats = agent.path_stats();
+
+        *out_missed_keepalives = stats.missed_keepalives;
+        *out_rtt_ms = stats.direct_rtt.map(|d| d.as_millis() as u64).unwrap_or(0);
+        *out_in_fallback = if stats.in_fallback { 1 } else { 0 };
+
+        AgentResult::Ok
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
+// ============================================================================
 // Legacy FFI - Packet Processing (kept for compatibility)
 // ============================================================================
 
@@ -1482,5 +1658,62 @@ mod tests {
         // Agent should be connected now
         assert_eq!(agent_coord.state(), HolePunchState::Connected);
         assert!(agent_coord.working_address().is_some());
+    }
+
+    #[test]
+    fn test_path_manager_integration() {
+        use crate::p2p::{PathManager, ActivePath, PathState};
+
+        let mut manager = PathManager::new();
+
+        // Initially no path
+        assert_eq!(manager.active_path_type(), ActivePath::None);
+        assert!(!manager.is_in_fallback());
+
+        // Set relay (simulating Intermediate connection)
+        let relay_addr: std::net::SocketAddr = "1.2.3.4:4433".parse().unwrap();
+        manager.set_relay(relay_addr);
+        assert_eq!(manager.active_path_type(), ActivePath::Relay);
+        assert_eq!(manager.active_addr(), Some(relay_addr));
+
+        // Establish direct path (simulating successful hole punch)
+        let direct_addr: std::net::SocketAddr = "192.168.1.100:5000".parse().unwrap();
+        manager.set_direct(direct_addr);
+        assert_eq!(manager.active_path_type(), ActivePath::Direct);
+        assert_eq!(manager.active_addr(), Some(direct_addr));
+        assert!(!manager.is_in_fallback());
+
+        // Test keepalive polling
+        let keepalive = manager.poll_keepalive();
+        assert!(keepalive.is_some());
+        let (addr, msg) = keepalive.unwrap();
+        assert_eq!(addr, direct_addr);
+        assert_eq!(msg[0], crate::p2p::KEEPALIVE_REQUEST);
+
+        // Test keepalive response processing
+        let request = crate::p2p::encode_keepalive_request(42);
+        let response = manager.process_keepalive(direct_addr, &request);
+        assert!(response.is_some());
+        let resp = response.unwrap();
+        assert_eq!(resp[0], crate::p2p::KEEPALIVE_RESPONSE);
+
+        // Verify path stats
+        let stats = manager.stats();
+        assert_eq!(stats.active_path, ActivePath::Direct);
+        assert!(!stats.in_fallback);
+        assert_eq!(stats.missed_keepalives, 0);
+    }
+
+    #[test]
+    fn test_agent_path_manager_setup() {
+        let agent = Agent::new().unwrap();
+
+        // Initially relay path type is None
+        assert_eq!(agent.active_path(), crate::p2p::ActivePath::None);
+        assert!(!agent.is_in_fallback());
+
+        // Path stats should be accessible
+        let stats = agent.path_stats();
+        assert_eq!(stats.missed_keepalives, 0);
     }
 }

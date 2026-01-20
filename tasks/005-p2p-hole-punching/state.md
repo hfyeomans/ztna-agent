@@ -1,7 +1,7 @@
 # Task State: P2P Hole Punching
 
 **Task ID:** 005-p2p-hole-punching
-**Status:** In Progress - Phase 0-4 Complete, Ready for Phase 5
+**Status:** In Progress - Phase 0-5 Complete, Ready for Phase 6
 **Branch:** `feature/005-p2p-hole-punching`
 **Last Updated:** 2026-01-20
 
@@ -15,7 +15,7 @@ Implement direct peer-to-peer connectivity using NAT hole punching. This is the 
 
 ---
 
-## Current Phase: Phase 4 (QUIC Connection & Path Selection) - COMPLETE ✅
+## Current Phase: Phase 5 (Resilience) - COMPLETE ✅
 
 ### Prerequisites ✅ COMPLETE
 - [x] Task 002 complete (Intermediate Server with QAD)
@@ -369,18 +369,67 @@ fn process_quic_socket(&mut self) {
 
 ---
 
+### Phase 5: Resilience ✅ COMPLETE
+- [x] Created `p2p/resilience.rs` module
+- [x] Implemented keepalive protocol:
+  - `KEEPALIVE_INTERVAL` = 15 seconds
+  - `MISSED_KEEPALIVES_THRESHOLD` = 3 (path considered failed)
+  - `KEEPALIVE_TIMEOUT` = 5 seconds (response wait time)
+  - `FALLBACK_COOLDOWN` = 30 seconds (prevent thrashing)
+- [x] Implemented keepalive message encoding/decoding:
+  - `encode_keepalive_request()` / `encode_keepalive_response()`
+  - `decode_keepalive()` - returns (is_response, sequence)
+- [x] Implemented `PathState` enum:
+  - `Active` - Path is healthy
+  - `Degraded` - Some keepalives missed
+  - `Failed` - Exceeded threshold
+  - `Recovering` - Trying again after cooldown
+- [x] Implemented `PathInfo` struct:
+  - Remote address tracking
+  - Keepalive send/receive timestamps
+  - Sequence number management
+  - RTT measurement
+  - State transitions
+- [x] Implemented `PathManager` struct:
+  - Direct path + relay path management
+  - Active path selection (Direct/Relay/None)
+  - Keepalive polling and processing
+  - Automatic fallback on path failure
+  - Recovery after cooldown
+  - Path statistics (missed keepalives, RTT, fallback status)
+- [x] Wired PathManager into Agent (`lib.rs`):
+  - Added `path_manager` field to Agent struct
+  - Set relay on Intermediate connect
+  - Set direct path on successful hole punch
+  - Check timeouts and attempt recovery in `on_timeout()`
+  - Process keepalives in `process_p2p_datagrams()`
+  - Added resilience methods: `poll_keepalive()`, `active_path()`, `is_in_fallback()`, `path_stats()`
+- [x] Added FFI functions for Swift integration:
+  - `agent_poll_keepalive()` - Get keepalive to send
+  - `agent_get_active_path()` - Get active path type (0=Direct, 1=Relay, 2=None)
+  - `agent_is_in_fallback()` - Check fallback status
+  - `agent_get_path_stats()` - Get diagnostics (missed keepalives, RTT, fallback)
+- [x] 12 unit tests for resilience module
+- [x] 2 integration tests for path manager integration
+
+**Test Count:** 79 tests total in packet_processor
+
+---
+
 ## What's Next
 
-1. **Phase 4: Complete ✅**
-   - [x] Integration test: Agent ↔ Connector direct QUIC (localhost)
-   - [x] Wire HolePunchCoordinator into Agent main loop
-   - [x] Wire HolePunchCoordinator into Connector main loop
-   - [x] Wire HolePunchCoordinator into Intermediate Server
+1. **Phase 5: Complete ✅**
+   - [x] Keepalive sender (15s interval)
+   - [x] Keepalive receiver
+   - [x] Track missed keepalives
+   - [x] Failure detection state machine
+   - [x] Graceful fallback transition
+   - [x] PathManager wired into Agent
 
-2. **Phase 5: Resilience** (Next)
-   - NAT keepalive (15-second interval)
-   - Fallback to relay on direct path failure
-   - Path monitoring and switching
+2. **Phase 6: Testing** (Next)
+   - Unit tests verification
+   - Integration tests (localhost)
+   - Simulated multi-host test
 
 ---
 
@@ -393,7 +442,7 @@ fn process_quic_socket(&mut self) {
 | Phase 2: Signaling Infrastructure | ✅ Complete | `p2p/signaling.rs` - 13+6 tests |
 | Phase 3: Direct Path Establishment | ✅ Complete | `p2p/connectivity.rs` - 17 tests |
 | Phase 4: Hole Punch Coordination | ✅ Complete | 65 tests (full integration) |
-| Phase 5: Resilience | 🔲 Not Started | Keepalive, fallback |
+| Phase 5: Resilience | ✅ Complete | `p2p/resilience.rs` - 79 total tests |
 | Phase 6: Testing | 🔲 Not Started | |
 | Phase 7: Documentation | 🔲 Not Started | |
 | Phase 8: PR & Merge | 🔲 Not Started | |
