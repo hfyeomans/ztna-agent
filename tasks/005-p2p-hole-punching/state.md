@@ -15,7 +15,7 @@ Implement direct peer-to-peer connectivity using NAT hole punching. This is the 
 
 ---
 
-## Current Phase: Phase 1 (Candidate Gathering)
+## Current Phase: Phase 2 (Signaling Infrastructure)
 
 ### Prerequisites ✅ COMPLETE
 - [x] Task 002 complete (Intermediate Server with QAD)
@@ -264,24 +264,50 @@ fn process_quic_socket(&mut self) {
   - 5 unit tests passing
 - [x] Socket architecture documented in plan.md
 
+### Phase 1: Candidate Gathering ✅ COMPLETE
+- [x] Created `p2p/` module in `core/packet_processor/src/`
+  - `mod.rs` - Module root with re-exports
+  - `candidate.rs` - Candidate types and gathering
+- [x] Implemented `CandidateType` enum:
+  - `Host` - Local interface addresses (priority: 126)
+  - `ServerReflexive` - Public address from QAD (priority: 100)
+  - `PeerReflexive` - Discovered during checks (priority: 110)
+  - `Relay` - Via Intermediate server (priority: 0)
+- [x] Implemented `Candidate` struct:
+  - `candidate_type` - Type of candidate
+  - `address` - Transport address (SocketAddr)
+  - `priority` - Calculated per RFC 8445
+  - `foundation` - For candidate pairing
+  - `related_address` - Base address (optional)
+- [x] Implemented `calculate_priority()` per RFC 8445:
+  - Formula: `(type_pref << 24) | (local_pref << 8) | (256 - component_id)`
+- [x] Implemented candidate gathering functions:
+  - `gather_host_candidates()` - From local addresses
+  - `gather_reflexive_candidate()` - From QAD response
+  - `gather_relay_candidate()` - Intermediate address
+  - `enumerate_local_addresses()` - libc getifaddrs
+  - `sort_candidates_by_priority()` - Sort by priority descending
+- [x] 11 unit tests passing:
+  - Type preference tests
+  - Priority calculation tests
+  - Host/srflx/relay candidate creation tests
+  - Candidate gathering and sorting tests
+
 ---
 
 ## What's Next
 
-1. **Phase 1: Candidate Gathering (Starting)**
-   - [ ] Create `p2p/` module in `core/packet_processor/src/`
-   - [ ] Implement `Candidate` struct with type, address, priority, foundation
-   - [ ] Implement `CandidateType` enum (Host, ServerReflexive, Relay)
-   - [ ] Implement `calculate_priority()` per RFC 8445
-   - [ ] Implement `gather_host_candidates()` - enumerate interfaces
-   - [ ] Implement `gather_reflexive_candidate()` from QAD
-   - [ ] Implement `gather_relay_candidate()` (Intermediate address)
-   - [ ] Unit tests for candidate module
+1. **Phase 2: Signaling Infrastructure (Starting)**
+   - [ ] Define `SignalingMessage` enum (CandidateOffer, CandidateAnswer, StartPunching)
+   - [ ] Add bincode serialization
+   - [ ] Define message framing (4-byte length prefix)
+   - [ ] Implement Intermediate Server signaling relay
+   - [ ] Implement Agent/Connector signaling client
 
-2. **Phase 2: Signaling Infrastructure**
-   - Define signaling message format
-   - Implement Intermediate Server relay logic
-   - Implement Agent/Connector signaling client
+2. **Phase 3: Direct Path Establishment**
+   - Binding request/response protocol
+   - Candidate pair management
+   - Connectivity checks
 
 ---
 
@@ -290,8 +316,8 @@ fn process_quic_socket(&mut self) {
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Phase 0: Socket Architecture | ✅ Complete | Agent multi-conn + Connector dual-mode |
-| Phase 1: Candidate Gathering | 🔲 Not Started | Create `p2p/` module |
-| Phase 2: Signaling Infrastructure | 🔲 Not Started | |
+| Phase 1: Candidate Gathering | ✅ Complete | `p2p/candidate.rs` - 11 tests |
+| Phase 2: Signaling Infrastructure | 🔲 Not Started | Next up |
 | Phase 3: Direct Path Establishment | 🔲 Not Started | |
 | Phase 4: QUIC Connection & Path Selection | 🔲 Not Started | |
 | Phase 5: Resilience | 🔲 Not Started | |

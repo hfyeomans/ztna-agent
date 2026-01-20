@@ -23,7 +23,7 @@
 
 ### Testable Locally
 - [x] All unit tests pass without network
-- [ ] Candidate gathering (enumerate interfaces)
+- [x] Candidate gathering (enumerate interfaces)
 - [ ] Candidate exchange via Intermediate (localhost)
 - [ ] Binding request/response protocol
 - [ ] Direct QUIC connection Agent → Connector (localhost)
@@ -56,26 +56,37 @@
 
 ---
 
-## Phase 1: Candidate Gathering
+## Phase 1: Candidate Gathering ✅ COMPLETE
 
-- [ ] Create `p2p/` module in `core/packet_processor/src/`
-- [ ] Implement `Candidate` struct with fields:
-  - [ ] `candidate_type: CandidateType`
-  - [ ] `address: SocketAddr`
-  - [ ] `priority: u32`
-  - [ ] `foundation: String`
-- [ ] Implement `CandidateType` enum (Host, ServerReflexive, Relay)
-- [ ] Implement `calculate_priority()` per RFC 8445
-- [ ] Implement `gather_host_candidates()`:
-  - [ ] Enumerate network interfaces
-  - [ ] Filter loopback addresses
-  - [ ] Return list of host candidates
-- [ ] Implement `gather_reflexive_candidate()` from QAD response
-- [ ] Implement `gather_relay_candidate()` (Intermediate address)
-- [ ] Unit tests:
-  - [ ] `test_candidate_priority_calculation()`
-  - [ ] `test_host_candidate_gathering()`
-  - [ ] `test_candidate_serialization()`
+- [x] Create `p2p/` module in `core/packet_processor/src/`
+- [x] Implement `Candidate` struct with fields:
+  - [x] `candidate_type: CandidateType`
+  - [x] `address: SocketAddr`
+  - [x] `priority: u32`
+  - [x] `foundation: String`
+  - [x] `related_address: Option<SocketAddr>`
+- [x] Implement `CandidateType` enum (Host, ServerReflexive, PeerReflexive, Relay)
+- [x] Implement `calculate_priority()` per RFC 8445
+- [x] Implement `gather_host_candidates()`:
+  - [x] Accept local addresses from caller
+  - [x] Filter loopback addresses (configurable)
+  - [x] Return list of host candidates
+- [x] Implement `enumerate_local_addresses()` via libc getifaddrs
+- [x] Implement `gather_reflexive_candidate()` from QAD response
+- [x] Implement `gather_relay_candidate()` (Intermediate address)
+- [x] Implement `sort_candidates_by_priority()`
+- [x] Unit tests (11 tests):
+  - [x] `test_candidate_type_preference()`
+  - [x] `test_calculate_priority()`
+  - [x] `test_host_candidate_creation()`
+  - [x] `test_srflx_candidate_creation()`
+  - [x] `test_relay_candidate_creation()`
+  - [x] `test_gather_host_candidates()`
+  - [x] `test_gather_reflexive_candidate()`
+  - [x] `test_sort_candidates_by_priority()`
+  - [x] `test_candidate_display()`
+  - [x] `test_is_loopback()`
+  - [x] `test_enumerate_local_addresses()`
 
 ---
 
