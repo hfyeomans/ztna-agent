@@ -150,18 +150,38 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ---
 
-### 005: P2P Hole Punching 🔲 NOT STARTED
+### 005: P2P Hole Punching 🔄 IN PROGRESS
 
-**Location:** Updates to Agent + Connector
+**Location:** Updates to Agent + Connector + Intermediate
 
-**Dependencies:** 002, 003, 004 (relay working first)
+**Dependencies:** 002, 003, 004 (relay working first) ✅ All complete
+
+**Branch:** `feature/005-p2p-hole-punching`
+
+**Status:**
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 0: Socket Architecture | 🔲 Ready | Critical foundation - single socket reuse |
+| Phase 1: Candidate Gathering | 🔲 Planned | Host, reflexive, relay candidates |
+| Phase 2: Signaling Infrastructure | 🔲 Planned | Candidate exchange via Intermediate |
+| Phase 3: Direct Path Establishment | 🔲 Planned | Hole punching coordination |
+| Phase 4: QUIC Connection | 🔲 Planned | New direct connection to Connector |
+| Phase 5: Resilience | 🔲 Planned | Keepalive, fallback |
+
+**Key Insights (Oracle Review 2026-01-20):**
+- P2P = NEW QUIC connection (not path migration of existing)
+- Connector must become QUIC server (currently client-only)
+- Single socket reuse required for NAT mapping
+- Local testing validates protocol; real NAT testing requires Task 006
 
 **Capabilities needed:**
-- Address exchange via Intermediate
-- Simultaneous open (hole punch)
-- QUIC connection migration
-- Path selection (prefer direct)
-- Fallback to relay
+- Socket architecture (single socket for Intermediate + P2P)
+- Connector QUIC server mode
+- Address exchange via Intermediate signaling
+- Direct QUIC connection Agent → Connector
+- Path selection (prefer direct over relay)
+- Fallback to relay on failure
 
 ---
 
@@ -222,16 +242,16 @@ QUIC Client → Intermediate → Connector → Echo Server → back
                     ▼                       ▼
     ┌─────────────────────────┐   ┌─────────────────────────┐
     │  003: App Connector     │   │  004: E2E Testing       │
-    │  ✅ COMPLETE            │   │  🔄 IN PROGRESS         │
+    │  ✅ COMPLETE            │   │  ✅ COMPLETE            │
     └───────────┬─────────────┘   └───────────┬─────────────┘
                 │                             │
                 └─────────────┬───────────────┘
                               │
-                              │ relay working locally
+                              │ relay working locally ✅
                               ▼
                     ┌─────────────────────────┐
                     │  005: P2P Hole Punching │
-                    │  🔲 NOT STARTED         │
+                    │  🔄 IN PROGRESS         │
                     │  ★ PRIMARY GOAL ★       │
                     └───────────┬─────────────┘
                                 │
