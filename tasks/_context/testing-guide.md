@@ -1,7 +1,7 @@
 # ZTNA Testing & Demo Guide
 
-**Last Updated:** 2026-01-19
-**Status:** Phase 5 Complete (Reliability Tests)
+**Last Updated:** 2026-01-20
+**Status:** Phase 6 Complete + P2P Unit Tests (Task 005)
 
 ---
 
@@ -487,6 +487,98 @@ RTT_SAMPLES=100 BURST_COUNT=500 tests/e2e/scenarios/performance-metrics.sh
 | `*_MEM_KB` | Memory usage per component | 5-7 MB |
 
 **Output:** `tests/e2e/artifacts/metrics/perf_YYYYMMDD_HHMMSS.txt`
+
+---
+
+## Unit Tests
+
+### Running All Unit Tests
+
+```bash
+# All Rust components (packet_processor, intermediate-server, app-connector)
+cargo test --workspace
+
+# Specific component
+(cd core/packet_processor && cargo test)
+(cd intermediate-server && cargo test)
+(cd app-connector && cargo test)
+```
+
+### P2P Module Tests (Task 005)
+
+**Location:** `core/packet_processor/src/p2p/`
+
+| Module | Tests | Description |
+|--------|-------|-------------|
+| `candidate.rs` | 11 | ICE candidate types, priority calculation, gathering |
+| `signaling.rs` | 13 | Message encode/decode, framing, session IDs |
+| `connectivity.rs` | 17 | Binding protocol, pairs, check list management |
+
+**Run P2P tests specifically:**
+```bash
+(cd core/packet_processor && cargo test p2p)
+```
+
+**Key test categories:**
+
+**Candidate Module:**
+- `test_candidate_type_preference` - Type ordering per RFC 8445
+- `test_calculate_priority` - Priority formula validation
+- `test_gather_host_candidates` - Local interface enumeration
+- `test_gather_reflexive_candidate` - Server-reflexive from QAD
+- `test_sort_candidates_by_priority` - Priority-based sorting
+
+**Signaling Module:**
+- `test_encode_decode_*` - All message types round-trip
+- `test_decode_multiple_messages` - Stream parsing with length prefixes
+- `test_partial_message_decode` - Incomplete buffer handling
+- `test_generate_session_id` - Unique ID generation
+
+**Connectivity Module:**
+- `test_binding_request_serialization` - Binding request encode/decode
+- `test_candidate_pair_priority` - RFC 8445 §6.1.2.3 pair priority
+- `test_check_list_priority_ordering` - Highest priority first
+- `test_foundation_based_unfreezing` - ICE unfreezing logic
+- `test_exponential_backoff` - RTO calculation (100ms → 1600ms)
+- `test_nomination` - Candidate pair nomination
+
+### Intermediate Server Tests
+
+**Location:** `intermediate-server/src/`
+
+| Module | Tests | Description |
+|--------|-------|-------------|
+| `signaling.rs` | 6 | Session manager, agent/connector tracking |
+| `registry.rs` | 6 | Client registry, pair matching |
+| `main.rs` | 1 | Integration (handshake + QAD) |
+
+**Run Intermediate tests:**
+```bash
+(cd intermediate-server && cargo test)
+```
+
+### App Connector Tests
+
+**Location:** `app-connector/src/`
+
+| Module | Tests | Description |
+|--------|-------|-------------|
+| Unit tests | 8 | Packet parsing, IP/UDP construction |
+| Integration | 2 | QUIC handshake, registration |
+
+**Run App Connector tests:**
+```bash
+(cd app-connector && cargo test)
+```
+
+### Test Count Summary
+
+| Component | Tests | Notes |
+|-----------|-------|-------|
+| packet_processor | 46 | 5 agent + 11 candidate + 13 signaling + 17 connectivity |
+| intermediate-server | 13 | 6 signaling + 6 registry + 1 integration |
+| app-connector | 10 | 8 unit + 2 integration |
+| **Total** | **69** | All passing, 0 ignored |
 
 ---
 

@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-19 (Phase 6 Performance Metrics Complete)
+**Last Updated:** 2026-01-20 (Task 005 Phase 0-3 Complete)
 
 ---
 
@@ -152,7 +152,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ### 005: P2P Hole Punching 🔄 IN PROGRESS
 
-**Location:** Updates to Agent + Connector + Intermediate
+**Location:** `core/packet_processor/src/p2p/`, `intermediate-server/src/signaling.rs`, `app-connector/`
 
 **Dependencies:** 002, 003, 004 (relay working first) ✅ All complete
 
@@ -160,28 +160,29 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 **Status:**
 
-| Phase | Status | Notes |
-|-------|--------|-------|
-| Phase 0: Socket Architecture | 🔲 Ready | Critical foundation - single socket reuse |
-| Phase 1: Candidate Gathering | 🔲 Planned | Host, reflexive, relay candidates |
-| Phase 2: Signaling Infrastructure | 🔲 Planned | Candidate exchange via Intermediate |
-| Phase 3: Direct Path Establishment | 🔲 Planned | Hole punching coordination |
-| Phase 4: QUIC Connection | 🔲 Planned | New direct connection to Connector |
-| Phase 5: Resilience | 🔲 Planned | Keepalive, fallback |
+| Phase | Status | Commit | Tests |
+|-------|--------|--------|-------|
+| Phase 0: Socket Architecture | ✅ Done | `c7d2aa7` | Agent multi-conn, Connector dual-mode |
+| Phase 1: Candidate Gathering | ✅ Done | `672129c` | 11 tests (candidate types, gathering) |
+| Phase 2: Signaling Infrastructure | ✅ Done | `d415d90` | 19 tests (messages, framing, sessions) |
+| Phase 3: Direct Path Establishment | ✅ Done | `b64190c` | 17 tests (binding, pairs, check list) |
+| Phase 4: Hole Punch Coordination | 🔄 In Progress | | 17 tests (coordinator, path selection) |
+| Phase 5: Resilience | 🔲 Planned | | Keepalive, fallback |
 
-**Key Insights (Oracle Review 2026-01-20):**
-- P2P = NEW QUIC connection (not path migration of existing)
-- Connector must become QUIC server (currently client-only)
-- Single socket reuse required for NAT mapping
-- Local testing validates protocol; real NAT testing requires Task 006
+**Modules Created:**
+- `p2p/candidate.rs` - ICE candidate types, RFC 8445 priority
+- `p2p/signaling.rs` - CandidateOffer/Answer/StartPunching messages
+- `p2p/connectivity.rs` - BindingRequest/Response, CandidatePair, CheckList
+- `intermediate-server/signaling.rs` - Session management for relay
 
-**Capabilities needed:**
-- Socket architecture (single socket for Intermediate + P2P)
-- Connector QUIC server mode
-- Address exchange via Intermediate signaling
-- Direct QUIC connection Agent → Connector
-- Path selection (prefer direct over relay)
-- Fallback to relay on failure
+**Key Architecture Decisions:**
+- P2P = NEW QUIC connection (not path migration)
+- Connector dual-mode: client (to Intermediate) + server (for Agents)
+- Single socket reuse for NAT mapping preservation
+- RFC 8445 pair priority: `2^32*MIN(G,D) + 2*MAX(G,D) + (G>D?1:0)`
+- Exponential backoff: 100ms → 1600ms (max 5 retransmits)
+
+**Test Count:** 47 new tests across packet_processor + intermediate-server
 
 ---
 

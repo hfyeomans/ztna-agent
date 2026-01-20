@@ -15,7 +15,6 @@
 //! │  signaling.rs    - Candidate exchange via Intermediate        │
 //! │  connectivity.rs - Binding request/response protocol          │
 //! │  hole_punch.rs   - Hole punching coordination                 │
-//! │  path_select.rs  - Path selection logic                       │
 //! │                                                                │
 //! └───────────────────────────────────────────────────────────────┘
 //! ```
@@ -25,11 +24,11 @@
 //! - [x] `candidate.rs` - Phase 1 (Candidate Gathering)
 //! - [x] `signaling.rs` - Phase 2 (Signaling Infrastructure)
 //! - [x] `connectivity.rs` - Phase 3 (Direct Path Establishment)
-//! - [ ] `hole_punch.rs` - Phase 3 (Hole Punching)
-//! - [ ] `path_select.rs` - Phase 4 (Path Selection)
+//! - [x] `hole_punch.rs` - Phase 4 (Hole Punching Coordination)
 
 pub mod candidate;
 pub mod connectivity;
+pub mod hole_punch;
 pub mod signaling;
 
 // Re-export commonly used types
@@ -64,4 +63,17 @@ pub use connectivity::{
     calculate_pair_priority,
     encode_binding,
     decode_binding,
+};
+
+pub use hole_punch::{
+    HolePunchCoordinator,
+    HolePunchState,
+    HolePunchResult,
+    PathSelection,
+    select_path,
+    should_switch_to_direct,
+    should_switch_to_relay,
+    HOLE_PUNCH_TIMEOUT,
+    SIGNALING_TIMEOUT,
+    DEFAULT_START_DELAY_MS,
 };

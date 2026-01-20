@@ -15,7 +15,7 @@ Implement direct peer-to-peer connectivity using NAT hole punching. This is the 
 
 ---
 
-## Current Phase: Phase 4 (QUIC Connection & Path Selection)
+## Current Phase: Phase 4 (QUIC Connection & Path Selection) - IN PROGRESS
 
 ### Prerequisites ✅ COMPLETE
 - [x] Task 002 complete (Intermediate Server with QAD)
@@ -335,13 +335,34 @@ fn process_quic_socket(&mut self) {
 
 ---
 
+### Phase 4: Hole Punching Coordination 🔄 IN PROGRESS
+- [x] Created `p2p/hole_punch.rs` module
+- [x] Implemented `HolePunchCoordinator`:
+  - State machine: Idle → Gathering → Signaling → WaitingToStart → Checking → Connected/Failed
+  - Candidate gathering (host, reflexive, relay)
+  - Signaling message handling (offer, answer, start, result)
+  - Binding request/response flow orchestration
+  - Timeout handling
+- [x] Implemented `HolePunchState` enum for coordinator states
+- [x] Implemented `HolePunchResult` enum (DirectPath or UseRelay)
+- [x] Implemented path selection functions:
+  - `select_path()` - Choose direct vs relay based on RTT and reliability
+  - `should_switch_to_direct()` - Switch threshold (50% faster)
+  - `should_switch_to_relay()` - Failure-based switching
+- [x] 17 unit tests for hole punch module
+- [ ] Integration test: Agent ↔ Connector direct QUIC (localhost)
+- [ ] Wire HolePunchCoordinator into Agent/Connector main loops
+
+**Test Count:** 86 tests total (packet_processor: 63, intermediate-server: 13, app-connector: 10)
+
+---
+
 ## What's Next
 
-1. **Phase 4: QUIC Connection & Path Selection (Starting)**
-   - [ ] Agent: Establish QUIC connection to Connector's address
-   - [ ] Connector: Accept QUIC connection from Agent
-   - [ ] Path validation and selection logic
-   - [ ] Integration with hole punch coordinator
+1. **Phase 4: Complete Integration (Remaining)**
+   - [ ] Integration test: Agent ↔ Connector direct QUIC (localhost)
+   - [ ] Wire HolePunchCoordinator into Agent main loop
+   - [ ] Wire HolePunchCoordinator into Connector main loop
 
 2. **Phase 5: Resilience**
    - NAT keepalive
@@ -357,7 +378,7 @@ fn process_quic_socket(&mut self) {
 | Phase 1: Candidate Gathering | ✅ Complete | `p2p/candidate.rs` - 11 tests |
 | Phase 2: Signaling Infrastructure | ✅ Complete | `p2p/signaling.rs` - 13+6 tests |
 | Phase 3: Direct Path Establishment | ✅ Complete | `p2p/connectivity.rs` - 17 tests |
-| Phase 4: QUIC Connection & Path Selection | 🔲 Not Started | Next up |
+| Phase 4: Hole Punch Coordination | 🔄 In Progress | `p2p/hole_punch.rs` - 17 tests |
 | Phase 5: Resilience | 🔲 Not Started | |
 | Phase 6: Testing | 🔲 Not Started | |
 | Phase 7: Documentation | 🔲 Not Started | |

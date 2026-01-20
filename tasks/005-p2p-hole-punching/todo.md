@@ -149,26 +149,31 @@
 
 ---
 
-## Phase 4: QUIC Connection and Path Selection
+## Phase 4: Hole Punch Coordination 🔄 IN PROGRESS
 
-### 4.1 Direct QUIC Connection
-- [ ] Agent: Establish QUIC connection to Connector's address
-- [ ] Connector: Accept QUIC connection from Agent
+### 4.1 HolePunchCoordinator Module ✅ COMPLETE
+- [x] Create `p2p/hole_punch.rs` module
+- [x] Implement `HolePunchCoordinator` struct with state machine
+- [x] Implement `HolePunchState` enum (Idle → Gathering → Signaling → Checking → Connected/Failed)
+- [x] Implement `HolePunchResult` enum (DirectPath or UseRelay)
+- [x] Implement candidate gathering (host, reflexive, relay)
+- [x] Implement signaling message handling
+- [x] Implement binding request/response orchestration
+- [x] Implement timeout handling
+- [x] 17 unit tests for hole punch module
+
+### 4.2 Path Selection ✅ COMPLETE
+- [x] Implement `select_path()` decision logic (RTT + reliability)
+- [x] Implement `should_switch_to_direct()` threshold (50% faster)
+- [x] Implement `should_switch_to_relay()` (failure-based)
+- [x] Unit tests for path selection
+
+### 4.3 Integration (Remaining)
+- [ ] Integration test: Agent ↔ Connector direct QUIC (localhost)
+- [ ] Wire HolePunchCoordinator into Agent main loop
+- [ ] Wire HolePunchCoordinator into Connector main loop
 - [ ] Verify data can flow on direct connection
-- [ ] Integration test: Agent ↔ Connector direct QUIC
-
-### 4.2 Path Selection
-- [ ] Implement `should_use_direct()` decision logic
-- [ ] Measure RTT on both paths (relay vs direct)
-- [ ] Implement path switching logic
 - [ ] Atomic routing update (no packet loss)
-- [ ] Integration test: path selection works
-
-### 4.3 quiche API Integration
-- [ ] Validate quiche `probe_path()` API
-- [ ] Validate quiche `migrate()` API
-- [ ] Handle `PathEvent` variants
-- [ ] Integration test: quiche path operations
 
 ---
 
