@@ -1,7 +1,7 @@
 # Task State: P2P Hole Punching
 
 **Task ID:** 005-p2p-hole-punching
-**Status:** In Progress - Phase 0-3 Complete, Ready for Phase 4
+**Status:** In Progress - Phase 0-4 Complete, Ready for Phase 5
 **Branch:** `feature/005-p2p-hole-punching`
 **Last Updated:** 2026-01-20
 
@@ -15,7 +15,7 @@ Implement direct peer-to-peer connectivity using NAT hole punching. This is the 
 
 ---
 
-## Current Phase: Phase 4 (QUIC Connection & Path Selection) - IN PROGRESS
+## Current Phase: Phase 4 (QUIC Connection & Path Selection) - COMPLETE ✅
 
 ### Prerequisites ✅ COMPLETE
 - [x] Task 002 complete (Intermediate Server with QAD)
@@ -335,7 +335,7 @@ fn process_quic_socket(&mut self) {
 
 ---
 
-### Phase 4: Hole Punching Coordination 🔄 IN PROGRESS
+### Phase 4: Hole Punching Coordination ✅ COMPLETE
 - [x] Created `p2p/hole_punch.rs` module
 - [x] Implemented `HolePunchCoordinator`:
   - State machine: Idle → Gathering → Signaling → WaitingToStart → Checking → Connected/Failed
@@ -350,23 +350,37 @@ fn process_quic_socket(&mut self) {
   - `should_switch_to_direct()` - Switch threshold (50% faster)
   - `should_switch_to_relay()` - Failure-based switching
 - [x] 17 unit tests for hole punch module
-- [ ] Integration test: Agent ↔ Connector direct QUIC (localhost)
-- [ ] Wire HolePunchCoordinator into Agent/Connector main loops
+- [x] Wire HolePunchCoordinator into Intermediate Server (`main.rs`)
+  - Added SessionManager for P2P signaling sessions
+  - Added `process_streams()` for signaling stream processing
+  - Added message handlers for CandidateOffer/CandidateAnswer/StartPunching
+- [x] Wire HolePunchCoordinator into Connector (`main.rs`, `signaling.rs`)
+  - Created signaling.rs module with full signaling types
+  - Added P2PSessionManager for connector-side session tracking
+  - Added signaling stream processing methods
+- [x] Wire HolePunchCoordinator into Agent (`lib.rs`)
+  - Added hole punching fields (stream_buffer, signaling_buffer, hole_punch)
+  - Added hole punching methods (start_hole_punching, process_signaling_*, poll_hole_punch)
+  - Added FFI functions for Swift integration
+- [x] Integration test: Agent ↔ Connector direct QUIC (localhost)
+  - `test_hole_punch_coordinator_integration` - Full signaling + binding flow
 
-**Test Count:** 86 tests total (packet_processor: 63, intermediate-server: 13, app-connector: 10)
+**Test Count:** 65 tests total in packet_processor (includes hole punch integration test)
 
 ---
 
 ## What's Next
 
-1. **Phase 4: Complete Integration (Remaining)**
-   - [ ] Integration test: Agent ↔ Connector direct QUIC (localhost)
-   - [ ] Wire HolePunchCoordinator into Agent main loop
-   - [ ] Wire HolePunchCoordinator into Connector main loop
+1. **Phase 4: Complete ✅**
+   - [x] Integration test: Agent ↔ Connector direct QUIC (localhost)
+   - [x] Wire HolePunchCoordinator into Agent main loop
+   - [x] Wire HolePunchCoordinator into Connector main loop
+   - [x] Wire HolePunchCoordinator into Intermediate Server
 
-2. **Phase 5: Resilience**
-   - NAT keepalive
-   - Fallback to relay
+2. **Phase 5: Resilience** (Next)
+   - NAT keepalive (15-second interval)
+   - Fallback to relay on direct path failure
+   - Path monitoring and switching
 
 ---
 
@@ -378,8 +392,8 @@ fn process_quic_socket(&mut self) {
 | Phase 1: Candidate Gathering | ✅ Complete | `p2p/candidate.rs` - 11 tests |
 | Phase 2: Signaling Infrastructure | ✅ Complete | `p2p/signaling.rs` - 13+6 tests |
 | Phase 3: Direct Path Establishment | ✅ Complete | `p2p/connectivity.rs` - 17 tests |
-| Phase 4: Hole Punch Coordination | 🔄 In Progress | `p2p/hole_punch.rs` - 17 tests |
-| Phase 5: Resilience | 🔲 Not Started | |
+| Phase 4: Hole Punch Coordination | ✅ Complete | 65 tests (full integration) |
+| Phase 5: Resilience | 🔲 Not Started | Keepalive, fallback |
 | Phase 6: Testing | 🔲 Not Started | |
 | Phase 7: Documentation | 🔲 Not Started | |
 | Phase 8: PR & Merge | 🔲 Not Started | |

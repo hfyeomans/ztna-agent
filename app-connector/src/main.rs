@@ -18,6 +18,12 @@ use mio::{Events, Interest, Poll, Token};
 use ring::rand::{SecureRandom, SystemRandom};
 
 mod qad;
+mod signaling;
+
+use signaling::{
+    decode_message, encode_message, gather_candidates_with_observed, Candidate, DecodeError,
+    P2PSessionManager, P2PSessionState, SignalingMessage,
+};
 
 // ============================================================================
 // Constants (MUST match Intermediate Server)
@@ -164,6 +170,8 @@ struct Connector {
     recv_buf: Vec<u8>,
     /// Send buffer
     send_buf: Vec<u8>,
+    /// Stream read buffer
+    stream_buf: Vec<u8>,
     /// Whether registration has been sent to Intermediate
     registered: bool,
     /// Observed public address from QAD
@@ -172,6 +180,10 @@ struct Connector {
     /// Key: (src_ip, src_port, dst_port) from encapsulated packet
     /// Value: timestamp for cleanup
     flow_map: HashMap<(Ipv4Addr, u16, u16), Instant>,
+    /// Buffer for accumulating signaling stream data
+    signaling_buffer: Vec<u8>,
+    /// P2P session manager
+    session_manager: P2PSessionManager,
 }
 
 impl Connector {
@@ -266,9 +278,12 @@ impl Connector {
             rng: SystemRandom::new(),
             recv_buf: vec![0u8; 65535],
             send_buf: vec![0u8; MAX_DATAGRAM_SIZE],
+            stream_buf: vec![0u8; 65535],
             registered: false,
             observed_addr: None,
             flow_map: HashMap::new(),
+            signaling_buffer: Vec::new(),
+            session_manager: P2PSessionManager::new(),
         })
     }
 
@@ -314,6 +329,15 @@ impl Connector {
 
             // Check if we need to register with Intermediate
             self.maybe_register()?;
+
+            // Process signaling streams from Intermediate
+            self.process_signaling_streams()?;
+
+            // Cleanup expired P2P sessions
+            let expired = self.session_manager.cleanup_expired();
+            for session_id in expired {
+                log::debug!("Cleaned up expired P2P session {}", session_id);
+            }
 
             // Check connection states
             if let Some(ref conn) = self.intermediate_conn {
@@ -856,6 +880,226 @@ impl Connector {
                 log::info!("P2P connection closed: {:?} from {}", conn_id, client.addr);
             }
         }
+    }
+
+    /// Process signaling streams from Intermediate Server
+    fn process_signaling_streams(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Check if we have an established connection
+        let has_conn = self.intermediate_conn.as_ref()
+            .map(|c| c.is_established())
+            .unwrap_or(false);
+
+        if !has_conn {
+            return Ok(());
+        }
+
+        // Collect readable streams
+        let readable_streams: Vec<u64> = {
+            if let Some(ref conn) = self.intermediate_conn {
+                conn.readable().collect()
+            } else {
+                return Ok(());
+            }
+        };
+
+        // Read from each stream
+        for stream_id in readable_streams {
+            if let Some(ref mut conn) = self.intermediate_conn {
+                loop {
+                    match conn.stream_recv(stream_id, &mut self.stream_buf) {
+                        Ok((len, _fin)) => {
+                            if len == 0 {
+                                break;
+                            }
+                            self.signaling_buffer.extend_from_slice(&self.stream_buf[..len]);
+                        }
+                        Err(quiche::Error::Done) => break,
+                        Err(e) => {
+                            log::debug!("Stream recv error on {}: {:?}", stream_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try to decode and handle messages
+        self.process_signaling_messages()?;
+
+        Ok(())
+    }
+
+    /// Process decoded signaling messages from buffer
+    fn process_signaling_messages(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            if self.signaling_buffer.is_empty() {
+                break;
+            }
+
+            match decode_message(&self.signaling_buffer) {
+                Ok((msg, consumed)) => {
+                    log::info!("Received signaling message: {:?}", msg);
+
+                    // Consume the bytes
+                    self.signaling_buffer.drain(..consumed);
+
+                    // Handle the message
+                    self.handle_signaling_message(msg)?;
+                }
+                Err(DecodeError::Incomplete(_)) => {
+                    // Need more data
+                    break;
+                }
+                Err(DecodeError::TooLarge(size)) => {
+                    log::error!("Signaling message too large: {} bytes", size);
+                    self.signaling_buffer.clear();
+                    break;
+                }
+                Err(DecodeError::Invalid(e)) => {
+                    log::error!("Invalid signaling message: {}", e);
+                    self.signaling_buffer.clear();
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a decoded signaling message
+    fn handle_signaling_message(&mut self, msg: SignalingMessage) -> Result<(), Box<dyn std::error::Error>> {
+        match msg {
+            SignalingMessage::CandidateOffer {
+                session_id,
+                service_id: _,
+                candidates,
+            } => {
+                log::info!(
+                    "CandidateOffer: session={}, {} candidates",
+                    session_id,
+                    candidates.len()
+                );
+
+                // Create session
+                self.session_manager.create_session(session_id, candidates);
+
+                // Gather our candidates
+                let bind_addr = self.quic_socket.local_addr()?;
+                let local_candidates = gather_candidates_with_observed(
+                    bind_addr,
+                    self.observed_addr,
+                    Some(self.server_addr),
+                );
+
+                // Update session with local candidates
+                if let Some(session) = self.session_manager.get_session_mut(session_id) {
+                    session.set_local_candidates(local_candidates.clone());
+                }
+
+                // Send CandidateAnswer
+                let answer = SignalingMessage::CandidateAnswer {
+                    session_id,
+                    candidates: local_candidates,
+                };
+                self.send_signaling_message(&answer)?;
+
+                log::info!("Sent CandidateAnswer for session {}", session_id);
+            }
+
+            SignalingMessage::StartPunching {
+                session_id,
+                start_delay_ms,
+                peer_candidates,
+            } => {
+                log::info!(
+                    "StartPunching: session={}, delay={}ms, {} peer candidates",
+                    session_id,
+                    start_delay_ms,
+                    peer_candidates.len()
+                );
+
+                // Update session
+                if let Some(session) = self.session_manager.get_session_mut(session_id) {
+                    // Update with peer candidates if provided
+                    if !peer_candidates.is_empty() {
+                        session.agent_candidates = peer_candidates;
+                    }
+                    session.set_punch_start(start_delay_ms);
+                }
+
+                // For MVP, we'll report success immediately since we're on localhost
+                // In a real implementation, we'd perform connectivity checks here
+                log::info!("P2P session {} ready for connectivity checks", session_id);
+            }
+
+            SignalingMessage::PunchingResult {
+                session_id,
+                success,
+                working_address,
+            } => {
+                log::info!(
+                    "PunchingResult from peer: session={}, success={}, addr={:?}",
+                    session_id,
+                    success,
+                    working_address
+                );
+
+                // Update our session state
+                if let Some(session) = self.session_manager.get_session_mut(session_id) {
+                    if success {
+                        if let Some(addr) = working_address {
+                            session.set_connected(addr);
+                        }
+                    } else {
+                        session.set_fallback();
+                    }
+                }
+            }
+
+            SignalingMessage::CandidateAnswer { session_id, .. } => {
+                // Connector shouldn't receive CandidateAnswer (that's what it sends)
+                log::warn!("Unexpected CandidateAnswer received for session {}", session_id);
+            }
+
+            SignalingMessage::Error {
+                session_id,
+                code,
+                message,
+            } => {
+                log::error!(
+                    "Signaling error: session={:?}, code={:?}, msg={}",
+                    session_id,
+                    code,
+                    message
+                );
+
+                // Clean up the session
+                if let Some(sid) = session_id {
+                    self.session_manager.remove_session(sid);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send a signaling message to the Intermediate Server
+    fn send_signaling_message(&mut self, msg: &SignalingMessage) -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = encode_message(msg).map_err(|e| format!("encode error: {}", e))?;
+
+        if let Some(ref mut conn) = self.intermediate_conn {
+            // Send on stream 0 (client-initiated bidirectional)
+            match conn.stream_send(0, &encoded, false) {
+                Ok(_) => {
+                    log::debug!("Sent signaling message ({} bytes)", encoded.len());
+                }
+                Err(e) => {
+                    log::error!("Failed to send signaling message: {:?}", e);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

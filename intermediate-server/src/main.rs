@@ -20,6 +20,10 @@ mod signaling;
 
 use client::{Client, ClientType};
 use registry::Registry;
+use signaling::{
+    decode_message, encode_message, DecodeError, SessionManager, SessionState,
+    SignalingError, SignalingMessage, PUNCH_START_DELAY_MS,
+};
 
 // ============================================================================
 // Constants
@@ -88,12 +92,16 @@ struct Server {
     clients: HashMap<quiche::ConnectionId<'static>, Client>,
     /// Client registry for routing
     registry: Registry,
+    /// P2P signaling session manager
+    session_manager: SessionManager,
     /// Random number generator for connection IDs
     rng: SystemRandom,
     /// Receive buffer
     recv_buf: Vec<u8>,
     /// Send buffer
     send_buf: Vec<u8>,
+    /// Stream read buffer
+    stream_buf: Vec<u8>,
 }
 
 impl Server {
@@ -141,9 +149,11 @@ impl Server {
             config,
             clients: HashMap::new(),
             registry: Registry::new(),
+            session_manager: SessionManager::new(),
             rng: SystemRandom::new(),
             recv_buf: vec![0u8; 65535],
             send_buf: vec![0u8; MAX_DATAGRAM_SIZE],
+            stream_buf: vec![0u8; 65535],
         })
     }
 
@@ -168,8 +178,17 @@ impl Server {
                 }
             }
 
+            // Process streams for signaling
+            self.process_streams()?;
+
             // Process timeouts for all connections
             self.process_timeouts();
+
+            // Cleanup expired signaling sessions
+            let expired = self.session_manager.cleanup_expired();
+            for session_id in expired {
+                log::debug!("Cleaned up expired signaling session {}", session_id);
+            }
 
             // Send pending packets for all connections
             self.send_pending()?;
@@ -460,6 +479,437 @@ impl Server {
         }
 
         Ok(())
+    }
+
+    /// Process signaling streams for P2P hole punching coordination
+    fn process_streams(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Collect conn_ids with readable streams to avoid borrow conflicts
+        let conn_ids: Vec<_> = self.clients.keys().cloned().collect();
+
+        for conn_id in conn_ids {
+            // Collect readable stream IDs for this connection
+            let readable_streams: Vec<u64> = {
+                if let Some(client) = self.clients.get(&conn_id) {
+                    client.conn.readable().collect()
+                } else {
+                    continue;
+                }
+            };
+
+            for stream_id in readable_streams {
+                // Read stream data
+                let mut stream_finished = false;
+                if let Some(client) = self.clients.get_mut(&conn_id) {
+                    loop {
+                        match client.conn.stream_recv(stream_id, &mut self.stream_buf) {
+                            Ok((len, fin)) => {
+                                let buffer = client.get_signaling_buffer(stream_id);
+                                buffer.extend_from_slice(&self.stream_buf[..len]);
+                                if fin {
+                                    stream_finished = true;
+                                }
+                                if len == 0 {
+                                    break;
+                                }
+                            }
+                            Err(quiche::Error::Done) => break,
+                            Err(e) => {
+                                log::debug!("Stream recv error on {:?}/{}: {:?}", conn_id, stream_id, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Try to decode and handle messages
+                self.process_stream_messages(&conn_id, stream_id)?;
+
+                // Cleanup finished streams
+                if stream_finished {
+                    if let Some(client) = self.clients.get_mut(&conn_id) {
+                        client.remove_signaling_buffer(stream_id);
+                    }
+                }
+            }
+        }
+
+        // Process sessions that are ready to start punching
+        self.process_ready_sessions()?;
+
+        Ok(())
+    }
+
+    /// Process decoded messages from a stream buffer
+    fn process_stream_messages(
+        &mut self,
+        conn_id: &quiche::ConnectionId<'static>,
+        stream_id: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            // Get buffer contents
+            let buffer_data: Vec<u8> = {
+                if let Some(client) = self.clients.get(&conn_id) {
+                    if let Some(buf) = client.signaling_buffers.get(&stream_id) {
+                        buf.clone()
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            };
+
+            if buffer_data.is_empty() {
+                break;
+            }
+
+            // Try to decode a message
+            match decode_message(&buffer_data) {
+                Ok((msg, consumed)) => {
+                    log::info!(
+                        "Decoded signaling message from {:?}/{}: {:?}",
+                        conn_id,
+                        stream_id,
+                        msg
+                    );
+
+                    // Consume the bytes
+                    if let Some(client) = self.clients.get_mut(&conn_id) {
+                        if let Some(buf) = client.signaling_buffers.get_mut(&stream_id) {
+                            buf.drain(..consumed);
+                        }
+                    }
+
+                    // Handle the message
+                    self.handle_signaling_message(conn_id, stream_id, msg)?;
+                }
+                Err(DecodeError::Incomplete(_)) => {
+                    // Need more data
+                    break;
+                }
+                Err(DecodeError::TooLarge(size)) => {
+                    log::error!("Signaling message too large: {} bytes", size);
+                    // Clear the buffer to recover
+                    if let Some(client) = self.clients.get_mut(&conn_id) {
+                        client.remove_signaling_buffer(stream_id);
+                    }
+                    break;
+                }
+                Err(DecodeError::Invalid(e)) => {
+                    log::error!("Invalid signaling message: {}", e);
+                    // Clear the buffer to recover
+                    if let Some(client) = self.clients.get_mut(&conn_id) {
+                        client.remove_signaling_buffer(stream_id);
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle a decoded signaling message
+    fn handle_signaling_message(
+        &mut self,
+        from_conn_id: &quiche::ConnectionId<'static>,
+        stream_id: u64,
+        msg: SignalingMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match msg {
+            SignalingMessage::CandidateOffer {
+                session_id,
+                service_id,
+                candidates,
+            } => {
+                log::info!(
+                    "CandidateOffer: session={}, service={}, {} candidates",
+                    session_id,
+                    service_id,
+                    candidates.len()
+                );
+
+                // Find the Connector for this service
+                let connector_conn_id = match self.registry.find_connector_for_service(&service_id) {
+                    Some(id) => id,
+                    None => {
+                        log::warn!("No Connector for service '{}'", service_id);
+                        self.send_signaling_error(
+                            from_conn_id,
+                            stream_id,
+                            Some(session_id),
+                            SignalingError::NoConnectorAvailable,
+                            format!("No Connector available for service '{}'", service_id),
+                        )?;
+                        return Ok(());
+                    }
+                };
+
+                // Create signaling session
+                self.session_manager.create_session(
+                    session_id,
+                    service_id.clone(),
+                    from_conn_id.clone(),
+                    candidates.clone(),
+                    stream_id,
+                );
+
+                // Forward CandidateOffer to Connector
+                self.forward_signaling_message(
+                    &connector_conn_id,
+                    &SignalingMessage::CandidateOffer {
+                        session_id,
+                        service_id,
+                        candidates,
+                    },
+                )?;
+            }
+
+            SignalingMessage::CandidateAnswer {
+                session_id,
+                candidates,
+            } => {
+                log::info!(
+                    "CandidateAnswer: session={}, {} candidates",
+                    session_id,
+                    candidates.len()
+                );
+
+                // Find the session
+                if let Some(session) = self.session_manager.get_session_mut(session_id) {
+                    // Store Connector's answer
+                    session.set_connector_answer(
+                        from_conn_id.clone(),
+                        candidates,
+                        stream_id,
+                    );
+
+                    log::info!(
+                        "Session {} ready to punch (agent={:?}, connector={:?})",
+                        session_id,
+                        session.agent_conn_id,
+                        from_conn_id
+                    );
+                } else {
+                    log::warn!("CandidateAnswer for unknown session {}", session_id);
+                    self.send_signaling_error(
+                        from_conn_id,
+                        stream_id,
+                        Some(session_id),
+                        SignalingError::SessionNotFound,
+                        format!("Session {} not found", session_id),
+                    )?;
+                }
+            }
+
+            SignalingMessage::PunchingResult {
+                session_id,
+                success,
+                working_address,
+            } => {
+                log::info!(
+                    "PunchingResult: session={}, success={}, addr={:?}",
+                    session_id,
+                    success,
+                    working_address
+                );
+
+                // Forward to the peer
+                if let Some(session) = self.session_manager.get_session(session_id) {
+                    let peer_conn_id = if *from_conn_id == session.agent_conn_id {
+                        session.connector_conn_id.clone()
+                    } else {
+                        Some(session.agent_conn_id.clone())
+                    };
+
+                    if let Some(peer_id) = peer_conn_id {
+                        self.forward_signaling_message(
+                            &peer_id,
+                            &SignalingMessage::PunchingResult {
+                                session_id,
+                                success,
+                                working_address,
+                            },
+                        )?;
+                    }
+
+                    // Mark session complete if both sides reported
+                    if success {
+                        log::info!("P2P connection established for session {}", session_id);
+                    }
+                }
+            }
+
+            SignalingMessage::StartPunching { .. } => {
+                // Intermediate doesn't originate StartPunching, it creates them
+                log::warn!("Unexpected StartPunching from client");
+            }
+
+            SignalingMessage::Error {
+                session_id,
+                code,
+                message,
+            } => {
+                log::warn!(
+                    "Signaling error from {:?}: session={:?}, code={:?}, msg={}",
+                    from_conn_id,
+                    session_id,
+                    code,
+                    message
+                );
+                // Forward error to peer if session exists
+                if let Some(sid) = session_id {
+                    if let Some(session) = self.session_manager.get_session(sid) {
+                        let peer_conn_id = if *from_conn_id == session.agent_conn_id {
+                            session.connector_conn_id.clone()
+                        } else {
+                            Some(session.agent_conn_id.clone())
+                        };
+
+                        if let Some(peer_id) = peer_conn_id {
+                            self.forward_signaling_message(
+                                &peer_id,
+                                &SignalingMessage::Error {
+                                    session_id,
+                                    code,
+                                    message,
+                                },
+                            )?;
+                        }
+                    }
+                    // Cleanup the session
+                    self.session_manager.remove_session(sid);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process sessions that are ready to start hole punching
+    fn process_ready_sessions(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Collect sessions ready to punch
+        let ready_sessions: Vec<(u64, quiche::ConnectionId<'static>, quiche::ConnectionId<'static>, Vec<signaling::Candidate>, Vec<signaling::Candidate>)> = {
+            let mut ready = Vec::new();
+            // Manually iterate to avoid borrow issues
+            for (session_id, session) in self.session_manager.sessions_iter() {
+                if session.state == SessionState::ReadyToPunch {
+                    if let Some(ref connector_id) = session.connector_conn_id {
+                        if let Some(ref connector_candidates) = session.connector_candidates {
+                            ready.push((
+                                *session_id,
+                                session.agent_conn_id.clone(),
+                                connector_id.clone(),
+                                session.agent_candidates.clone(),
+                                connector_candidates.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+            ready
+        };
+
+        // Send StartPunching to both parties
+        for (session_id, agent_id, connector_id, agent_candidates, connector_candidates) in ready_sessions {
+            log::info!("Sending StartPunching for session {}", session_id);
+
+            // Send to Agent with Connector's candidates
+            self.forward_signaling_message(
+                &agent_id,
+                &SignalingMessage::StartPunching {
+                    session_id,
+                    start_delay_ms: PUNCH_START_DELAY_MS,
+                    peer_candidates: connector_candidates.clone(),
+                },
+            )?;
+
+            // Send to Connector with Agent's candidates
+            self.forward_signaling_message(
+                &connector_id,
+                &SignalingMessage::StartPunching {
+                    session_id,
+                    start_delay_ms: PUNCH_START_DELAY_MS,
+                    peer_candidates: agent_candidates,
+                },
+            )?;
+
+            // Update session state to Punching
+            if let Some(session) = self.session_manager.get_session_mut(session_id) {
+                session.state = SessionState::Punching;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Forward a signaling message to a client
+    fn forward_signaling_message(
+        &mut self,
+        to_conn_id: &quiche::ConnectionId<'static>,
+        msg: &SignalingMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = encode_message(msg).map_err(|e| format!("encode error: {}", e))?;
+
+        if let Some(client) = self.clients.get_mut(to_conn_id) {
+            // Open a new stream for the response
+            let stream_id = client.conn.stream_priority(0, 0, true)
+                .map(|_| 0u64)
+                .unwrap_or(0);
+
+            // Send on stream 0 (server-initiated bidirectional) or find next available
+            // For simplicity, we'll use the client-initiated stream pattern
+            // The server responds on client streams or uses stream 1 for server-initiated
+            match client.conn.stream_send(0, &encoded, false) {
+                Ok(_) => {
+                    log::debug!(
+                        "Forwarded signaling message to {:?} ({} bytes)",
+                        to_conn_id,
+                        encoded.len()
+                    );
+                }
+                Err(quiche::Error::InvalidStreamState(_)) => {
+                    // Stream not open, try to create server-initiated stream (stream_id = 1)
+                    match client.conn.stream_send(1, &encoded, false) {
+                        Ok(_) => {
+                            log::debug!(
+                                "Forwarded signaling message to {:?} on stream 1 ({} bytes)",
+                                to_conn_id,
+                                encoded.len()
+                            );
+                        }
+                        Err(e) => {
+                            log::error!("Failed to send signaling message: {:?}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to send signaling message: {:?}", e);
+                }
+            }
+        } else {
+            log::warn!("Cannot forward message: client {:?} not found", to_conn_id);
+        }
+
+        Ok(())
+    }
+
+    /// Send an error response to a client
+    fn send_signaling_error(
+        &mut self,
+        to_conn_id: &quiche::ConnectionId<'static>,
+        _stream_id: u64,
+        session_id: Option<u64>,
+        code: SignalingError,
+        message: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.forward_signaling_message(
+            to_conn_id,
+            &SignalingMessage::Error {
+                session_id,
+                code,
+                message,
+            },
+        )
     }
 
     fn process_timeouts(&mut self) {

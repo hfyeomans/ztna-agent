@@ -18,7 +18,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use super::candidate::{Candidate, CandidateType, gather_host_candidates, gather_reflexive_candidate, gather_relay_candidate};
+use super::candidate::{Candidate, gather_host_candidates, gather_reflexive_candidate, gather_relay_candidate};
 use super::connectivity::{BindingResponse, BindingMessage, CheckList, encode_binding, decode_binding};
 use super::signaling::{SignalingMessage, encode_message, decode_message};
 
@@ -495,6 +495,7 @@ pub fn should_switch_to_relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::candidate::CandidateType;
 
     #[test]
     fn test_coordinator_creation() {

@@ -442,6 +442,8 @@ tail tests/e2e/artifacts/logs/app-connector.log
 
 ## Test Coverage Summary
 
+### E2E Tests (Task 004)
+
 | Phase | Tests | Status | Validates |
 |-------|-------|--------|-----------|
 | 1 | 14 | ✅ Complete | Component lifecycle, direct UDP |
@@ -459,7 +461,30 @@ tail tests/e2e/artifacts/logs/app-connector.log
 | 6.2 | 1 | ✅ Complete | Throughput (PPS, Mbps) |
 | 6.3 | 3 | ✅ Complete | Timing (handshake, resources, reconnect) |
 
-**Total Tests: 61+**
+**E2E Test Total: 61+**
+
+### Unit Tests (All Tasks)
+
+| Component | Tests | Status | Notes |
+|-----------|-------|--------|-------|
+| **packet_processor** | 63 | ✅ Pass | 5 agent + 58 P2P module |
+| ├─ agent | 5 | ✅ | Multi-connection support |
+| ├─ p2p/candidate | 11 | ✅ | ICE candidate types, gathering |
+| ├─ p2p/signaling | 13 | ✅ | Message encode/decode |
+| ├─ p2p/connectivity | 17 | ✅ | Binding, pairs, check list |
+| └─ p2p/hole_punch | 17 | ✅ | Coordinator, path selection |
+| **intermediate-server** | 13 | ✅ Pass | 6 signaling + 6 registry + 1 integ |
+| **app-connector** | 10 | ✅ Pass | 8 unit + 2 integration |
+
+**Unit Test Total: 86**
+
+### Combined Test Count
+
+| Category | Count | Status |
+|----------|-------|--------|
+| Unit tests (Rust) | 86 | ✅ All pass |
+| E2E tests (Shell) | 61+ | ✅ All pass (except network impairment) |
+| **Grand Total** | **147+** | ✅ |
 
 ---
 
@@ -490,6 +515,111 @@ RTT_SAMPLES=100 BURST_COUNT=500 tests/e2e/scenarios/performance-metrics.sh
 
 ---
 
+## Phase 7: P2P Hole Punching Tests (Task 005)
+
+> **Status:** 🔄 In Development - Unit tests complete, E2E tests pending
+
+### Unit Tests (Complete)
+
+All P2P unit tests pass (see P2P Module Tests section below):
+```bash
+# Run all P2P unit tests
+(cd core/packet_processor && cargo test p2p)
+```
+
+**Test modules:**
+- `candidate.rs` - 11 tests (ICE candidate gathering)
+- `signaling.rs` - 13 tests (message protocol)
+- `connectivity.rs` - 17 tests (binding checks, pairs)
+- `hole_punch.rs` - 17 tests (coordinator, path selection)
+
+### E2E Tests (Planned)
+
+```bash
+# Run P2P hole punching test suite (when available)
+tests/e2e/scenarios/p2p-hole-punching.sh
+```
+
+**Planned tests:**
+
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Direct connection (localhost) | Agent connects directly to Connector | Connection established |
+| Candidate exchange | Agent/Connector exchange candidates via Intermediate | Both receive peer candidates |
+| Path selection (direct) | RTT comparison prefers direct | Uses direct path |
+| Fallback to relay | Direct fails, falls back to relay | Relay path used |
+| Simulated multi-host | Agent on 127.0.0.2, Connector on 127.0.0.3 | Direct path established |
+
+### Logging Commands for P2P Debugging
+
+```bash
+# Watch P2P-specific logs in real-time
+RUST_LOG=debug,ztna::p2p=trace cargo run ...
+
+# Filter logs for candidate gathering
+grep -i "candidate" tests/e2e/artifacts/logs/*.log
+
+# Filter logs for signaling messages
+grep -i "signaling\|offer\|answer" tests/e2e/artifacts/logs/*.log
+
+# Filter logs for binding checks
+grep -i "binding\|check" tests/e2e/artifacts/logs/*.log
+
+# Filter logs for path selection
+grep -i "path\|direct\|relay" tests/e2e/artifacts/logs/*.log
+```
+
+### Manual P2P Demo (Localhost)
+
+Once Phase 4 integration is complete:
+
+```bash
+# Terminal 1: Start Intermediate Server
+RUST_LOG=info intermediate-server/target/release/intermediate-server 4433 \
+  certs/cert.pem certs/key.pem
+
+# Terminal 2: Start App Connector (with P2P server mode)
+RUST_LOG=info app-connector/target/release/app-connector \
+  --server 127.0.0.1:4433 \
+  --service test-service \
+  --forward 127.0.0.1:9999 \
+  --p2p-cert app-connector/certs/connector-cert.pem \
+  --p2p-key app-connector/certs/connector-key.pem
+
+# Terminal 3: Start Echo Server
+tests/e2e/fixtures/echo-server/target/release/udp-echo --port 9999
+
+# Terminal 4: Agent (QUIC test client with P2P)
+# When P2P is enabled, client should:
+# 1. Connect to Intermediate
+# 2. Exchange candidates via signaling
+# 3. Attempt direct connection to Connector
+# 4. Fall back to relay if direct fails
+tests/e2e/fixtures/quic-client/target/release/quic-test-client \
+  --server 127.0.0.1:4433 \
+  --service test-service \
+  --send-udp "HELLO_P2P" \
+  --dst 127.0.0.1:9999 \
+  --enable-p2p \
+  --wait 5000
+```
+
+### Local Testing Limitations
+
+| Feature | Testable? | Notes |
+|---------|-----------|-------|
+| Host candidates | ✅ Yes | Enumerate local interfaces |
+| Signaling protocol | ✅ Yes | Via Intermediate relay |
+| Direct QUIC connection | ✅ Yes | Agent → Connector localhost |
+| Binding checks | ✅ Yes | Request/response validation |
+| Path selection | ✅ Yes | RTT-based decision logic |
+| Fallback logic | ✅ Yes | Simulate direct failure |
+| **NAT hole punching** | ❌ No | Requires real NAT (Task 006) |
+| **Reflexive addresses** | ❌ No | QAD returns 127.0.0.1 locally |
+| **NAT type detection** | ❌ No | Requires real NAT |
+
+---
+
 ## Unit Tests
 
 ### Running All Unit Tests
@@ -513,6 +643,7 @@ cargo test --workspace
 | `candidate.rs` | 11 | ICE candidate types, priority calculation, gathering |
 | `signaling.rs` | 13 | Message encode/decode, framing, session IDs |
 | `connectivity.rs` | 17 | Binding protocol, pairs, check list management |
+| `hole_punch.rs` | 17 | Coordinator state machine, path selection |
 
 **Run P2P tests specifically:**
 ```bash
@@ -541,6 +672,19 @@ cargo test --workspace
 - `test_foundation_based_unfreezing` - ICE unfreezing logic
 - `test_exponential_backoff` - RTO calculation (100ms → 1600ms)
 - `test_nomination` - Candidate pair nomination
+
+**Hole Punch Module:**
+- `test_coordinator_initial_state` - Initial Idle state
+- `test_state_transitions` - State machine progression
+- `test_gathering_state_with_*` - Candidate gathering for host/reflexive/relay
+- `test_signaling_creates_offer` - CandidateOffer message generation
+- `test_handle_answer_*` - Processing CandidateAnswer messages
+- `test_handle_start_punching` - State transition to Checking
+- `test_checking_produces_binding_requests` - Binding request generation
+- `test_handle_binding_response_*` - Response handling (success/failure)
+- `test_path_selection_*` - Direct vs relay decision logic
+- `test_should_switch_to_direct` - Threshold-based switching (50% faster)
+- `test_should_switch_to_relay` - Failure-based fallback
 
 ### Intermediate Server Tests
 
@@ -575,10 +719,10 @@ cargo test --workspace
 
 | Component | Tests | Notes |
 |-----------|-------|-------|
-| packet_processor | 46 | 5 agent + 11 candidate + 13 signaling + 17 connectivity |
+| packet_processor | 63 | 5 agent + 11 candidate + 13 signaling + 17 connectivity + 17 hole_punch |
 | intermediate-server | 13 | 6 signaling + 6 registry + 1 integration |
 | app-connector | 10 | 8 unit + 2 integration |
-| **Total** | **69** | All passing, 0 ignored |
+| **Total** | **86** | All passing, 0 ignored |
 
 ---
 
@@ -593,18 +737,143 @@ After running the demo, you can:
 
 ---
 
+## Complete End-to-End Demo
+
+This section demonstrates the full ZTNA stack including relay and P2P foundations.
+
+### 1. Build Everything
+
+```bash
+cd /Users/hank/dev/src/agent-driver/ztna-agent
+
+# Build all components
+(cd intermediate-server && cargo build --release)
+(cd app-connector && cargo build --release)
+(cd tests/e2e/fixtures/echo-server && cargo build --release)
+(cd tests/e2e/fixtures/quic-client && cargo build --release)
+
+# Run all unit tests (86 tests)
+cargo test --workspace
+```
+
+### 2. Run Full E2E Test Suite
+
+```bash
+# Run all E2E tests (61+ tests)
+tests/e2e/run-mvp.sh
+
+# Or run specific test suites:
+tests/e2e/scenarios/protocol-validation.sh    # Phase 2 & 3.5 (14 tests)
+tests/e2e/scenarios/udp-advanced.sh           # Phase 4 (11 tests)
+tests/e2e/scenarios/reliability-tests.sh      # Phase 5 (11 tests)
+tests/e2e/scenarios/performance-metrics.sh    # Phase 6 (6 tests)
+```
+
+### 3. Interactive Demo (Manual)
+
+**Terminal 1: Echo Server**
+```bash
+tests/e2e/fixtures/echo-server/target/release/udp-echo --port 9999
+```
+
+**Terminal 2: Intermediate Server**
+```bash
+RUST_LOG=info intermediate-server/target/release/intermediate-server 4433 \
+  certs/cert.pem certs/key.pem
+```
+
+**Terminal 3: App Connector**
+```bash
+RUST_LOG=info app-connector/target/release/app-connector \
+  --server 127.0.0.1:4433 \
+  --service test-service \
+  --forward 127.0.0.1:9999
+```
+
+**Terminal 4: Send Data Through Relay**
+```bash
+# Basic relay test
+tests/e2e/fixtures/quic-client/target/release/quic-test-client \
+  --server 127.0.0.1:4433 \
+  --service test-service \
+  --send-udp "HELLO_WORLD" \
+  --dst 127.0.0.1:9999 \
+  --wait 3000
+
+# Verify echo with integrity check
+tests/e2e/fixtures/quic-client/target/release/quic-test-client \
+  --server 127.0.0.1:4433 \
+  --service test-service \
+  --payload-size 100 \
+  --payload-pattern random \
+  --dst 127.0.0.1:9999 \
+  --verify-echo
+```
+
+### 4. View Logs
+
+```bash
+# All component logs
+tail -f tests/e2e/artifacts/logs/*.log
+
+# Intermediate Server only
+tail -f tests/e2e/artifacts/logs/intermediate-server.log
+
+# App Connector only
+tail -f tests/e2e/artifacts/logs/app-connector.log
+
+# Filter for specific events
+grep "Registered\|DATAGRAM\|forward" tests/e2e/artifacts/logs/*.log
+```
+
+### 5. Cleanup
+
+```bash
+# Stop all components (if running)
+pkill -f intermediate-server
+pkill -f app-connector
+pkill -f udp-echo
+```
+
+---
+
 ## File Reference
 
 | Purpose | Path |
 |---------|------|
-| Test framework | `tests/e2e/lib/common.sh` |
-| Test runner (Phase 1) | `tests/e2e/run-mvp.sh` |
+| **Test Framework** | |
+| Common functions | `tests/e2e/lib/common.sh` |
+| Environment config | `tests/e2e/config/env.local` |
+| **E2E Test Scripts** | |
+| Main test runner | `tests/e2e/run-mvp.sh` |
 | Protocol validation (Phase 2 & 3.5) | `tests/e2e/scenarios/protocol-validation.sh` |
 | Advanced UDP tests (Phase 4) | `tests/e2e/scenarios/udp-advanced.sh` |
+| Boundary tests | `tests/e2e/scenarios/udp-boundary.sh` |
+| Connectivity tests | `tests/e2e/scenarios/udp-connectivity.sh` |
+| Echo tests | `tests/e2e/scenarios/udp-echo.sh` |
 | Reliability tests (Phase 5) | `tests/e2e/scenarios/reliability-tests.sh` |
 | Performance metrics (Phase 6) | `tests/e2e/scenarios/performance-metrics.sh` |
+| P2P hole punching (Phase 7) | `tests/e2e/scenarios/p2p-hole-punching.sh` (planned) |
+| **Test Fixtures** | |
 | QUIC test client | `tests/e2e/fixtures/quic-client/` |
-| Echo server | `tests/e2e/fixtures/echo-server/` |
-| Environment config | `tests/e2e/config/env.local` |
+| UDP echo server | `tests/e2e/fixtures/echo-server/` |
+| **Binaries (after build)** | |
+| Intermediate Server | `intermediate-server/target/release/intermediate-server` |
+| App Connector | `app-connector/target/release/app-connector` |
+| QUIC Test Client | `tests/e2e/fixtures/quic-client/target/release/quic-test-client` |
+| UDP Echo Server | `tests/e2e/fixtures/echo-server/target/release/udp-echo` |
+| **Artifacts** | |
 | Logs | `tests/e2e/artifacts/logs/` |
-| Test certificates | `certs/` |
+| Metrics | `tests/e2e/artifacts/metrics/` |
+| **Certificates** | |
+| Server TLS (E2E tests) | `certs/cert.pem`, `certs/key.pem` |
+| Connector P2P TLS | `app-connector/certs/connector-cert.pem`, `app-connector/certs/connector-key.pem` |
+| **P2P Source (Task 005)** | |
+| Candidate gathering | `core/packet_processor/src/p2p/candidate.rs` |
+| Signaling protocol | `core/packet_processor/src/p2p/signaling.rs` |
+| Connectivity checks | `core/packet_processor/src/p2p/connectivity.rs` |
+| Hole punch coordinator | `core/packet_processor/src/p2p/hole_punch.rs` |
+| **Documentation** | |
+| Task 005 state | `tasks/005-p2p-hole-punching/state.md` |
+| Task 005 plan | `tasks/005-p2p-hole-punching/plan.md` |
+| Task 005 todo | `tasks/005-p2p-hole-punching/todo.md` |

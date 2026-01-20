@@ -111,6 +111,12 @@ pub struct Agent {
     pub observed_address: Option<SocketAddr>,
     /// Scratch buffer for packet assembly
     scratch_buffer: Vec<u8>,
+    /// Stream buffer for signaling
+    stream_buffer: Vec<u8>,
+    /// Signaling accumulation buffer
+    signaling_buffer: Vec<u8>,
+    /// Active hole punch coordinator (if hole punching in progress)
+    hole_punch: Option<p2p::HolePunchCoordinator>,
 }
 
 impl Agent {
@@ -149,6 +155,9 @@ impl Agent {
             last_activity: Instant::now(),
             observed_address: None,
             scratch_buffer: vec![0u8; MAX_DATAGRAM_SIZE],
+            stream_buffer: vec![0u8; 65535],
+            signaling_buffer: Vec::new(),
+            hole_punch: None,
         })
     }
 
@@ -409,6 +418,183 @@ impl Agent {
                 continue;
             }
             // Other DATAGRAMs are tunneled IP packets - would be passed back to Swift
+        }
+    }
+
+    // ========================================================================
+    // Hole Punching Methods
+    // ========================================================================
+
+    /// Start hole punching for a service
+    ///
+    /// This initiates the P2P signaling process to establish a direct connection
+    /// to the Connector hosting the specified service.
+    fn start_hole_punching(&mut self, service_id: &str) -> Result<(), String> {
+        if self.hole_punch.is_some() {
+            return Err("Hole punching already in progress".to_string());
+        }
+
+        if self.state != AgentState::Connected {
+            return Err("Not connected to Intermediate Server".to_string());
+        }
+
+        // Generate session ID
+        let session_id = p2p::generate_session_id();
+
+        // Create coordinator (Agent is controlling side)
+        let mut coordinator = p2p::HolePunchCoordinator::new(
+            session_id,
+            service_id.to_string(),
+            true, // Agent is controlling
+        );
+
+        // Set intermediate address for relay candidate
+        if let Some(addr) = self.intermediate_addr {
+            coordinator.set_intermediate_addr(addr);
+        }
+
+        // Set observed address for server-reflexive candidate
+        if let Some(addr) = self.observed_address {
+            coordinator.set_observed_addr(addr);
+        }
+
+        // Gather local candidates
+        let local_addrs: Vec<SocketAddr> = self
+            .local_addr
+            .iter()
+            .cloned()
+            .collect();
+
+        if local_addrs.is_empty() {
+            return Err("No local address available".to_string());
+        }
+
+        coordinator.start_gathering(&local_addrs);
+
+        // Get candidate offer to send
+        let offer_data = coordinator
+            .get_candidate_offer()
+            .ok_or("Failed to generate candidate offer")?;
+
+        // Send offer via Intermediate (stream 0 for signaling)
+        if let Some(conn) = self.intermediate_conn.as_mut() {
+            // Stream 0 is used for signaling (client-initiated bidi stream)
+            match conn.stream_send(0, &offer_data, false) {
+                Ok(_) => {}
+                Err(e) => return Err(format!("Failed to send offer: {}", e)),
+            }
+        }
+
+        self.hole_punch = Some(coordinator);
+        Ok(())
+    }
+
+    /// Process signaling streams from Intermediate Server
+    fn process_signaling_streams(&mut self) {
+        let conn = match self.intermediate_conn.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Read from stream 0 (signaling stream)
+        loop {
+            match conn.stream_recv(0, &mut self.stream_buffer) {
+                Ok((len, _fin)) => {
+                    self.signaling_buffer.extend_from_slice(&self.stream_buffer[..len]);
+                }
+                Err(quiche::Error::Done) => break,
+                Err(_) => break,
+            }
+        }
+
+        // Process accumulated signaling messages
+        self.process_signaling_messages();
+    }
+
+    /// Process accumulated signaling messages
+    fn process_signaling_messages(&mut self) {
+        if self.signaling_buffer.is_empty() {
+            return;
+        }
+
+        let (messages, remaining) = p2p::decode_messages(&self.signaling_buffer);
+        self.signaling_buffer = remaining;
+
+        for msg in messages {
+            self.handle_signaling_message(msg);
+        }
+    }
+
+    /// Handle a single signaling message
+    fn handle_signaling_message(&mut self, msg: p2p::SignalingMessage) {
+        let coordinator = match self.hole_punch.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Re-encode the message for the coordinator
+        if let Ok(data) = p2p::encode_message(&msg) {
+            let _ = coordinator.process_signaling(&data);
+        }
+
+        // Check if we should start checking
+        if coordinator.should_start_checking() {
+            coordinator.start_checking();
+        }
+    }
+
+    /// Poll hole punching progress
+    ///
+    /// Returns (working_address, is_complete)
+    /// If complete, the hole_punch coordinator is removed.
+    fn poll_hole_punch(&mut self) -> (Option<SocketAddr>, bool) {
+        let coordinator = match self.hole_punch.as_mut() {
+            Some(c) => c,
+            None => return (None, false),
+        };
+
+        // Handle timeouts
+        coordinator.on_timeout();
+
+        let state = coordinator.state();
+
+        match state {
+            p2p::HolePunchState::Connected => {
+                let addr = coordinator.working_address();
+                self.hole_punch = None;
+                (addr, true)
+            }
+            p2p::HolePunchState::Failed | p2p::HolePunchState::FallbackRelay => {
+                self.hole_punch = None;
+                (None, true)
+            }
+            _ => (None, false),
+        }
+    }
+
+    /// Get binding requests to send for hole punching
+    ///
+    /// Returns (remote_address, encoded_binding_request) pairs
+    fn poll_binding_requests(&mut self) -> Vec<(SocketAddr, Vec<u8>)> {
+        let mut requests = Vec::new();
+
+        if let Some(coordinator) = self.hole_punch.as_mut() {
+            while let Some((addr, data)) = coordinator.poll_binding_request() {
+                requests.push((addr, data));
+            }
+        }
+
+        requests
+    }
+
+    /// Process received binding response
+    fn process_binding_response(&mut self, from: SocketAddr, data: &[u8]) {
+        if let Some(coordinator) = self.hole_punch.as_mut() {
+            if let Ok(Some(response)) = coordinator.process_binding(from, data) {
+                // Queue response to be sent (via UDP directly)
+                // Swift layer would handle sending this
+                let _ = response;
+            }
         }
     }
 }
@@ -917,6 +1103,180 @@ pub unsafe extern "C" fn agent_send_datagram_p2p(
 }
 
 // ============================================================================
+// FFI Functions - Hole Punching
+// ============================================================================
+
+/// Start hole punching for a service
+///
+/// This initiates P2P negotiation to establish a direct connection
+/// to the Connector hosting the specified service.
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `service_id` - Service ID to connect to (null-terminated C string)
+///
+/// # Returns
+/// `AgentResult::Ok` on success, error code otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn agent_start_hole_punch(
+    agent: *mut Agent,
+    service_id: *const libc::c_char,
+) -> AgentResult {
+    if agent.is_null() || service_id.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &mut *agent;
+
+        let service_str = match std::ffi::CStr::from_ptr(service_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return AgentResult::InvalidAddress,
+        };
+
+        match agent.start_hole_punching(service_str) {
+            Ok(()) => AgentResult::Ok,
+            Err(_) => AgentResult::ConnectionFailed,
+        }
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
+/// Poll hole punching progress
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `out_ip` - Buffer for working IP (4 bytes for IPv4)
+/// * `out_port` - Output port
+/// * `out_complete` - Set to 1 if hole punching is complete, 0 otherwise
+///
+/// # Returns
+/// `AgentResult::Ok` if a working address is available, `AgentResult::NoData` otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn agent_poll_hole_punch(
+    agent: *mut Agent,
+    out_ip: *mut u8,
+    out_port: *mut u16,
+    out_complete: *mut u8,
+) -> AgentResult {
+    if agent.is_null() || out_ip.is_null() || out_port.is_null() || out_complete.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &mut *agent;
+
+        // Process signaling streams first
+        agent.process_signaling_streams();
+
+        let (working_addr, is_complete) = agent.poll_hole_punch();
+
+        *out_complete = if is_complete { 1 } else { 0 };
+
+        match working_addr {
+            Some(SocketAddr::V4(addr)) => {
+                let octets = addr.ip().octets();
+                std::ptr::copy_nonoverlapping(octets.as_ptr(), out_ip, 4);
+                *out_port = addr.port();
+                AgentResult::Ok
+            }
+            Some(SocketAddr::V6(_)) => {
+                // IPv6 not yet supported in this FFI
+                AgentResult::NoData
+            }
+            None => AgentResult::NoData,
+        }
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
+/// Get binding requests to send for hole punching
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `out_data` - Buffer for binding request data
+/// * `out_len` - On input: buffer capacity. On output: data length.
+/// * `out_ip` - Buffer for destination IP (4 bytes)
+/// * `out_port` - Output destination port
+///
+/// # Returns
+/// `AgentResult::Ok` if a request is available, `AgentResult::NoData` otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn agent_poll_binding_request(
+    agent: *mut Agent,
+    out_data: *mut u8,
+    out_len: *mut usize,
+    out_ip: *mut u8,
+    out_port: *mut u16,
+) -> AgentResult {
+    if agent.is_null() || out_data.is_null() || out_len.is_null() || out_ip.is_null() || out_port.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &mut *agent;
+        let capacity = *out_len;
+
+        let requests = agent.poll_binding_requests();
+        if let Some((addr, data)) = requests.into_iter().next() {
+            if data.len() > capacity {
+                return AgentResult::BufferTooSmall;
+            }
+
+            std::ptr::copy_nonoverlapping(data.as_ptr(), out_data, data.len());
+            *out_len = data.len();
+
+            if let SocketAddr::V4(v4) = addr {
+                std::ptr::copy_nonoverlapping(v4.ip().octets().as_ptr(), out_ip, 4);
+            }
+            *out_port = addr.port();
+
+            AgentResult::Ok
+        } else {
+            AgentResult::NoData
+        }
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
+/// Process a received binding response
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `data` - Binding response data
+/// * `len` - Data length
+/// * `from_ip` - Source IP (4 bytes)
+/// * `from_port` - Source port
+#[no_mangle]
+pub unsafe extern "C" fn agent_process_binding_response(
+    agent: *mut Agent,
+    data: *const u8,
+    len: usize,
+    from_ip: *const u8,
+    from_port: u16,
+) -> AgentResult {
+    if agent.is_null() || data.is_null() || from_ip.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &mut *agent;
+        let data = slice::from_raw_parts(data, len);
+        let ip_bytes = slice::from_raw_parts(from_ip, 4);
+        let ip = std::net::Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+        let from = SocketAddr::new(std::net::IpAddr::V4(ip), from_port);
+
+        agent.process_binding_response(from, data);
+        AgentResult::Ok
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
+// ============================================================================
 // Legacy FFI - Packet Processing (kept for compatibility)
 // ============================================================================
 
@@ -1040,5 +1400,87 @@ mod tests {
 
             agent_destroy(agent);
         }
+    }
+
+    #[test]
+    fn test_agent_hole_punch_not_connected() {
+        // Hole punching requires connection to Intermediate
+        let agent = agent_create();
+        assert!(!agent.is_null());
+
+        unsafe {
+            let agent_ref = &mut *agent;
+
+            // Should fail because not connected
+            let result = agent_ref.start_hole_punching("test-service");
+            assert!(result.is_err());
+
+            agent_destroy(agent);
+        }
+    }
+
+    #[test]
+    fn test_hole_punch_coordinator_integration() {
+        // Test the HolePunchCoordinator state machine directly
+        use crate::p2p::{HolePunchCoordinator, HolePunchState};
+
+        // Create Agent-side coordinator (controlling)
+        let mut agent_coord = HolePunchCoordinator::new(12345, "test-service".to_string(), true);
+
+        // Create Connector-side coordinator (controlled)
+        let mut conn_coord = HolePunchCoordinator::new(12345, "test-service".to_string(), false);
+
+        // Agent gathers candidates
+        let agent_addrs = vec!["192.168.1.100:5000".parse().unwrap()];
+        agent_coord.start_gathering(&agent_addrs);
+        assert_eq!(agent_coord.state(), HolePunchState::Signaling);
+
+        // Connector gathers candidates
+        let conn_addrs = vec!["192.168.1.200:5000".parse().unwrap()];
+        conn_coord.start_gathering(&conn_addrs);
+        assert_eq!(conn_coord.state(), HolePunchState::Signaling);
+
+        // Agent gets offer
+        let offer = agent_coord.get_candidate_offer().expect("Should have offer");
+
+        // Connector processes offer (simulates Intermediate forwarding)
+        conn_coord.process_signaling(&offer).expect("Should process offer");
+
+        // Connector generates answer
+        let answer = conn_coord.poll_signaling_message().expect("Should have answer");
+
+        // Agent processes answer
+        agent_coord.process_signaling(&answer).expect("Should process answer");
+
+        // Both should have remote candidates now
+        assert!(!agent_coord.remote_candidates().is_empty());
+        assert!(!conn_coord.remote_candidates().is_empty());
+
+        // Both should be ready to start checking
+        assert!(agent_coord.should_start_checking());
+        assert!(conn_coord.should_start_checking());
+
+        // Start checking
+        agent_coord.start_checking();
+        conn_coord.start_checking();
+
+        assert_eq!(agent_coord.state(), HolePunchState::Checking);
+        assert_eq!(conn_coord.state(), HolePunchState::Checking);
+
+        // Agent polls for binding request
+        let (addr, request_data) = agent_coord.poll_binding_request().expect("Should have request");
+
+        // Connector processes binding request and responds
+        let response_data = conn_coord.process_binding(addr, &request_data)
+            .expect("Should process binding")
+            .expect("Should have response");
+
+        // Agent processes binding response
+        agent_coord.process_binding("192.168.1.200:5000".parse().unwrap(), &response_data)
+            .expect("Should process response");
+
+        // Agent should be connected now
+        assert_eq!(agent_coord.state(), HolePunchState::Connected);
+        assert!(agent_coord.working_address().is_some());
     }
 }

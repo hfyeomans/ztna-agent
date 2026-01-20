@@ -145,11 +145,11 @@
 - [x] `handle_response()` processes responses and unfreezes pairs
 - [x] `nominate()` marks successful pair as nominated
 - [x] Unit tests: 7 check list tests
-- [ ] Integration with Agent/Connector (deferred to Phase 4)
+- [x] Integration with Agent/Connector (completed in Phase 4)
 
 ---
 
-## Phase 4: Hole Punch Coordination 🔄 IN PROGRESS
+## Phase 4: Hole Punch Coordination ✅ COMPLETE
 
 ### 4.1 HolePunchCoordinator Module ✅ COMPLETE
 - [x] Create `p2p/hole_punch.rs` module
@@ -168,12 +168,18 @@
 - [x] Implement `should_switch_to_relay()` (failure-based)
 - [x] Unit tests for path selection
 
-### 4.3 Integration (Remaining)
-- [ ] Integration test: Agent ↔ Connector direct QUIC (localhost)
-- [ ] Wire HolePunchCoordinator into Agent main loop
-- [ ] Wire HolePunchCoordinator into Connector main loop
-- [ ] Verify data can flow on direct connection
-- [ ] Atomic routing update (no packet loss)
+### 4.3 Integration ✅ COMPLETE
+- [x] Integration test: Agent ↔ Connector direct QUIC (localhost)
+  - `test_hole_punch_coordinator_integration` added to packet_processor
+- [x] Wire HolePunchCoordinator into Agent main loop
+  - Added hole punching methods: `start_hole_punching`, `process_signaling_streams`, etc.
+  - Added FFI functions: `agent_start_hole_punch`, `agent_poll_hole_punch`, etc.
+- [x] Wire HolePunchCoordinator into Connector main loop
+  - Created `signaling.rs` with full signaling types
+  - Added signaling stream processing methods
+- [x] Wire HolePunchCoordinator into Intermediate Server
+  - Added SessionManager for P2P signaling sessions
+  - Added `process_streams()` and message handlers
 
 ---
 

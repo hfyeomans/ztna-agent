@@ -367,6 +367,11 @@ impl SessionManager {
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }
+
+    /// Iterate over all sessions
+    pub fn sessions_iter(&self) -> impl Iterator<Item = (&u64, &SignalingSession)> {
+        self.sessions.iter()
+    }
 }
 
 impl Default for SessionManager {
