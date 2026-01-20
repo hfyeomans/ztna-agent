@@ -2,14 +2,15 @@
 
 **Task ID:** 006-cloud-deployment
 **Branch:** `feature/006-cloud-deployment`
-**Depends On:** Task 004 (E2E Relay Testing)
-**Last Updated:** 2026-01-19
+**Depends On:** Task 004 (E2E Relay Testing), Task 005 (P2P Hole Punching - protocol implementation)
+**Last Updated:** 2026-01-20
 
 ---
 
 ## Prerequisites
 
-- [ ] Task 004 (E2E Relay Testing) complete and merged
+- [x] Task 004 (E2E Relay Testing) complete and merged
+- [ ] Task 005 (P2P Hole Punching) protocol implementation complete
 - [ ] Cloud provider account set up
 - [ ] Create feature branch: `git checkout -b feature/006-cloud-deployment`
 
@@ -104,16 +105,92 @@
 
 ---
 
-## Phase 7: Documentation
+## Phase 7: P2P Hole Punching Validation (From Task 005)
+
+> **Note:** Task 005 implements P2P protocol locally. This phase validates it works with real NATs.
+
+### 7.1 NAT Type Testing Matrix
+
+| NAT Type | Hole Punching | Priority | Test Method |
+|----------|---------------|----------|-------------|
+| Full Cone | Easy | P1 | Home router (most common) |
+| Restricted Cone | Medium | P1 | Some home routers |
+| Port Restricted | Medium | P1 | Some enterprise routers |
+| Symmetric | Hard (relay fallback) | P2 | Carrier-grade NAT, enterprise |
+
+- [ ] Test Full Cone NAT (home router)
+- [ ] Test Restricted Cone NAT
+- [ ] Test Port Restricted Cone NAT
+- [ ] Test Symmetric NAT (carrier-grade/enterprise)
+- [ ] Document success/failure rates per NAT type
+
+### 7.2 Connection Priority Validation
+
+```
+Expected Priority Order:
+1. Direct LAN (same network) → lowest latency
+2. Direct WAN (hole punching) → moderate latency
+3. Relay (via Intermediate) → highest latency (fallback)
+```
+
+- [ ] Same network: Agent and Connector on same cloud VPC
+- [ ] Different networks: Agent behind home NAT, Connector on cloud
+- [ ] Relay fallback: Block direct path, verify relay works
+- [ ] Measure and compare latency for each path type
+
+### 7.3 Hole Punching Protocol Tests
+
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Address exchange | Candidates exchanged via Intermediate | Both sides receive peer candidates |
+| Simultaneous open | Both sides send UDP simultaneously | NAT mappings created, packets pass |
+| Direct QUIC connection | Agent connects directly to Connector | New QUIC connection established |
+| Path selection | Compare direct vs relay RTT | Direct path selected when faster |
+| Fallback to relay | Block direct path | Traffic continues via relay |
+
+- [ ] Verify address exchange via Intermediate works across NAT
+- [ ] Verify simultaneous UDP open creates NAT mappings
+- [ ] Verify direct QUIC connection establishes after hole punch
+- [ ] Verify path selection prefers direct when available
+- [ ] Verify fallback to relay when hole punching fails
+
+### 7.4 NAT Behavior Observation
+
+Document observed behaviors for each NAT type tested:
+
+- [ ] QAD reflexive address accuracy
+- [ ] Port mapping consistency (same port for multiple destinations?)
+- [ ] Binding timeout (how long until NAT mapping expires?)
+- [ ] Filtering behavior (IP-restricted vs port-restricted)
+
+### 7.5 Symmetric NAT Handling
+
+- [ ] Detect symmetric NAT (different reflexive port per destination)
+- [ ] Verify relay fallback when hole punching fails
+- [ ] Test port prediction (if implemented in Task 005)
+- [ ] Document success/failure rates for symmetric NAT
+
+### 7.6 QUIC Connection Migration (If Applicable)
+
+> Note: P2P uses NEW QUIC connection, not path migration. But test if relevant.
+
+- [ ] Verify direct QUIC connection data flow
+- [ ] Verify connection survives brief network interruption
+- [ ] Test graceful transition between paths
+
+---
+
+## Phase 8: Documentation
 
 - [ ] Document deployment steps in README
 - [ ] Create troubleshooting guide
 - [ ] Document firewall/network requirements
 - [ ] Update architecture docs
+- [ ] Document P2P validation results and NAT compatibility
 
 ---
 
-## Phase 8: Automation (Stretch)
+## Phase 9: Automation (Stretch)
 
 - [ ] Create Terraform configuration (optional)
 - [ ] Create Ansible playbook (optional)
@@ -121,7 +198,7 @@
 
 ---
 
-## Phase 9: PR & Merge
+## Phase 10: PR & Merge
 
 - [ ] Update state.md with completion status
 - [ ] Update `_context/components.md` status
@@ -139,3 +216,17 @@
 - [ ] Monitoring/alerting setup
 - [ ] Load testing with cloud infrastructure
 - [ ] CI/CD pipeline for cloud deployment
+
+---
+
+## Deferred P2P Items (From Task 005)
+
+> These items require real NAT testing and were deferred from Task 005's local PoC.
+
+- [ ] Reflexive candidate validation (requires real NAT)
+- [ ] Port prediction for symmetric NAT
+- [ ] IPv6 P2P support
+- [ ] UPnP/NAT-PMP port mapping
+- [ ] Mobile handoff (WiFi → Cellular)
+- [ ] ICE restart on path failure
+- [ ] Multiple simultaneous paths (QUIC multipath)

@@ -236,6 +236,60 @@ Or deploy a simple test application.
 
 ---
 
+## Phase 5: P2P Hole Punching Validation (From Task 005)
+
+> **Note:** Task 005 implements P2P locally. This phase validates it works with real NATs.
+
+### 5.1 NAT Type Testing Matrix
+
+| NAT Type | Hole Punching | Priority | Test Method |
+|----------|---------------|----------|-------------|
+| Full Cone | Easy | P1 | Home router (most common) |
+| Restricted Cone | Medium | P1 | Some home routers |
+| Port Restricted | Medium | P1 | Some enterprise routers |
+| Symmetric | Hard (relay fallback) | P2 | Carrier-grade NAT, enterprise |
+
+### 5.2 Connection Priority Validation
+
+```
+Expected Priority Order:
+1. Direct LAN (same network) → lowest latency
+2. Direct WAN (hole punching) → moderate latency
+3. Relay (via Intermediate) → highest latency (fallback)
+```
+
+Test each priority level:
+- [ ] Same network: Agent and Connector on same cloud VPC
+- [ ] Different networks: Agent behind home NAT, Connector on cloud
+- [ ] Relay fallback: Block direct path, verify relay works
+
+### 5.3 Hole Punching Protocol Tests
+
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Address exchange | Candidates exchanged via Intermediate | Both sides receive peer candidates |
+| Simultaneous open | Both sides send UDP simultaneously | NAT mappings created, packets pass |
+| Direct QUIC connection | Agent connects directly to Connector | New QUIC connection established |
+| Path selection | Compare direct vs relay RTT | Direct path selected when faster |
+| Fallback to relay | Block direct path | Traffic continues via relay |
+
+### 5.4 NAT Behavior Observation
+
+Document observed behaviors for each NAT type:
+- [ ] QAD reflexive address accuracy
+- [ ] Port mapping consistency (same port for multiple destinations?)
+- [ ] Binding timeout (how long until NAT mapping expires?)
+- [ ] Filtering behavior (IP-restricted vs port-restricted)
+
+### 5.5 Symmetric NAT Handling
+
+- [ ] Detect symmetric NAT (different reflexive port per destination)
+- [ ] Verify relay fallback when hole punching fails
+- [ ] Test port prediction (optional, if implemented in Task 005)
+- [ ] Document success/failure rates
+
+---
+
 ## Phase 5: Automation (Optional)
 
 ### 5.1 Infrastructure as Code
