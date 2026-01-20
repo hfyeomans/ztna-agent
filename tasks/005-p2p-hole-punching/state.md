@@ -1,7 +1,7 @@
 # Task State: P2P Hole Punching
 
 **Task ID:** 005-p2p-hole-punching
-**Status:** In Progress - Phase 0, 1, 2 Complete, Ready for Phase 3
+**Status:** In Progress - Phase 0-3 Complete, Ready for Phase 4
 **Branch:** `feature/005-p2p-hole-punching`
 **Last Updated:** 2026-01-20
 
@@ -15,7 +15,7 @@ Implement direct peer-to-peer connectivity using NAT hole punching. This is the 
 
 ---
 
-## Current Phase: Phase 3 (Direct Path Establishment)
+## Current Phase: Phase 4 (QUIC Connection & Path Selection)
 
 ### Prerequisites ✅ COMPLETE
 - [x] Task 002 complete (Intermediate Server with QAD)
@@ -310,19 +310,42 @@ fn process_quic_socket(&mut self) {
 - [x] `SessionManager` for managing active P2P sessions
 - [x] 13 unit tests in packet_processor, 6 unit tests in intermediate-server
 
+### Phase 3: Direct Path Establishment ✅ COMPLETE
+- [x] Created `p2p/connectivity.rs` module
+- [x] Implemented `BindingRequest` struct:
+  - `transaction_id: [u8; 12]` - Unique identifier
+  - `priority: u64` - Pair priority
+  - `use_candidate: bool` - Nomination flag
+- [x] Implemented `BindingResponse` struct:
+  - `transaction_id` - Matches request
+  - `success: bool` - Check result
+  - `mapped_address: Option<SocketAddr>` - Reflexive discovery
+- [x] Implemented `CandidatePair`:
+  - Local/remote candidate references
+  - Priority calculation per RFC 8445 §6.1.2.3
+  - State machine: Frozen → Waiting → InProgress → Succeeded/Failed
+  - Exponential backoff: 100ms → 200ms → 400ms → 800ms → 1600ms
+- [x] Implemented `CheckList`:
+  - Priority-sorted pair management
+  - Foundation-based unfreezing
+  - Pacing (20ms between checks)
+  - Request/response handling
+  - Nomination support
+- [x] 17 unit tests for connectivity module
+
 ---
 
 ## What's Next
 
-1. **Phase 3: Direct Path Establishment (Starting)**
-   - [ ] Binding request/response protocol
-   - [ ] Candidate pair management
-   - [ ] Connectivity checks
+1. **Phase 4: QUIC Connection & Path Selection (Starting)**
+   - [ ] Agent: Establish QUIC connection to Connector's address
+   - [ ] Connector: Accept QUIC connection from Agent
+   - [ ] Path validation and selection logic
+   - [ ] Integration with hole punch coordinator
 
-2. **Phase 4: QUIC Connection & Path Selection**
-   - New QUIC connection from Agent → Connector
-   - Path validation
-   - Selection logic
+2. **Phase 5: Resilience**
+   - NAT keepalive
+   - Fallback to relay
 
 ---
 
@@ -333,8 +356,8 @@ fn process_quic_socket(&mut self) {
 | Phase 0: Socket Architecture | ✅ Complete | Agent multi-conn + Connector dual-mode |
 | Phase 1: Candidate Gathering | ✅ Complete | `p2p/candidate.rs` - 11 tests |
 | Phase 2: Signaling Infrastructure | ✅ Complete | `p2p/signaling.rs` - 13+6 tests |
-| Phase 3: Direct Path Establishment | 🔲 Not Started | Next up |
-| Phase 4: QUIC Connection & Path Selection | 🔲 Not Started | |
+| Phase 3: Direct Path Establishment | ✅ Complete | `p2p/connectivity.rs` - 17 tests |
+| Phase 4: QUIC Connection & Path Selection | 🔲 Not Started | Next up |
 | Phase 5: Resilience | 🔲 Not Started | |
 | Phase 6: Testing | 🔲 Not Started | |
 | Phase 7: Documentation | 🔲 Not Started | |

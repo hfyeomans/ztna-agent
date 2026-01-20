@@ -119,26 +119,33 @@
 
 ---
 
-## Phase 3: Direct Path Establishment
+## Phase 3: Direct Path Establishment ✅ COMPLETE
 
 ### 3.1 Binding Protocol
-- [ ] Define `BindingRequest` struct (transaction_id, priority)
-- [ ] Define `BindingResponse` struct (transaction_id, success, mapped_address)
-- [ ] Implement serialization for binding messages
-- [ ] Unit tests for binding protocol
+- [x] Define `BindingRequest` struct (transaction_id, priority, use_candidate)
+- [x] Define `BindingResponse` struct (transaction_id, success, mapped_address)
+- [x] Define `BindingMessage` enum (Request | Response)
+- [x] Implement bincode serialization (`encode_binding()` / `decode_binding()`)
+- [x] Unit tests: 5 binding protocol tests
 
 ### 3.2 Candidate Pair Management
-- [ ] Implement candidate pair formation (local × remote)
-- [ ] Implement priority-based sorting
-- [ ] Track pair states (Waiting, In-Progress, Succeeded, Failed)
-- [ ] Unit tests for pair management
+- [x] Implement `CandidatePair` with local/remote candidates
+- [x] Implement `calculate_pair_priority()` per RFC 8445 §6.1.2.3
+- [x] Track pair states via `CheckState` enum (Frozen, Waiting, InProgress, Succeeded, Failed)
+- [x] IPv4/IPv6 family matching (only pair same family)
+- [x] Unit tests: 5 pair management tests
 
 ### 3.3 Connectivity Checks
-- [ ] Implement check sender with retransmit
-- [ ] Implement check receiver and responder
-- [ ] Handle timing coordination from Intermediate
-- [ ] Detect successful path (bidirectional)
-- [ ] Integration test: localhost connectivity checks
+- [x] Implement `CheckList` for managing all candidate pairs
+- [x] Priority-based pair sorting (highest first)
+- [x] Foundation-based unfreezing logic
+- [x] Pacing interval (20ms between checks)
+- [x] Exponential backoff for retransmissions (100ms → 1600ms max)
+- [x] `next_request()` returns next binding request to send
+- [x] `handle_response()` processes responses and unfreezes pairs
+- [x] `nominate()` marks successful pair as nominated
+- [x] Unit tests: 7 check list tests
+- [ ] Integration with Agent/Connector (deferred to Phase 4)
 
 ---
 

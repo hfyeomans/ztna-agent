@@ -24,11 +24,12 @@
 //!
 //! - [x] `candidate.rs` - Phase 1 (Candidate Gathering)
 //! - [x] `signaling.rs` - Phase 2 (Signaling Infrastructure)
-//! - [ ] `connectivity.rs` - Phase 3 (Direct Path Establishment)
+//! - [x] `connectivity.rs` - Phase 3 (Direct Path Establishment)
 //! - [ ] `hole_punch.rs` - Phase 3 (Hole Punching)
 //! - [ ] `path_select.rs` - Phase 4 (Path Selection)
 
 pub mod candidate;
+pub mod connectivity;
 pub mod signaling;
 
 // Re-export commonly used types
@@ -51,4 +52,16 @@ pub use signaling::{
     decode_messages,
     generate_session_id,
     SIGNALING_TIMEOUT_MS,
+};
+
+pub use connectivity::{
+    BindingRequest,
+    BindingResponse,
+    BindingMessage,
+    CandidatePair,
+    CheckState,
+    CheckList,
+    calculate_pair_priority,
+    encode_binding,
+    decode_binding,
 };
