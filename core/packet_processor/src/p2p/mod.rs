@@ -23,12 +23,13 @@
 //! # Current Status
 //!
 //! - [x] `candidate.rs` - Phase 1 (Candidate Gathering)
-//! - [ ] `signaling.rs` - Phase 2 (Signaling Infrastructure)
+//! - [x] `signaling.rs` - Phase 2 (Signaling Infrastructure)
 //! - [ ] `connectivity.rs` - Phase 3 (Direct Path Establishment)
 //! - [ ] `hole_punch.rs` - Phase 3 (Hole Punching)
 //! - [ ] `path_select.rs` - Phase 4 (Path Selection)
 
 pub mod candidate;
+pub mod signaling;
 
 // Re-export commonly used types
 pub use candidate::{
@@ -40,4 +41,14 @@ pub use candidate::{
     gather_reflexive_candidate,
     gather_relay_candidate,
     sort_candidates_by_priority,
+};
+
+pub use signaling::{
+    SignalingMessage,
+    SignalingError,
+    encode_message,
+    decode_message,
+    decode_messages,
+    generate_session_id,
+    SIGNALING_TIMEOUT_MS,
 };

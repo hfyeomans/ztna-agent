@@ -16,6 +16,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 mod client;
 mod qad;
 mod registry;
+mod signaling;
 
 use client::{Client, ClientType};
 use registry::Registry;

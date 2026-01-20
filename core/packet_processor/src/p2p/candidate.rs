@@ -2,6 +2,7 @@
 //!
 //! Implements candidate types and priority calculation based on RFC 8445.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -35,7 +36,7 @@ const COMPONENT_ID: u32 = 1;
 // ============================================================================
 
 /// Type of ICE candidate
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(C)]
 pub enum CandidateType {
     /// Local network interface address
@@ -76,7 +77,7 @@ impl fmt::Display for CandidateType {
 // ============================================================================
 
 /// An ICE candidate representing a potential address for connectivity
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     /// Type of candidate (host, srflx, prflx, relay)
     pub candidate_type: CandidateType,

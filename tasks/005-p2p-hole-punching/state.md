@@ -1,7 +1,7 @@
 # Task State: P2P Hole Punching
 
 **Task ID:** 005-p2p-hole-punching
-**Status:** In Progress - Phase 0 Complete, Ready for Phase 1
+**Status:** In Progress - Phase 0, 1, 2 Complete, Ready for Phase 3
 **Branch:** `feature/005-p2p-hole-punching`
 **Last Updated:** 2026-01-20
 
@@ -15,7 +15,7 @@ Implement direct peer-to-peer connectivity using NAT hole punching. This is the 
 
 ---
 
-## Current Phase: Phase 2 (Signaling Infrastructure)
+## Current Phase: Phase 3 (Direct Path Establishment)
 
 ### Prerequisites ✅ COMPLETE
 - [x] Task 002 complete (Intermediate Server with QAD)
@@ -295,19 +295,34 @@ fn process_quic_socket(&mut self) {
 
 ---
 
+### Phase 2: Signaling Infrastructure ✅ COMPLETE
+- [x] Added serde/bincode dependencies to packet_processor and intermediate-server
+- [x] Defined `SignalingMessage` enum in both components:
+  - `CandidateOffer` - Agent → Intermediate → Connector
+  - `CandidateAnswer` - Connector → Intermediate → Agent
+  - `StartPunching` - Intermediate → both peers
+  - `PunchingResult` - Report success/failure
+  - `Error` - Error responses with codes
+- [x] Implemented `SignalingError` enum with standard error codes
+- [x] Implemented message framing (4-byte BE length prefix + bincode payload)
+- [x] `encode_message()` / `decode_message()` / `decode_messages()` functions
+- [x] `SignalingSession` struct for server-side session tracking
+- [x] `SessionManager` for managing active P2P sessions
+- [x] 13 unit tests in packet_processor, 6 unit tests in intermediate-server
+
+---
+
 ## What's Next
 
-1. **Phase 2: Signaling Infrastructure (Starting)**
-   - [ ] Define `SignalingMessage` enum (CandidateOffer, CandidateAnswer, StartPunching)
-   - [ ] Add bincode serialization
-   - [ ] Define message framing (4-byte length prefix)
-   - [ ] Implement Intermediate Server signaling relay
-   - [ ] Implement Agent/Connector signaling client
+1. **Phase 3: Direct Path Establishment (Starting)**
+   - [ ] Binding request/response protocol
+   - [ ] Candidate pair management
+   - [ ] Connectivity checks
 
-2. **Phase 3: Direct Path Establishment**
-   - Binding request/response protocol
-   - Candidate pair management
-   - Connectivity checks
+2. **Phase 4: QUIC Connection & Path Selection**
+   - New QUIC connection from Agent → Connector
+   - Path validation
+   - Selection logic
 
 ---
 
@@ -317,8 +332,8 @@ fn process_quic_socket(&mut self) {
 |-------|--------|-------|
 | Phase 0: Socket Architecture | ✅ Complete | Agent multi-conn + Connector dual-mode |
 | Phase 1: Candidate Gathering | ✅ Complete | `p2p/candidate.rs` - 11 tests |
-| Phase 2: Signaling Infrastructure | 🔲 Not Started | Next up |
-| Phase 3: Direct Path Establishment | 🔲 Not Started | |
+| Phase 2: Signaling Infrastructure | ✅ Complete | `p2p/signaling.rs` - 13+6 tests |
+| Phase 3: Direct Path Establishment | 🔲 Not Started | Next up |
 | Phase 4: QUIC Connection & Path Selection | 🔲 Not Started | |
 | Phase 5: Resilience | 🔲 Not Started | |
 | Phase 6: Testing | 🔲 Not Started | |

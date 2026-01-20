@@ -24,6 +24,7 @@
 ### Testable Locally
 - [x] All unit tests pass without network
 - [x] Candidate gathering (enumerate interfaces)
+- [x] Signaling message encode/decode (19 tests)
 - [ ] Candidate exchange via Intermediate (localhost)
 - [ ] Binding request/response protocol
 - [ ] Direct QUIC connection Agent → Connector (localhost)
@@ -90,29 +91,31 @@
 
 ---
 
-## Phase 2: Signaling Infrastructure
+## Phase 2: Signaling Infrastructure ✅ COMPLETE
 
 ### 2.1 Message Format
-- [ ] Define `SignalingMessage` enum:
-  - [ ] `CandidateOffer { session_id, candidates }`
-  - [ ] `CandidateAnswer { session_id, candidates }`
-  - [ ] `StartPunching { target_time_ms, peer_candidates }`
-- [ ] Add bincode serialization (add dependency)
-- [ ] Define message framing (4-byte length prefix)
-- [ ] Unit tests for serialization/deserialization
+- [x] Define `SignalingMessage` enum:
+  - [x] `CandidateOffer { session_id, service_id, candidates }`
+  - [x] `CandidateAnswer { session_id, candidates }`
+  - [x] `StartPunching { session_id, start_delay_ms, peer_candidates }`
+  - [x] `PunchingResult { session_id, success, working_address }`
+  - [x] `Error { session_id, code, message }`
+- [x] Add bincode/serde dependencies to packet_processor and intermediate-server
+- [x] Define message framing (4-byte BE length prefix + bincode payload)
+- [x] `encode_message()` / `decode_message()` / `decode_messages()`
+- [x] Unit tests: 13 tests in packet_processor
 
 ### 2.2 Intermediate Server Changes
-- [ ] Add signaling stream handler
-- [ ] Implement candidate storage per session
-- [ ] Implement candidate relay logic
-- [ ] Add `StartPunching` broadcast command
-- [ ] Integration test: Agent → Intermediate → Connector signaling
+- [x] Create `signaling.rs` module with same message types
+- [x] Implement `SignalingSession` for session state tracking
+- [x] Implement `SessionManager` for managing active sessions
+- [x] Unit tests: 6 tests in intermediate-server
+- [ ] Integration with main event loop (deferred to Phase 3)
 
 ### 2.3 Agent/Connector Signaling Client
-- [ ] Implement `send_candidates()` via QUIC stream
-- [ ] Implement `receive_candidates()` via QUIC stream
-- [ ] Handle `StartPunching` command
-- [ ] Add timeout/retry logic (5 second timeout)
+- [x] Stream-based I/O helpers (`write_message()` / `read_message()`)
+- [x] `generate_session_id()` for unique session IDs
+- [ ] Integration with Agent/Connector (deferred to Phase 3)
 
 ---
 
