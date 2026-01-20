@@ -83,6 +83,141 @@ For P2P, the Connector must accept incoming QUIC connections from the Agent:
 
 ---
 
+## Phase 0: Implementation Details (Completed)
+
+> **Status:** ✅ Complete as of 2026-01-20
+
+### Agent Multi-Connection Architecture
+
+The Agent (`core/packet_processor/src/lib.rs`) now supports multiple QUIC connections simultaneously:
+
+```rust
+// Connection wrapper for P2P peers
+struct P2PConnection {
+    conn: Connection,
+    last_activity: Instant,
+}
+
+// Agent struct with multi-connection support
+pub struct Agent {
+    config: Config,
+    intermediate_conn: Option<Connection>,           // Connection to Intermediate Server
+    intermediate_addr: Option<SocketAddr>,           // Intermediate Server address
+    p2p_conns: HashMap<SocketAddr, P2PConnection>,   // P2P connections to Connectors
+    local_addr: Option<SocketAddr>,
+    state: AgentState,
+    last_activity: Instant,
+    pub observed_address: Option<SocketAddr>,
+    scratch_buffer: Vec<u8>,
+}
+```
+
+**Key Design Decisions:**
+
+1. **Separate Connection Tracking:** `intermediate_conn` for Intermediate Server, `p2p_conns` HashMap for multiple P2P Connectors
+2. **Address-Based Routing:** Incoming packets routed by source address (`recv()` method)
+3. **Unified Timeout Handling:** `timeout()` returns minimum across all connections
+4. **Last Activity Tracking:** Each P2P connection tracks its last activity for keepalive
+
+**New FFI Functions:**
+
+| Function | Purpose |
+|----------|---------|
+| `agent_connect_p2p(host, port)` | Establish P2P connection to Connector |
+| `agent_is_p2p_connected(host, port)` | Check if P2P connection is established |
+| `agent_poll_p2p()` | Get next P2P packet to send |
+| `agent_send_datagram_p2p(data, dest)` | Send datagram via P2P connection |
+
+**Packet Routing Logic:**
+
+```rust
+fn recv(&mut self, data: &[u8], from: SocketAddr) -> Result<(), quiche::Error> {
+    if Some(from) == self.intermediate_addr {
+        // Packet from Intermediate Server → route to intermediate_conn
+        self.intermediate_conn.as_mut()?.recv(...)?;
+    } else if let Some(p2p) = self.p2p_conns.get_mut(&from) {
+        // Packet from P2P Connector → route to p2p_conns[from]
+        p2p.conn.recv(...)?;
+    } else {
+        return Err(quiche::Error::InvalidState);
+    }
+    Ok(())
+}
+```
+
+### Connector Dual-Mode Architecture
+
+The Connector (`app-connector/src/main.rs`) now operates in dual mode:
+
+```rust
+struct Connector {
+    intermediate_conn: Option<quiche::Connection>,           // Client to Intermediate
+    p2p_clients: HashMap<quiche::ConnectionId<'static>, P2PClient>, // Server for Agents
+    client_config: quiche::Config,   // Client mode (no TLS server certs)
+    server_config: quiche::Config,   // Server mode (TLS server certs loaded)
+    // ...
+}
+
+struct P2PClient {
+    conn: quiche::Connection,
+    addr: SocketAddr,
+}
+```
+
+**Dual-Mode Operation:**
+
+1. **Client Mode:** Connects to Intermediate Server using `client_config`
+2. **Server Mode:** Accepts incoming connections from Agents using `server_config`
+3. **Same Socket:** Both modes use `quic_socket` (critical for hole punching)
+
+**Packet Routing Logic:**
+
+```rust
+fn process_quic_socket(&mut self) {
+    let hdr = quiche::Header::from_slice(...)?;
+
+    if from == self.server_addr {
+        // From Intermediate → use intermediate_conn
+        self.intermediate_conn.as_mut()?.recv(...)?;
+    } else if self.p2p_clients.contains_key(&hdr.dcid) {
+        // Known P2P Agent → use p2p_clients[dcid]
+        self.p2p_clients.get_mut(&hdr.dcid)?.conn.recv(...)?;
+    } else if hdr.ty == quiche::Type::Initial {
+        // New P2P connection → quiche::accept()
+        self.handle_p2p_connection(&hdr, from, pkt_buf)?;
+    }
+}
+```
+
+**TLS Certificates:**
+
+- Location: `app-connector/certs/connector-cert.pem`, `app-connector/certs/connector-key.pem`
+- Self-signed, valid for 1 year
+- Common Name: `ztna-connector`
+- CLI args: `--p2p-cert <path>` and `--p2p-key <path>`
+
+### QAD Extensions
+
+Added `build_observed_address()` to `app-connector/src/qad.rs`:
+
+```rust
+/// Build an OBSERVED_ADDRESS QAD message
+/// Format: [0x01, IPv4(4 bytes), port(2 bytes BE)]
+pub fn build_observed_address(addr: SocketAddr) -> Vec<u8>
+```
+
+This allows Connector to send observed address back to Agent for P2P QAD support.
+
+### Test Coverage
+
+| Component | Tests | Status |
+|-----------|-------|--------|
+| Agent multi-connection | 5 unit tests | ✅ Pass |
+| Connector P2P mode | 8 unit + 2 integration | ✅ Pass |
+| QAD build_observed_address | 3 unit tests | ✅ Pass |
+
+---
+
 ## Phase 1: Candidate Gathering
 
 ### 1.1 Candidate Types

@@ -42,16 +42,17 @@
 
 > **Critical:** Must be completed first. Single socket reuse is required for hole punching.
 
-- [ ] Audit current socket usage in Agent (`core/packet_processor/`)
-- [ ] Audit current socket usage in Connector (`app-connector/`)
-- [ ] Design single-socket architecture for Agent
-- [ ] Design single-socket architecture for Connector
-- [ ] Implement QUIC server mode for Connector
-  - [ ] Generate self-signed TLS certificate for Connector P2P
-  - [ ] Add server listener on same socket as client
-  - [ ] Handle incoming QUIC connections
-- [ ] Unit test: Connector accepts incoming QUIC connection
-- [ ] Document socket architecture in plan.md
+- [x] Audit current socket usage in Agent (`core/packet_processor/`)
+- [x] Audit current socket usage in Connector (`app-connector/`)
+- [x] Design single-socket architecture for Agent
+- [x] Design single-socket architecture for Connector
+- [x] Implement QUIC server mode for Connector
+  - [x] Generate self-signed TLS certificate for Connector P2P
+  - [x] Add server listener on same socket as client
+  - [x] Handle incoming QUIC connections
+- [x] Unit test: Connector accepts incoming QUIC connection
+- [x] Add multi-connection support to Agent
+- [x] Document socket architecture in plan.md
 
 ---
 
@@ -259,7 +260,7 @@
 
 | Risk | Status | Mitigation |
 |------|--------|------------|
-| Connector as QUIC server | 🔲 Open | Phase 0: Add server mode |
-| Single socket constraint | 🔲 Open | Phase 0: Socket architecture |
+| Connector as QUIC server | ✅ Closed | Implemented dual-mode QUIC (client+server) |
+| Single socket constraint | ✅ Closed | Architecture designed, Connector uses single socket |
 | quiche API correctness | 🔲 Open | Validate during Phase 4 |
 | Symmetric NAT | 🔲 Open | Use relay fallback |
