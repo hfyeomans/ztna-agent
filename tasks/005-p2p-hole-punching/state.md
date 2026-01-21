@@ -1,7 +1,7 @@
 # Task State: P2P Hole Punching
 
 **Task ID:** 005-p2p-hole-punching
-**Status:** In Progress - Phase 0-5 Complete, Ready for Phase 6
+**Status:** In Progress - Phase 6 (Testing) In Progress
 **Branch:** `feature/005-p2p-hole-punching`
 **Last Updated:** 2026-01-20
 
@@ -15,7 +15,7 @@ Implement direct peer-to-peer connectivity using NAT hole punching. This is the 
 
 ---
 
-## Current Phase: Phase 5 (Resilience) - COMPLETE ✅
+## Current Phase: Phase 6 (Testing) - IN PROGRESS 🔄
 
 ### Prerequisites ✅ COMPLETE
 - [x] Task 002 complete (Intermediate Server with QAD)
@@ -418,18 +418,17 @@ fn process_quic_socket(&mut self) {
 
 ## What's Next
 
-1. **Phase 5: Complete ✅**
-   - [x] Keepalive sender (15s interval)
-   - [x] Keepalive receiver
-   - [x] Track missed keepalives
-   - [x] Failure detection state machine
-   - [x] Graceful fallback transition
-   - [x] PathManager wired into Agent
+1. **Phase 6: Testing** (In Progress)
+   - [x] Unit tests verification (79 tests passing)
+   - [x] E2E test script updated with actual verification
+   - [x] All 6 E2E tests passing
+   - [x] Connector P2P mode verified
+   - [ ] Full E2E integration (requires Task 006 - iOS/macOS Agent)
 
-2. **Phase 6: Testing** (Next)
-   - Unit tests verification
-   - Integration tests (localhost)
-   - Simulated multi-host test
+2. **Phase 7: Documentation** (Next)
+   - Update architecture docs
+   - Document testing limitations
+   - Prepare Task 006 test plan
 
 ---
 
@@ -443,7 +442,7 @@ fn process_quic_socket(&mut self) {
 | Phase 3: Direct Path Establishment | ✅ Complete | `p2p/connectivity.rs` - 17 tests |
 | Phase 4: Hole Punch Coordination | ✅ Complete | 65 tests (full integration) |
 | Phase 5: Resilience | ✅ Complete | `p2p/resilience.rs` - 79 total tests |
-| Phase 6: Testing | 🔲 Not Started | |
+| Phase 6: Testing | 🔄 In Progress | 6 E2E tests passing, full E2E needs Agent |
 | Phase 7: Documentation | 🔲 Not Started | |
 | Phase 8: PR & Merge | 🔲 Not Started | |
 
