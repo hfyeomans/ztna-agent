@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-20 (Task 005 Phase 0-3 Complete)
+**Last Updated:** 2026-01-20 (Task 005 Phase 0-5 Complete)
 
 ---
 
@@ -166,13 +166,18 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 1: Candidate Gathering | ✅ Done | `672129c` | 11 tests (candidate types, gathering) |
 | Phase 2: Signaling Infrastructure | ✅ Done | `d415d90` | 19 tests (messages, framing, sessions) |
 | Phase 3: Direct Path Establishment | ✅ Done | `b64190c` | 17 tests (binding, pairs, check list) |
-| Phase 4: Hole Punch Coordination | 🔄 In Progress | | 17 tests (coordinator, path selection) |
-| Phase 5: Resilience | 🔲 Planned | | Keepalive, fallback |
+| Phase 4: Hole Punch Coordination | ✅ Done | | 17 tests (coordinator, path selection) |
+| Phase 5: Resilience | ✅ Done | `604da7c` | 12 tests (keepalive, fallback) |
+| Phase 6: Testing | 🔲 Planned | | Integration, E2E |
+| Phase 7: Documentation | 🔲 Planned | | |
+| Phase 8: PR & Merge | 🔲 Planned | | |
 
 **Modules Created:**
 - `p2p/candidate.rs` - ICE candidate types, RFC 8445 priority
 - `p2p/signaling.rs` - CandidateOffer/Answer/StartPunching messages
 - `p2p/connectivity.rs` - BindingRequest/Response, CandidatePair, CheckList
+- `p2p/hole_punch.rs` - HolePunchCoordinator, path selection
+- `p2p/resilience.rs` - PathManager, keepalive, fallback logic
 - `intermediate-server/signaling.rs` - Session management for relay
 
 **Key Architecture Decisions:**
@@ -181,8 +186,9 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Single socket reuse for NAT mapping preservation
 - RFC 8445 pair priority: `2^32*MIN(G,D) + 2*MAX(G,D) + (G>D?1:0)`
 - Exponential backoff: 100ms → 1600ms (max 5 retransmits)
+- Keepalive: 15s interval, 3 missed = failed, auto fallback to relay
 
-**Test Count:** 47 new tests across packet_processor + intermediate-server
+**Test Count:** 79 tests in packet_processor (Phase 0-5 complete)
 
 ---
 
