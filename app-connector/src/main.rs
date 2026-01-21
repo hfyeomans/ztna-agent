@@ -1,7 +1,8 @@
 //! ZTNA App Connector
 //!
-//! A QUIC client that:
-//! - Connects to the Intermediate System
+//! A QUIC client/server that:
+//! - Connects to the Intermediate System (client mode)
+//! - Accepts P2P connections from Agents (server mode)
 //! - Registers as a Connector for a specific service
 //! - Receives DATAGRAMs containing encapsulated IP packets
 //! - Forwards UDP payloads to a local service
@@ -17,6 +18,12 @@ use mio::{Events, Interest, Poll, Token};
 use ring::rand::{SecureRandom, SystemRandom};
 
 mod qad;
+mod signaling;
+
+use signaling::{
+    decode_message, encode_message, gather_candidates_with_observed, Candidate, DecodeError,
+    P2PSessionManager, P2PSessionState, SignalingMessage,
+};
 
 // ============================================================================
 // Constants (MUST match Intermediate Server)
@@ -50,6 +57,30 @@ const QUIC_SOCKET_TOKEN: Token = Token(0);
 const LOCAL_SOCKET_TOKEN: Token = Token(1);
 
 // ============================================================================
+// P2P Client Connection
+// ============================================================================
+
+/// Represents an incoming P2P connection from an Agent
+struct P2PClient {
+    /// QUIC connection
+    conn: quiche::Connection,
+    /// Remote address of the Agent
+    addr: SocketAddr,
+    /// Whether QAD has been sent to this client
+    qad_sent: bool,
+}
+
+impl P2PClient {
+    fn new(conn: quiche::Connection, addr: SocketAddr) -> Self {
+        P2PClient {
+            conn,
+            addr,
+            qad_sent: false,
+        }
+    }
+}
+
+// ============================================================================
 // Main Entry Point
 // ============================================================================
 
@@ -66,6 +97,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --server <addr:port>  Intermediate Server address
     // --service <id>        Service ID to register
     // --forward <addr:port> Local address to forward traffic to
+    // --p2p-cert <path>     TLS certificate for P2P server mode (optional)
+    // --p2p-key <path>      TLS private key for P2P server mode (optional)
 
     let server_addr = parse_arg(&args, "--server")
         .unwrap_or_else(|| format!("127.0.0.1:{}", DEFAULT_SERVER_PORT));
@@ -73,6 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "default".to_string());
     let forward_addr = parse_arg(&args, "--forward")
         .unwrap_or_else(|| format!("127.0.0.1:{}", DEFAULT_FORWARD_PORT));
+    let p2p_cert = parse_arg(&args, "--p2p-cert");
+    let p2p_key = parse_arg(&args, "--p2p-key");
 
     let server_addr: SocketAddr = server_addr.parse()
         .map_err(|_| "Invalid server address")?;
@@ -84,9 +119,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  Service: {}", service_id);
     log::info!("  Forward: {}", forward_addr);
     log::info!("  ALPN:    {:?}", std::str::from_utf8(ALPN_PROTOCOL));
+    log::info!("  P2P:     {}", if p2p_cert.is_some() { "enabled" } else { "disabled" });
 
     // Create connector and run
-    let mut connector = Connector::new(server_addr, service_id, forward_addr)?;
+    let mut connector = Connector::new(
+        server_addr,
+        service_id,
+        forward_addr,
+        p2p_cert.as_deref(),
+        p2p_key.as_deref(),
+    )?;
     connector.run()
 }
 
@@ -104,15 +146,19 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
 struct Connector {
     /// mio poll instance
     poll: Poll,
-    /// UDP socket for QUIC communication
+    /// UDP socket for QUIC communication (shared for client and server)
     quic_socket: UdpSocket,
     /// Local UDP socket for forwarding (registered with mio poll)
     local_socket: UdpSocket,
-    /// QUIC connection
-    conn: Option<quiche::Connection>,
-    /// quiche configuration
-    config: quiche::Config,
-    /// Server address
+    /// QUIC connection to Intermediate Server (client mode)
+    intermediate_conn: Option<quiche::Connection>,
+    /// P2P connections from Agents (server mode)
+    p2p_clients: HashMap<quiche::ConnectionId<'static>, P2PClient>,
+    /// quiche configuration for client mode (to Intermediate)
+    client_config: quiche::Config,
+    /// quiche configuration for P2P server mode (optional)
+    server_config: Option<quiche::Config>,
+    /// Intermediate Server address
     server_addr: SocketAddr,
     /// Service ID for registration
     service_id: String,
@@ -124,7 +170,9 @@ struct Connector {
     recv_buf: Vec<u8>,
     /// Send buffer
     send_buf: Vec<u8>,
-    /// Whether registration has been sent
+    /// Stream read buffer
+    stream_buf: Vec<u8>,
+    /// Whether registration has been sent to Intermediate
     registered: bool,
     /// Observed public address from QAD
     observed_addr: Option<SocketAddr>,
@@ -132,6 +180,10 @@ struct Connector {
     /// Key: (src_ip, src_port, dst_port) from encapsulated packet
     /// Value: timestamp for cleanup
     flow_map: HashMap<(Ipv4Addr, u16, u16), Instant>,
+    /// Buffer for accumulating signaling stream data
+    signaling_buffer: Vec<u8>,
+    /// P2P session manager
+    session_manager: P2PSessionManager,
 }
 
 impl Connector {
@@ -139,28 +191,59 @@ impl Connector {
         server_addr: SocketAddr,
         service_id: String,
         forward_addr: SocketAddr,
+        p2p_cert_path: Option<&str>,
+        p2p_key_path: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Create quiche client configuration
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+        // Create quiche client configuration (for connecting to Intermediate)
+        let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
         // CRITICAL: ALPN must match Intermediate Server
-        config.set_application_protos(&[ALPN_PROTOCOL])?;
+        client_config.set_application_protos(&[ALPN_PROTOCOL])?;
 
         // Enable DATAGRAM support (for IP tunneling)
-        config.enable_dgram(true, 1000, 1000);
+        client_config.enable_dgram(true, 1000, 1000);
 
         // Set timeouts and limits (match Intermediate Server)
-        config.set_max_idle_timeout(IDLE_TIMEOUT_MS);
-        config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(10_000_000);
-        config.set_initial_max_stream_data_bidi_local(1_000_000);
-        config.set_initial_max_stream_data_bidi_remote(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
+        client_config.set_max_idle_timeout(IDLE_TIMEOUT_MS);
+        client_config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+        client_config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+        client_config.set_initial_max_data(10_000_000);
+        client_config.set_initial_max_stream_data_bidi_local(1_000_000);
+        client_config.set_initial_max_stream_data_bidi_remote(1_000_000);
+        client_config.set_initial_max_streams_bidi(100);
+        client_config.set_initial_max_streams_uni(100);
 
         // Disable server certificate verification (for MVP with self-signed certs)
-        config.verify_peer(false);
+        client_config.verify_peer(false);
+
+        // Create server config if P2P certificates are provided
+        let server_config = if let (Some(cert_path), Some(key_path)) = (p2p_cert_path, p2p_key_path) {
+            let mut cfg = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+
+            // Load TLS certificates for server mode
+            cfg.load_cert_chain_from_pem_file(cert_path)?;
+            cfg.load_priv_key_from_pem_file(key_path)?;
+
+            // Same settings as client config
+            cfg.set_application_protos(&[ALPN_PROTOCOL])?;
+            cfg.enable_dgram(true, 1000, 1000);
+            cfg.set_max_idle_timeout(IDLE_TIMEOUT_MS);
+            cfg.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+            cfg.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+            cfg.set_initial_max_data(10_000_000);
+            cfg.set_initial_max_stream_data_bidi_local(1_000_000);
+            cfg.set_initial_max_stream_data_bidi_remote(1_000_000);
+            cfg.set_initial_max_streams_bidi(100);
+            cfg.set_initial_max_streams_uni(100);
+
+            // Disable client certificate verification (for MVP)
+            cfg.verify_peer(false);
+
+            log::info!("P2P server mode enabled with certificates");
+            Some(cfg)
+        } else {
+            None
+        };
 
         // Create mio poll
         let poll = Poll::new()?;
@@ -185,23 +268,28 @@ impl Connector {
             poll,
             quic_socket,
             local_socket,
-            conn: None,
-            config,
+            intermediate_conn: None,
+            p2p_clients: HashMap::new(),
+            client_config,
+            server_config,
             server_addr,
             service_id,
             forward_addr,
             rng: SystemRandom::new(),
             recv_buf: vec![0u8; 65535],
             send_buf: vec![0u8; MAX_DATAGRAM_SIZE],
+            stream_buf: vec![0u8; 65535],
             registered: false,
             observed_addr: None,
             flow_map: HashMap::new(),
+            signaling_buffer: Vec::new(),
+            session_manager: P2PSessionManager::new(),
         })
     }
 
     fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Initiate QUIC connection
-        self.connect()?;
+        // Initiate QUIC connection to Intermediate Server
+        self.connect_to_intermediate()?;
 
         // Send initial QUIC handshake packet immediately
         self.send_pending()?;
@@ -209,10 +297,8 @@ impl Connector {
         let mut events = Events::with_capacity(1024);
 
         loop {
-            // Calculate timeout based on connection timeout
-            // Use a reasonable minimum to ensure we check local socket frequently
-            let timeout = self.conn.as_ref()
-                .and_then(|c| c.timeout())
+            // Calculate timeout based on all connection timeouts
+            let timeout = self.calculate_min_timeout()
                 .map(|t| t.min(Duration::from_millis(100)))
                 .or(Some(Duration::from_millis(100)));
 
@@ -235,29 +321,53 @@ impl Connector {
             // Also check local socket even without events (for edge cases)
             self.process_local_socket()?;
 
-            // Process timeouts
+            // Process timeouts for all connections
             self.process_timeouts();
 
-            // Send pending packets
+            // Send pending packets for all connections
             self.send_pending()?;
 
-            // Check if we need to register
+            // Check if we need to register with Intermediate
             self.maybe_register()?;
 
-            // Check connection state
-            if let Some(ref conn) = self.conn {
+            // Process signaling streams from Intermediate
+            self.process_signaling_streams()?;
+
+            // Cleanup expired P2P sessions
+            let expired = self.session_manager.cleanup_expired();
+            for session_id in expired {
+                log::debug!("Cleaned up expired P2P session {}", session_id);
+            }
+
+            // Check connection states
+            if let Some(ref conn) = self.intermediate_conn {
                 if conn.is_closed() {
-                    log::warn!("Connection closed");
+                    log::warn!("Intermediate connection closed");
                     // Reconnect logic could go here
                     break;
                 }
             }
+
+            // Clean up closed P2P connections
+            self.cleanup_closed_p2p();
         }
 
         Ok(())
     }
 
-    fn connect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn calculate_min_timeout(&self) -> Option<Duration> {
+        let mut min_timeout = self.intermediate_conn.as_ref().and_then(|c| c.timeout());
+
+        for client in self.p2p_clients.values() {
+            if let Some(t) = client.conn.timeout() {
+                min_timeout = Some(min_timeout.map_or(t, |m| m.min(t)));
+            }
+        }
+
+        min_timeout
+    }
+
+    fn connect_to_intermediate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Generate connection ID
         let mut scid = [0u8; quiche::MAX_CONN_ID_LEN];
         self.rng
@@ -265,25 +375,28 @@ impl Connector {
             .map_err(|_| "Failed to generate connection ID")?;
         let scid = quiche::ConnectionId::from_ref(&scid);
 
-        // Create QUIC connection
+        // Create QUIC connection to Intermediate Server
         let local_addr = self.quic_socket.local_addr()?;
         let conn = quiche::connect(
             None, // No server name for now
             &scid,
             local_addr,
             self.server_addr,
-            &mut self.config,
+            &mut self.client_config,
         )?;
 
-        log::info!("Connecting to {} (scid={:?})", self.server_addr, scid);
+        log::info!("Connecting to Intermediate at {} (scid={:?})", self.server_addr, scid);
 
-        self.conn = Some(conn);
+        self.intermediate_conn = Some(conn);
         self.registered = false;
 
         Ok(())
     }
 
     fn process_quic_socket(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Use a separate buffer to avoid borrow conflicts
+        let mut pkt_buf = vec![0u8; 65535];
+
         loop {
             // Receive UDP packet
             let (len, from) = match self.quic_socket.recv_from(&mut self.recv_buf) {
@@ -292,26 +405,42 @@ impl Connector {
                 Err(e) => return Err(e.into()),
             };
 
+            // Copy to working buffer to avoid borrow conflicts
+            pkt_buf[..len].copy_from_slice(&self.recv_buf[..len]);
+            let pkt_slice = &mut pkt_buf[..len];
+
             log::trace!("Received {} bytes from {}", len, from);
 
-            // Process QUIC packet
-            if let Some(ref mut conn) = self.conn {
-                let recv_info = quiche::RecvInfo {
-                    from,
-                    to: self.quic_socket.local_addr()?,
-                };
+            // Route packet based on source address
+            if from == self.server_addr {
+                // Packet from Intermediate Server - process with client connection
+                self.process_intermediate_packet(pkt_slice, from)?;
+            } else {
+                // Packet from P2P client (Agent) - process with server logic
+                self.process_p2p_packet(pkt_slice, from)?;
+            }
+        }
 
-                match conn.recv(&mut self.recv_buf[..len], recv_info) {
-                    Ok(_) => {
-                        // Check for established connection
-                        if conn.is_established() {
-                            // Process incoming DATAGRAMs
-                            self.process_datagrams()?;
-                        }
+        Ok(())
+    }
+
+    fn process_intermediate_packet(&mut self, pkt_buf: &mut [u8], from: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(ref mut conn) = self.intermediate_conn {
+            let recv_info = quiche::RecvInfo {
+                from,
+                to: self.quic_socket.local_addr()?,
+            };
+
+            match conn.recv(pkt_buf, recv_info) {
+                Ok(_) => {
+                    // Check for established connection
+                    if conn.is_established() {
+                        // Process incoming DATAGRAMs
+                        self.process_intermediate_datagrams()?;
                     }
-                    Err(e) => {
-                        log::debug!("Connection recv error: {:?}", e);
-                    }
+                }
+                Err(e) => {
+                    log::debug!("Intermediate connection recv error: {:?}", e);
                 }
             }
         }
@@ -319,11 +448,106 @@ impl Connector {
         Ok(())
     }
 
-    fn process_datagrams(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn process_p2p_packet(&mut self, pkt_buf: &mut [u8], from: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+        // P2P server mode not enabled
+        if self.server_config.is_none() {
+            log::trace!("P2P packet from {} ignored (server mode disabled)", from);
+            return Ok(());
+        }
+
+        // Parse QUIC header
+        let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
+            Ok(v) => v,
+            Err(e) => {
+                log::debug!("Failed to parse QUIC header from P2P packet: {:?}", e);
+                return Ok(());
+            }
+        };
+
+        let conn_id = hdr.dcid.clone().into_owned();
+
+        // Check if this is an existing P2P connection
+        if let Some(client) = self.p2p_clients.get_mut(&conn_id) {
+            let recv_info = quiche::RecvInfo {
+                from,
+                to: self.quic_socket.local_addr()?,
+            };
+
+            match client.conn.recv(pkt_buf, recv_info) {
+                Ok(_) => {
+                    // Process DATAGRAMs from P2P client
+                    if client.conn.is_established() {
+                        self.process_p2p_client_datagrams(&conn_id)?;
+                    }
+                }
+                Err(e) => {
+                    log::debug!("P2P client recv error: {:?}", e);
+                }
+            }
+        } else if hdr.ty == quiche::Type::Initial {
+            // New P2P connection from Agent
+            self.handle_new_p2p_connection(&hdr, from, pkt_buf)?;
+        } else {
+            log::debug!("Non-Initial packet for unknown P2P connection from {}", from);
+        }
+
+        Ok(())
+    }
+
+    fn handle_new_p2p_connection(
+        &mut self,
+        hdr: &quiche::Header,
+        from: SocketAddr,
+        pkt_buf: &mut [u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server_config = match self.server_config.as_mut() {
+            Some(cfg) => cfg,
+            None => return Ok(()),
+        };
+
+        // Version negotiation if needed
+        if !quiche::version_is_supported(hdr.version) {
+            log::debug!("Version negotiation needed for P2P client");
+            let len = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut self.send_buf)?;
+            self.quic_socket.send_to(&self.send_buf[..len], from)?;
+            return Ok(());
+        }
+
+        // Generate new connection ID
+        let mut scid = [0u8; quiche::MAX_CONN_ID_LEN];
+        self.rng
+            .fill(&mut scid)
+            .map_err(|_| "Failed to generate P2P connection ID")?;
+        let scid = quiche::ConnectionId::from_ref(&scid);
+
+        // Accept the P2P connection
+        let local_addr = self.quic_socket.local_addr()?;
+        let conn = quiche::accept(&scid, None, local_addr, from, server_config)?;
+
+        let scid_owned = scid.into_owned();
+        log::info!("New P2P connection from Agent at {} (scid={:?})", from, scid_owned);
+
+        // Create P2P client
+        let mut client = P2PClient::new(conn, from);
+
+        // Process the Initial packet
+        let recv_info = quiche::RecvInfo {
+            from,
+            to: local_addr,
+        };
+        client.conn.recv(pkt_buf, recv_info)?;
+
+        // Store the P2P client
+        self.p2p_clients.insert(scid_owned, client);
+
+        Ok(())
+    }
+
+    fn process_intermediate_datagrams(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut dgrams = Vec::new();
 
-        // Collect DATAGRAMs from connection
-        if let Some(ref mut conn) = self.conn {
+        // Collect DATAGRAMs from Intermediate connection
+        if let Some(ref mut conn) = self.intermediate_conn {
             let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
             while let Ok(len) = conn.dgram_recv(&mut buf) {
                 dgrams.push(buf[..len].to_vec());
@@ -348,6 +572,69 @@ impl Connector {
             }
         }
 
+        Ok(())
+    }
+
+    fn process_p2p_client_datagrams(&mut self, conn_id: &quiche::ConnectionId<'static>) -> Result<(), Box<dyn std::error::Error>> {
+        let mut dgrams = Vec::new();
+        let mut should_send_qad = false;
+        let mut client_addr = None;
+
+        // Collect DATAGRAMs from P2P client
+        if let Some(client) = self.p2p_clients.get_mut(conn_id) {
+            let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
+            while let Ok(len) = client.conn.dgram_recv(&mut buf) {
+                dgrams.push(buf[..len].to_vec());
+            }
+
+            // Check if we need to send QAD
+            if client.conn.is_established() && !client.qad_sent {
+                should_send_qad = true;
+                client_addr = Some(client.addr);
+            }
+        }
+
+        // Send QAD if needed
+        if should_send_qad {
+            if let Some(addr) = client_addr {
+                self.send_qad_to_p2p_client(conn_id, addr)?;
+            }
+        }
+
+        // Process collected DATAGRAMs (same as from Intermediate)
+        for dgram in dgrams {
+            if dgram.is_empty() {
+                continue;
+            }
+
+            match dgram[0] {
+                QAD_OBSERVED_ADDRESS => {
+                    // Ignore QAD from client
+                    log::trace!("Ignoring QAD message from P2P client");
+                }
+                _ => {
+                    // Encapsulated IP packet - forward to local service
+                    self.forward_to_local(&dgram)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_qad_to_p2p_client(&mut self, conn_id: &quiche::ConnectionId<'static>, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(client) = self.p2p_clients.get_mut(conn_id) {
+            let qad_msg = qad::build_observed_address(addr);
+            match client.conn.dgram_send(&qad_msg) {
+                Ok(_) => {
+                    log::info!("Sent QAD to P2P client {:?} (observed: {})", conn_id, addr);
+                    client.qad_sent = true;
+                }
+                Err(e) => {
+                    log::debug!("Failed to send QAD to P2P client: {:?}", e);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -476,8 +763,9 @@ impl Connector {
                 payload,
             );
 
-            // Send via QUIC DATAGRAM
-            if let Some(ref mut conn) = self.conn {
+            // Send via Intermediate connection (relay path)
+            // In future, could also send via P2P connection if available
+            if let Some(ref mut conn) = self.intermediate_conn {
                 match conn.dgram_send(&packet) {
                     Ok(_) => {
                         log::trace!(
@@ -502,7 +790,7 @@ impl Connector {
             return Ok(());
         }
 
-        if let Some(ref mut conn) = self.conn {
+        if let Some(ref mut conn) = self.intermediate_conn {
             if !conn.is_established() {
                 return Ok(());
             }
@@ -529,8 +817,14 @@ impl Connector {
     }
 
     fn process_timeouts(&mut self) {
-        if let Some(ref mut conn) = self.conn {
+        // Process Intermediate connection timeout
+        if let Some(ref mut conn) = self.intermediate_conn {
             conn.on_timeout();
+        }
+
+        // Process P2P connection timeouts
+        for client in self.p2p_clients.values_mut() {
+            client.conn.on_timeout();
         }
 
         // Clean up old flow mappings (older than 60 seconds)
@@ -539,7 +833,8 @@ impl Connector {
     }
 
     fn send_pending(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(ref mut conn) = self.conn {
+        // Send pending for Intermediate connection
+        if let Some(ref mut conn) = self.intermediate_conn {
             loop {
                 match conn.send(&mut self.send_buf) {
                     Ok((len, send_info)) => {
@@ -547,12 +842,263 @@ impl Connector {
                     }
                     Err(quiche::Error::Done) => break,
                     Err(e) => {
-                        log::debug!("Send error: {:?}", e);
+                        log::debug!("Intermediate send error: {:?}", e);
                         break;
                     }
                 }
             }
         }
+
+        // Send pending for P2P connections
+        for client in self.p2p_clients.values_mut() {
+            loop {
+                match client.conn.send(&mut self.send_buf) {
+                    Ok((len, send_info)) => {
+                        self.quic_socket.send_to(&self.send_buf[..len], send_info.to)?;
+                    }
+                    Err(quiche::Error::Done) => break,
+                    Err(e) => {
+                        log::debug!("P2P client send error: {:?}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cleanup_closed_p2p(&mut self) {
+        let closed: Vec<_> = self.p2p_clients
+            .iter()
+            .filter(|(_, c)| c.conn.is_closed())
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for conn_id in closed {
+            if let Some(client) = self.p2p_clients.remove(&conn_id) {
+                log::info!("P2P connection closed: {:?} from {}", conn_id, client.addr);
+            }
+        }
+    }
+
+    /// Process signaling streams from Intermediate Server
+    fn process_signaling_streams(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Check if we have an established connection
+        let has_conn = self.intermediate_conn.as_ref()
+            .map(|c| c.is_established())
+            .unwrap_or(false);
+
+        if !has_conn {
+            return Ok(());
+        }
+
+        // Collect readable streams
+        let readable_streams: Vec<u64> = {
+            if let Some(ref conn) = self.intermediate_conn {
+                conn.readable().collect()
+            } else {
+                return Ok(());
+            }
+        };
+
+        // Read from each stream
+        for stream_id in readable_streams {
+            if let Some(ref mut conn) = self.intermediate_conn {
+                loop {
+                    match conn.stream_recv(stream_id, &mut self.stream_buf) {
+                        Ok((len, _fin)) => {
+                            if len == 0 {
+                                break;
+                            }
+                            self.signaling_buffer.extend_from_slice(&self.stream_buf[..len]);
+                        }
+                        Err(quiche::Error::Done) => break,
+                        Err(e) => {
+                            log::debug!("Stream recv error on {}: {:?}", stream_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try to decode and handle messages
+        self.process_signaling_messages()?;
+
+        Ok(())
+    }
+
+    /// Process decoded signaling messages from buffer
+    fn process_signaling_messages(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            if self.signaling_buffer.is_empty() {
+                break;
+            }
+
+            match decode_message(&self.signaling_buffer) {
+                Ok((msg, consumed)) => {
+                    log::info!("Received signaling message: {:?}", msg);
+
+                    // Consume the bytes
+                    self.signaling_buffer.drain(..consumed);
+
+                    // Handle the message
+                    self.handle_signaling_message(msg)?;
+                }
+                Err(DecodeError::Incomplete(_)) => {
+                    // Need more data
+                    break;
+                }
+                Err(DecodeError::TooLarge(size)) => {
+                    log::error!("Signaling message too large: {} bytes", size);
+                    self.signaling_buffer.clear();
+                    break;
+                }
+                Err(DecodeError::Invalid(e)) => {
+                    log::error!("Invalid signaling message: {}", e);
+                    self.signaling_buffer.clear();
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a decoded signaling message
+    fn handle_signaling_message(&mut self, msg: SignalingMessage) -> Result<(), Box<dyn std::error::Error>> {
+        match msg {
+            SignalingMessage::CandidateOffer {
+                session_id,
+                service_id: _,
+                candidates,
+            } => {
+                log::info!(
+                    "CandidateOffer: session={}, {} candidates",
+                    session_id,
+                    candidates.len()
+                );
+
+                // Create session
+                self.session_manager.create_session(session_id, candidates);
+
+                // Gather our candidates
+                let bind_addr = self.quic_socket.local_addr()?;
+                let local_candidates = gather_candidates_with_observed(
+                    bind_addr,
+                    self.observed_addr,
+                    Some(self.server_addr),
+                );
+
+                // Update session with local candidates
+                if let Some(session) = self.session_manager.get_session_mut(session_id) {
+                    session.set_local_candidates(local_candidates.clone());
+                }
+
+                // Send CandidateAnswer
+                let answer = SignalingMessage::CandidateAnswer {
+                    session_id,
+                    candidates: local_candidates,
+                };
+                self.send_signaling_message(&answer)?;
+
+                log::info!("Sent CandidateAnswer for session {}", session_id);
+            }
+
+            SignalingMessage::StartPunching {
+                session_id,
+                start_delay_ms,
+                peer_candidates,
+            } => {
+                log::info!(
+                    "StartPunching: session={}, delay={}ms, {} peer candidates",
+                    session_id,
+                    start_delay_ms,
+                    peer_candidates.len()
+                );
+
+                // Update session
+                if let Some(session) = self.session_manager.get_session_mut(session_id) {
+                    // Update with peer candidates if provided
+                    if !peer_candidates.is_empty() {
+                        session.agent_candidates = peer_candidates;
+                    }
+                    session.set_punch_start(start_delay_ms);
+                }
+
+                // For MVP, we'll report success immediately since we're on localhost
+                // In a real implementation, we'd perform connectivity checks here
+                log::info!("P2P session {} ready for connectivity checks", session_id);
+            }
+
+            SignalingMessage::PunchingResult {
+                session_id,
+                success,
+                working_address,
+            } => {
+                log::info!(
+                    "PunchingResult from peer: session={}, success={}, addr={:?}",
+                    session_id,
+                    success,
+                    working_address
+                );
+
+                // Update our session state
+                if let Some(session) = self.session_manager.get_session_mut(session_id) {
+                    if success {
+                        if let Some(addr) = working_address {
+                            session.set_connected(addr);
+                        }
+                    } else {
+                        session.set_fallback();
+                    }
+                }
+            }
+
+            SignalingMessage::CandidateAnswer { session_id, .. } => {
+                // Connector shouldn't receive CandidateAnswer (that's what it sends)
+                log::warn!("Unexpected CandidateAnswer received for session {}", session_id);
+            }
+
+            SignalingMessage::Error {
+                session_id,
+                code,
+                message,
+            } => {
+                log::error!(
+                    "Signaling error: session={:?}, code={:?}, msg={}",
+                    session_id,
+                    code,
+                    message
+                );
+
+                // Clean up the session
+                if let Some(sid) = session_id {
+                    self.session_manager.remove_session(sid);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send a signaling message to the Intermediate Server
+    fn send_signaling_message(&mut self, msg: &SignalingMessage) -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = encode_message(msg).map_err(|e| format!("encode error: {}", e))?;
+
+        if let Some(ref mut conn) = self.intermediate_conn {
+            // Send on stream 0 (client-initiated bidirectional)
+            match conn.stream_send(0, &encoded, false) {
+                Ok(_) => {
+                    log::debug!("Sent signaling message ({} bytes)", encoded.len());
+                }
+                Err(e) => {
+                    log::error!("Failed to send signaling message: {:?}", e);
+                }
+            }
+        }
+
         Ok(())
     }
 }

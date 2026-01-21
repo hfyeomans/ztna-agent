@@ -17,4 +17,8 @@ quiche = "0.22"
 # For ring crypto (quiche dependency) - ensure static linking
 ring = "0.17"
 
+# Serialization for P2P signaling messages
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
 # Removed env_logger - not useful in Network Extensions

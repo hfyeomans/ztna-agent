@@ -36,8 +36,9 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [001](../001-quic-tunnel-integration/) | Agent QUIC Client | ✅ Complete | `master` |
 | [002](../002-intermediate-server/) | Intermediate Server | ✅ Complete | `master` |
 | [003](../003-app-connector/) | App Connector | ✅ Complete | `master` |
-| [004](../004-e2e-relay-testing/) | E2E Relay Testing | 🔄 In Progress | `feature/004-e2e-relay-testing` |
-| [005](../005-p2p-hole-punching/) | P2P Hole Punching | 🔲 Not Started | `feature/005-p2p-hole-punching` |
+| [004](../004-e2e-relay-testing/) | E2E Relay Testing | ✅ Complete | `master` |
+| [005](../005-p2p-hole-punching/) | P2P Hole Punching | 🔄 In Progress | `feature/005-p2p-hole-punching` |
+| [005a](../005a-swift-agent-integration/) | Swift Agent Integration | 🔲 Not Started | `feature/005a-swift-agent-integration` |
 | [006](../006-cloud-deployment/) | Cloud Deployment | 🔲 Not Started | `feature/006-cloud-deployment` |
 
 ### Task Dependencies
@@ -49,11 +50,14 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 002 (Intermediate Server) ✅ ───┐
          │                      │
          ▼                      ▼
-003 (App Connector) ✅ ◄── 004 (E2E Testing)
+003 (App Connector) ✅ ◄── 004 (E2E Testing) ✅
          │                      │
          └──────────┬───────────┘
                     ▼
-         005 (P2P Hole Punching)
+         005 (P2P Hole Punching) 🔄
+                    │
+                    ▼
+         005a (Swift Agent Integration) ← Wire up macOS Agent with QUIC FFI
                     │
                     ▼
          006 (Cloud Deployment) ← NAT testing, production prep
@@ -125,8 +129,10 @@ git push -u origin feature/XXX-task-name
 | Architecture Doc | `docs/architecture.md` |
 | Agent Extension | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` |
 | Rust QUIC Client | `core/packet_processor/src/lib.rs` |
+| P2P Modules | `core/packet_processor/src/p2p/` |
 | Bridging Header | `ios-macos/Shared/PacketProcessor-Bridging-Header.h` |
 | Intermediate Server | `intermediate-server/src/main.rs` |
+| Signaling Module | `intermediate-server/src/signaling.rs` |
 | App Connector | `app-connector/src/main.rs` |
 | E2E Test Framework | `tests/e2e/README.md` |
 | E2E Test Runner | `tests/e2e/run-mvp.sh` |

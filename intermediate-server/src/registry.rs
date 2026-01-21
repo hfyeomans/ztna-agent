@@ -130,6 +130,14 @@ impl Registry {
     pub fn agent_count(&self) -> usize {
         self.agent_targets.len()
     }
+
+    /// Find the Connector connection ID for a given service
+    pub fn find_connector_for_service(
+        &self,
+        service_id: &str,
+    ) -> Option<quiche::ConnectionId<'static>> {
+        self.connectors.get(service_id).cloned()
+    }
 }
 
 impl Default for Registry {

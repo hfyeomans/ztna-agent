@@ -3,11 +3,57 @@
 //! These tests verify the server works correctly with QUIC clients.
 
 use std::net::{SocketAddr, UdpSocket};
+use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 
 /// ALPN protocol (must match server and Agent)
 const ALPN_PROTOCOL: &[u8] = b"ztna-v1";
+
+/// Test server port (different from default 4433 to avoid conflicts)
+const TEST_SERVER_PORT: u16 = 4435;
+
+/// Helper to spawn the intermediate server for tests
+struct ServerProcess {
+    child: Child,
+}
+
+impl ServerProcess {
+    fn start(port: u16) -> Result<Self, Box<dyn std::error::Error>> {
+        // Build the server first
+        let status = Command::new("cargo")
+            .args(["build", "--release"])
+            .status()?;
+
+        if !status.success() {
+            return Err("Failed to build intermediate server".into());
+        }
+
+        // Start the server
+        let child = Command::new("cargo")
+            .args([
+                "run",
+                "--release",
+                "--",
+                &port.to_string(),
+                "certs/cert.pem",
+                "certs/key.pem",
+            ])
+            .env("RUST_LOG", "info")
+            .spawn()?;
+
+        // Give server time to start
+        thread::sleep(Duration::from_millis(500));
+
+        Ok(ServerProcess { child })
+    }
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
 
 /// QAD message type
 const QAD_OBSERVED_ADDRESS: u8 = 0x01;
@@ -52,8 +98,16 @@ fn parse_qad_message(data: &[u8]) -> Option<SocketAddr> {
 
 #[test]
 fn test_client_connection_and_qad() {
-    // Skip if server not running (for CI)
-    let server_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+    // Start the intermediate server
+    let _server = match ServerProcess::start(TEST_SERVER_PORT) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to start server (expected in some CI environments): {}", e);
+            return;
+        }
+    };
+
+    let server_addr: SocketAddr = format!("127.0.0.1:{}", TEST_SERVER_PORT).parse().unwrap();
 
     // Try to connect to the server
     let socket = match UdpSocket::bind("127.0.0.1:0") {
