@@ -259,9 +259,9 @@
 
 ## Phase 8: PR & Merge
 
-- [ ] Update state.md with completion status
-- [ ] Push branch to origin
-- [ ] Create PR for review
+- [x] Update state.md with completion status
+- [x] Push branch to origin
+- [x] Create PR for review: https://github.com/hfyeomans/ztna-agent/pull/5
 - [ ] Address review feedback
 - [ ] Merge to master
 
