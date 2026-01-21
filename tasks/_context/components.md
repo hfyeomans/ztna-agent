@@ -168,8 +168,8 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 3: Direct Path Establishment | ✅ Done | `b64190c` | 17 tests (binding, pairs, check list) |
 | Phase 4: Hole Punch Coordination | ✅ Done | | 17 tests (coordinator, path selection) |
 | Phase 5: Resilience | ✅ Done | `604da7c` | 12 tests (keepalive, fallback) |
-| Phase 6: Testing | 🔲 Planned | | Integration, E2E |
-| Phase 7: Documentation | 🔲 Planned | | |
+| Phase 6: Testing | 🔄 In Progress | `5b1c996` | 6 E2E tests, unit verification |
+| Phase 7: Documentation | 🔄 In Progress | | architecture.md updated |
 | Phase 8: PR & Merge | 🔲 Planned | | |
 
 **Modules Created:**
@@ -189,6 +189,50 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Keepalive: 15s interval, 3 missed = failed, auto fallback to relay
 
 **Test Count:** 79 tests in packet_processor (Phase 0-5 complete)
+
+---
+
+### 005a: Swift Agent Integration 🔲 NOT STARTED
+
+**Location:** `ios-macos/ZtnaAgent/`, `ios-macos/Shared/`
+
+**Dependencies:** 005 (P2P Hole Punching - FFI functions available)
+
+**Branch:** `feature/005a-swift-agent-integration`
+
+**Purpose:**
+- Update macOS ZtnaAgent app to use new QUIC Agent FFI
+- Replace old `process_packet()` with Agent struct
+- Enable real QUIC connections and packet tunneling
+- Foundation for P2P hole punching testing
+
+**Current State:**
+| Component | Status | Notes |
+|-----------|--------|-------|
+| SwiftUI App | ✅ Works | Start/Stop buttons functional |
+| VPNManager | ✅ Works | Configures NETunnelProviderManager |
+| PacketTunnelProvider | ⚠️ Outdated | Uses old `process_packet()` API |
+| Bridging Header | ⚠️ Incomplete | Missing P2P/resilience FFI |
+| AgentWrapper.swift | ❌ Missing | Need Swift FFI wrapper |
+
+**Status:**
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: Bridging Header | 🔲 Not Started | Add all FFI declarations |
+| Phase 2: Swift Wrapper | 🔲 Not Started | Create AgentWrapper.swift |
+| Phase 3: PacketTunnelProvider | 🔲 Not Started | Full rewrite with QUIC |
+| Phase 4: Build Configuration | 🔲 Not Started | Xcode + Cargo |
+| Phase 5: Testing | 🔲 Not Started | Local E2E |
+| Phase 6: Documentation | 🔲 Not Started | |
+| Phase 7: PR & Merge | 🔲 Not Started | |
+
+**Key Files:**
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations
+- `ios-macos/Shared/AgentWrapper.swift` - Swift wrapper (to create)
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Tunnel logic
+
+**Outcome:** macOS Agent connects to Intermediate Server, tunnels packets via QUIC, enabling E2E testing with real Agent app.
 
 ---
 
@@ -226,6 +270,27 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Certificates | Self-signed vs Let's Encrypt | TBD |
 | Automation | Manual, Terraform, Ansible | TBD |
 
+**P2P Testing Plan (from Task 005):**
+
+The following P2P tests require cloud deployment with real NAT:
+
+| Test | Description | Validation |
+|------|-------------|------------|
+| NAT hole punching | Agent behind home NAT, Connector on cloud | Direct path established |
+| Reflexive address accuracy | QAD returns real public IP | Compare with ifconfig.me |
+| NAT type detection | Test against Full Cone, Symmetric NAT | Appropriate fallback behavior |
+| Cross-network latency | Compare direct vs relay RTT | Direct < Relay |
+| Mobile handoff | WiFi → Cellular → WiFi | Connection survives |
+| Keepalive over WAN | 15s interval over internet | Path stays active |
+| Fallback under load | Stress test during path failure | Graceful relay switch |
+
+**Test Environment Setup:**
+1. Intermediate Server on cloud VM with public IP
+2. App Connector on same or separate cloud VM
+3. Echo server as test backend
+4. iOS/macOS Agent on home/office NAT
+5. Network impairment simulation (tc/netem)
+
 ---
 
 ## Dependency Graph
@@ -262,7 +327,16 @@ QUIC Client → Intermediate → Connector → Echo Server → back
                     │  ★ PRIMARY GOAL ★       │
                     └───────────┬─────────────┘
                                 │
-                                │ needs NAT testing
+                                │ FFI functions available
+                                ▼
+                    ┌─────────────────────────┐
+                    │  005a: Swift Agent      │
+                    │  Integration            │
+                    │  🔲 NOT STARTED         │
+                    │  (macOS Agent + QUIC)   │
+                    └───────────┬─────────────┘
+                                │
+                                │ enables real E2E testing
                                 ▼
                     ┌─────────────────────────┐
                     │  006: Cloud Deployment  │
@@ -283,6 +357,9 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 **Path to P2P (primary goal):**
 - All of above + 005: P2P Hole Punching
+
+**Path to real macOS Agent E2E testing:**
+- All of above + 005a: Swift Agent Integration (wire up macOS Agent app with QUIC FFI)
 
 **Path to production deployment:**
 - All of above + 006: Cloud Deployment (NAT testing, production readiness)

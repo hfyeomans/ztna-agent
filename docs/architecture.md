@@ -412,26 +412,184 @@ The reverse path follows the same tunnel, with responses encapsulated by the App
 
 ---
 
-## P2P Optimization (Future)
+## P2P Hole Punching ✅ IMPLEMENTED
 
-When network conditions allow, Agents and Connectors can establish direct P2P connections, bypassing the Intermediate System for data transfer:
+Direct P2P connectivity is now implemented via NAT hole punching. This allows Agents and Connectors to establish direct QUIC connections, bypassing the Intermediate System for data transfer.
+
+### P2P Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    P2P Hole Punching                             │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  1. Agent connects to Intermediate, learns public address (QAD) │
-│  2. Connector connects to Intermediate, learns public address   │
-│  3. Intermediate exchanges addresses between Agent & Connector  │
-│  4. Both send UDP packets to each other's public address        │
-│  5. NAT bindings created, direct path established               │
-│  6. QUIC connection migrated to direct path                     │
-│                                                                  │
-│     Agent ◄──────────── Direct QUIC ────────────► Connector     │
-│              (Intermediate only used for signaling)             │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         P2P HOLE PUNCHING FLOW                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  PHASE 1: CANDIDATE GATHERING                                               │
+│  ─────────────────────────────                                               │
+│  • Host candidates: Local interface addresses (127.0.0.1, 192.168.1.x)     │
+│  • Reflexive candidates: Public address from QAD (203.0.113.5:54321)       │
+│  • Relay candidates: Intermediate server address (fallback)                 │
+│                                                                              │
+│  PHASE 2: SIGNALING (via Intermediate)                                       │
+│  ─────────────────────────────────────                                       │
+│  • Agent sends CandidateOffer with gathered candidates                      │
+│  • Intermediate relays to Connector                                          │
+│  • Connector responds with CandidateAnswer                                  │
+│  • Intermediate sends StartPunching to both                                 │
+│                                                                              │
+│  PHASE 3: CONNECTIVITY CHECKS                                                │
+│  ───────────────────────────                                                 │
+│  • Both sides form candidate pairs (local × remote)                         │
+│  • Pairs sorted by priority (RFC 8445)                                      │
+│  • BindingRequest/Response exchange validates paths                         │
+│  • First successful pair is nominated                                       │
+│                                                                              │
+│  PHASE 4: DIRECT CONNECTION                                                  │
+│  ─────────────────────────                                                   │
+│  • New QUIC connection established on direct path                           │
+│  • Data flows: Agent ◄───────────► Connector (direct)                       │
+│  • Intermediate drops out of data path (signaling only)                     │
+│                                                                              │
+│  FALLBACK: RELAY MODE                                                        │
+│  ────────────────────                                                        │
+│  • If all connectivity checks fail within 5 seconds                         │
+│  • Continue using relay path through Intermediate                           │
+│  • Automatic retry after 30 second cooldown                                 │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### P2P Implementation Details
+
+**Location:** `core/packet_processor/src/p2p/`
+
+| Module | Purpose | Tests |
+|--------|---------|-------|
+| `candidate.rs` | ICE candidate types, gathering, RFC 8445 priority | 11 |
+| `signaling.rs` | CandidateOffer/Answer, StartPunching messages | 13 |
+| `connectivity.rs` | BindingRequest/Response, CandidatePair, CheckList | 17 |
+| `hole_punch.rs` | HolePunchCoordinator state machine, path selection | 17 |
+| `resilience.rs` | PathManager, keepalive, automatic fallback | 12 |
+
+**Key Design Decisions:**
+
+1. **P2P = New QUIC Connection** (not path migration)
+   - Direct P2P creates a separate QUIC connection to Connector
+   - Agent manages multiple connections (Intermediate + P2P)
+   - Path migration is a different concept (same connection, different route)
+
+2. **Single Socket Reuse**
+   - Agent: Swift NetworkExtension manages single socket
+   - Connector: Dual-mode QUIC (client to Intermediate + server for Agents)
+   - Same local port ensures NAT mapping consistency
+
+3. **RFC 8445 Compliant Priority**
+   - Priority formula: `(type_pref << 24) | (local_pref << 8) | (256 - component_id)`
+   - Pair priority: `2^32*MIN(G,D) + 2*MAX(G,D) + (G>D?1:0)`
+
+4. **Resilience**
+   - Keepalive: 15 second interval, 3 missed = path failure
+   - Automatic fallback to relay on path failure
+   - 30 second cooldown before retry
+
+### Connector Dual-Mode Architecture
+
+The App Connector operates in dual-mode QUIC:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    CONNECTOR DUAL-MODE QUIC                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  SINGLE UDP SOCKET (quic_socket)                                            │
+│  ┌────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                     │    │
+│  │  ┌──────────────────────┐       ┌──────────────────────┐          │    │
+│  │  │ QUIC CLIENT          │       │ QUIC SERVER          │          │    │
+│  │  │                      │       │                      │          │    │
+│  │  │ • Connect to         │       │ • Accept connections │          │    │
+│  │  │   Intermediate       │       │   from Agents        │          │    │
+│  │  │ • Signaling          │       │ • Direct data path   │          │    │
+│  │  │ • Relay fallback     │       │ • TLS cert required  │          │    │
+│  │  └──────────┬───────────┘       └──────────┬───────────┘          │    │
+│  │             │                              │                       │    │
+│  │             └──────────┬───────────────────┘                       │    │
+│  │                        │                                           │    │
+│  │  Packet Routing:       ▼                                           │    │
+│  │  • Check source address                                            │    │
+│  │  • If from Intermediate → client connection                        │    │
+│  │  • If QUIC Initial packet → accept new P2P connection              │    │
+│  │  • If known P2P client → route to that connection                  │    │
+│  │                                                                     │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**CLI Options for P2P:**
+```bash
+./app-connector \
+  --server intermediate.example.com:4433 \
+  --service my-service \
+  --forward 127.0.0.1:8080 \
+  --p2p-cert certs/connector-cert.pem \
+  --p2p-key certs/connector-key.pem
+```
+
+### Local Testing Limitations
+
+P2P hole punching is designed for NAT traversal, which requires real network address translation. Local testing can verify:
+
+| Feature | Testable Locally? | Notes |
+|---------|-------------------|-------|
+| Host candidate gathering | ✅ Yes | Enumerates local interfaces |
+| Signaling protocol | ✅ Yes | Message encode/decode via unit tests |
+| Binding request/response | ✅ Yes | Protocol verification |
+| Connectivity checks | ✅ Yes | Localhost connections |
+| Keepalive mechanism | ✅ Yes | Timer-based verification |
+| Fallback logic | ✅ Yes | Simulated path failure |
+| **NAT hole punching** | ❌ No | Requires real NAT (cloud deployment) |
+| **Reflexive address accuracy** | ❌ No | QAD returns 127.0.0.1 locally |
+| **Symmetric NAT handling** | ❌ No | Requires real NAT scenarios |
+
+**Full NAT testing requires cloud deployment (Task 006).**
+
+### NAT Compatibility
+
+P2P hole punching success depends on NAT type:
+
+| NAT Type | Direct P2P | Notes |
+|----------|------------|-------|
+| **Full Cone** | ✅ Works | Any external host can send to mapped port |
+| **Address-Restricted Cone** | ✅ Works | Same IP must be contacted first |
+| **Port-Restricted Cone** | ✅ Works | Same IP:port must be contacted first |
+| **Symmetric NAT** | ⚠️ Limited | Different mapping per destination - relay recommended |
+
+**Symmetric NAT Handling:**
+- Port prediction is unreliable
+- Implementation automatically falls back to relay
+- No performance penalty (relay is always available)
+
+### P2P Troubleshooting
+
+| Symptom | Possible Cause | Solution |
+|---------|----------------|----------|
+| All connectivity checks fail | Symmetric NAT | Use relay (automatic fallback) |
+| Reflexive address = 127.0.0.1 | Testing locally | Deploy to cloud for NAT testing |
+| No candidates gathered | No network interfaces | Check network connectivity |
+| Signaling timeout | Intermediate unreachable | Check Intermediate connection |
+| Keepalive failures | Path became invalid | Automatic fallback to relay |
+| Frequent path switches | Unstable network | Check network quality |
+
+**Logging:**
+```bash
+# Enable P2P debug logging
+RUST_LOG=ztna_agent::p2p=debug ./app-connector ...
+
+# Key log messages to look for:
+# - "P2P server mode enabled" - Connector accepting connections
+# - "Gathered X candidates" - Candidate gathering success
+# - "Direct path established" - P2P success
+# - "Falling back to relay" - P2P failed, using relay
 ```
 
 ---
@@ -502,6 +660,13 @@ When network conditions allow, Agents and Connectors can establish direct P2P co
 
 - [QUIC RFC 9000](https://datatracker.ietf.org/doc/html/rfc9000)
 - [QUIC Datagram RFC 9221](https://datatracker.ietf.org/doc/html/rfc9221)
+- [ICE RFC 8445](https://datatracker.ietf.org/doc/html/rfc8445) - NAT traversal / candidate priority
 - [quiche Library](https://github.com/cloudflare/quiche)
 - [Apple NetworkExtension](https://developer.apple.com/documentation/networkextension)
 - [Zero Trust Architecture (NIST SP 800-207)](https://csrc.nist.gov/publications/detail/sp/800-207/final)
+
+### Internal Documentation
+
+- `tasks/005-p2p-hole-punching/plan.md` - Detailed P2P implementation plan
+- `tasks/005-p2p-hole-punching/state.md` - P2P task status and progress
+- `tasks/_context/components.md` - Component status overview
