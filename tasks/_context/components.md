@@ -150,13 +150,15 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ---
 
-### 005: P2P Hole Punching 🔄 IN PROGRESS
+### 005: P2P Hole Punching ✅ COMPLETE
 
 **Location:** `core/packet_processor/src/p2p/`, `intermediate-server/src/signaling.rs`, `app-connector/`
 
 **Dependencies:** 002, 003, 004 (relay working first) ✅ All complete
 
-**Branch:** `feature/005-p2p-hole-punching`
+**Branch:** `master` (merged from `feature/005-p2p-hole-punching`)
+
+**PR:** https://github.com/hfyeomans/ztna-agent/pull/5
 
 **Status:**
 
@@ -166,11 +168,11 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 1: Candidate Gathering | ✅ Done | `672129c` | 11 tests (candidate types, gathering) |
 | Phase 2: Signaling Infrastructure | ✅ Done | `d415d90` | 19 tests (messages, framing, sessions) |
 | Phase 3: Direct Path Establishment | ✅ Done | `b64190c` | 17 tests (binding, pairs, check list) |
-| Phase 4: Hole Punch Coordination | ✅ Done | | 17 tests (coordinator, path selection) |
+| Phase 4: Hole Punch Coordination | ✅ Done | `7754d7b` | 17 tests (coordinator, path selection) |
 | Phase 5: Resilience | ✅ Done | `604da7c` | 12 tests (keepalive, fallback) |
-| Phase 6: Testing | 🔄 In Progress | `5b1c996` | 6 E2E tests, unit verification |
-| Phase 7: Documentation | 🔄 In Progress | | architecture.md updated |
-| Phase 8: PR & Merge | 🔲 Planned | | |
+| Phase 6: Testing | ✅ Done | `5b1c996` | 6 E2E tests, 79 unit tests |
+| Phase 7: Documentation | ✅ Done | `31bfd93` | architecture.md, Task 005a created |
+| Phase 8: PR & Merge | ✅ Done | `4db3e9b` | PR #5 merged 2026-01-20 |
 
 **Modules Created:**
 - `p2p/candidate.rs` - ICE candidate types, RFC 8445 priority
@@ -323,7 +325,7 @@ The following P2P tests require cloud deployment with real NAT:
                               ▼
                     ┌─────────────────────────┐
                     │  005: P2P Hole Punching │
-                    │  🔄 IN PROGRESS         │
+                    │  ✅ COMPLETE            │
                     │  ★ PRIMARY GOAL ★       │
                     └───────────┬─────────────┘
                                 │

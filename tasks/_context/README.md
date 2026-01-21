@@ -37,7 +37,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [002](../002-intermediate-server/) | Intermediate Server | ✅ Complete | `master` |
 | [003](../003-app-connector/) | App Connector | ✅ Complete | `master` |
 | [004](../004-e2e-relay-testing/) | E2E Relay Testing | ✅ Complete | `master` |
-| [005](../005-p2p-hole-punching/) | P2P Hole Punching | 🔄 In Progress | `feature/005-p2p-hole-punching` |
+| [005](../005-p2p-hole-punching/) | P2P Hole Punching | ✅ Complete | `master` |
 | [005a](../005a-swift-agent-integration/) | Swift Agent Integration | 🔲 Not Started | `feature/005a-swift-agent-integration` |
 | [006](../006-cloud-deployment/) | Cloud Deployment | 🔲 Not Started | `feature/006-cloud-deployment` |
 
@@ -54,7 +54,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
          │                      │
          └──────────┬───────────┘
                     ▼
-         005 (P2P Hole Punching) 🔄
+         005 (P2P Hole Punching) ✅
                     │
                     ▼
          005a (Swift Agent Integration) ← Wire up macOS Agent with QUIC FFI

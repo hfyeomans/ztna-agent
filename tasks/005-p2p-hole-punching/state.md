@@ -1,8 +1,9 @@
 # Task State: P2P Hole Punching
 
 **Task ID:** 005-p2p-hole-punching
-**Status:** In Progress - Ready for Phase 8 (PR & Merge)
-**Branch:** `feature/005-p2p-hole-punching`
+**Status:** ✅ COMPLETE
+**Branch:** `master` (merged from `feature/005-p2p-hole-punching`)
+**PR:** https://github.com/hfyeomans/ztna-agent/pull/5
 **Last Updated:** 2026-01-20
 
 ---
@@ -15,7 +16,7 @@ Implement direct peer-to-peer connectivity using NAT hole punching. This is the 
 
 ---
 
-## Current Phase: Phase 8 (PR & Merge) - READY 🚀
+## Current Phase: ✅ COMPLETE - Merged to Master
 
 ### Prerequisites ✅ COMPLETE
 - [x] Task 002 complete (Intermediate Server with QAD)
