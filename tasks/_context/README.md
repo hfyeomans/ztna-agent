@@ -38,7 +38,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [003](../003-app-connector/) | App Connector | ✅ Complete | `master` |
 | [004](../004-e2e-relay-testing/) | E2E Relay Testing | ✅ Complete | `master` |
 | [005](../005-p2p-hole-punching/) | P2P Hole Punching | ✅ Complete | `master` |
-| [005a](../005a-swift-agent-integration/) | Swift Agent Integration | 🔲 Not Started | `feature/005a-swift-agent-integration` |
+| [005a](../005a-swift-agent-integration/) | Swift Agent Integration | ✅ MVP Complete | `feature/005a-swift-agent-integration` |
 | [006](../006-cloud-deployment/) | Cloud Deployment | 🔲 Not Started | `feature/006-cloud-deployment` |
 
 ### Task Dependencies
@@ -153,19 +153,69 @@ When resuming work on any task:
 
 ## Build & Test Commands
 
+### Build All Components
+
 ```bash
-# Rust (core/packet_processor)
-cargo build --release
-cargo test
+cd /Users/hank/dev/src/agent-driver/ztna-agent
 
-# Swift/Xcode (ios-macos/ZtnaAgent)
-xcodebuild -scheme ZtnaAgent -configuration Release build
+# Rust library (for macOS Agent FFI)
+(cd core/packet_processor && cargo build --release --target aarch64-apple-darwin)
 
-# Run app
-open /tmp/ZtnaAgent-build/Release/ZtnaAgent.app
+# Intermediate Server + App Connector
+(cd intermediate-server && cargo build --release)
+(cd app-connector && cargo build --release)
 
-# View logs
-log stream --predicate 'subsystem CONTAINS "ztna"'
+# Test fixtures
+(cd tests/e2e/fixtures/echo-server && cargo build --release)
+(cd tests/e2e/fixtures/quic-client && cargo build --release)
+
+# macOS Agent app
+xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
+    -scheme ZtnaAgent -configuration Debug \
+    -derivedDataPath /tmp/ZtnaAgent-build build
+
+# Run all unit tests (79+ tests)
+cargo test --workspace
+```
+
+### Run macOS Agent Demo
+
+```bash
+# Full automated demo (builds everything, runs for 30 seconds)
+tests/e2e/scenarios/macos-agent-demo.sh --build --auto --duration 30
+
+# Interactive demo (manual Start/Stop buttons)
+tests/e2e/scenarios/macos-agent-demo.sh --manual
+
+# Just run app with automation flags
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app \
+    --args --auto-start --auto-stop 30 --exit-after-stop
+```
+
+### Run E2E Test Suites
+
+```bash
+# Full E2E suite (61+ tests)
+tests/e2e/run-mvp.sh
+
+# Individual test suites
+tests/e2e/scenarios/protocol-validation.sh   # 14 tests
+tests/e2e/scenarios/udp-advanced.sh          # 11 tests
+tests/e2e/scenarios/reliability-tests.sh     # 11 tests
+tests/e2e/scenarios/performance-metrics.sh   # 6 tests
+```
+
+### View Logs
+
+```bash
+# macOS Agent logs (real-time)
+log stream --predicate 'subsystem CONTAINS "ztna"' --info
+
+# Recent macOS Agent logs
+log show --last 5m --predicate 'subsystem CONTAINS "ztna"' --info
+
+# Server/Connector logs
+tail -f tests/e2e/artifacts/logs/*.log
 ```
 
 ---

@@ -194,7 +194,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ---
 
-### 005a: Swift Agent Integration 🔲 NOT STARTED
+### 005a: Swift Agent Integration ✅ MVP COMPLETE
 
 **Location:** `ios-macos/ZtnaAgent/`, `ios-macos/Shared/`
 
@@ -211,30 +211,37 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 **Current State:**
 | Component | Status | Notes |
 |-----------|--------|-------|
-| SwiftUI App | ✅ Works | Start/Stop buttons functional |
-| VPNManager | ✅ Works | Configures NETunnelProviderManager |
-| PacketTunnelProvider | ⚠️ Outdated | Uses old `process_packet()` API |
-| Bridging Header | ⚠️ Incomplete | Missing P2P/resilience FFI |
-| AgentWrapper.swift | ❌ Missing | Need Swift FFI wrapper |
+| SwiftUI App | ✅ Works | Start/Stop + auto-start/stop for testing |
+| VPNManager | ✅ Works | Retry logic for first-time config |
+| PacketTunnelProvider | ✅ Rewritten | Full QUIC integration via FFI |
+| Bridging Header | ✅ Basic done | P2P/resilience FFI deferred (post-MVP) |
+| AgentWrapper.swift | ⏭️ Deferred | FFI used directly (acceptable) |
 
 **Status:**
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Phase 1: Bridging Header | 🔲 Not Started | Add all FFI declarations |
-| Phase 2: Swift Wrapper | 🔲 Not Started | Create AgentWrapper.swift |
-| Phase 3: PacketTunnelProvider | 🔲 Not Started | Full rewrite with QUIC |
-| Phase 4: Build Configuration | 🔲 Not Started | Xcode + Cargo |
-| Phase 5: Testing | 🔲 Not Started | Local E2E |
-| Phase 6: Documentation | 🔲 Not Started | |
-| Phase 7: PR & Merge | 🔲 Not Started | |
+| Phase 1: Bridging Header | ✅ Complete | Basic FFI (11 functions), P2P deferred |
+| Phase 2: Swift Wrapper | ⏭️ Deferred | Using FFI directly instead |
+| Phase 3: PacketTunnelProvider | ✅ Complete | Full QUIC + UDP + timeout handling |
+| Phase 4: Build Configuration | ✅ Verified | Rust lib + Xcode build working |
+| Phase 5: Testing | ✅ E2E Tested | QUIC connection + QAD verified |
+| Phase 6: Documentation | 🔲 In Progress | |
+| Phase 7: PR & Merge | 🔲 Pending | |
 
 **Key Files:**
-- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations
-- `ios-macos/Shared/AgentWrapper.swift` - Swift wrapper (to create)
-- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Tunnel logic
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set)
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration
+- `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager
 
-**Outcome:** macOS Agent connects to Intermediate Server, tunnels packets via QUIC, enabling E2E testing with real Agent app.
+**Test Automation Features:**
+- `--auto-start` - Automatically start VPN on app launch
+- `--auto-stop N` - Stop VPN after N seconds
+- `--exit-after-stop` - Quit app after VPN stops
+
+**Demo Script:** `tests/e2e/scenarios/macos-agent-demo.sh`
+
+**Outcome:** ✅ macOS Agent connects to Intermediate Server, tunnels packets via QUIC, QAD working. Ready for packet flow and cloud testing.
 
 ---
 
