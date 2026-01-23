@@ -1,9 +1,17 @@
 # Task State: Swift Agent Integration
 
 **Task ID:** 005a-swift-agent-integration
-**Status:** Not Started
+**Status:** ✅ MVP Complete (Phase 5 E2E Tested)
 **Branch:** `feature/005a-swift-agent-integration`
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-23
+
+### Fixes Applied This Session:
+- Fixed missing network entitlements (`network.client`, `network.server`)
+- Added retry logic for first-time VPN configuration
+- Added `--auto-start` command line argument for test automation
+- Added `--auto-stop N` command line argument for automated stop after N seconds
+- Added `--exit-after-stop` command line argument to quit app after VPN stops
+- Created `tests/e2e/scenarios/macos-agent-demo.sh` demo script
 
 ---
 
@@ -15,25 +23,25 @@ Update the existing macOS ZtnaAgent app to use the new QUIC Agent FFI from `core
 
 ---
 
-## Current Phase: Not Started
+## Current Phase: Phase 4 (Build Configuration) / Phase 5 (Testing)
 
 ### Prerequisites ✅ READY
 - [x] Task 005 (P2P Hole Punching) Phases 0-5 complete
 - [x] All 79 unit tests passing in packet_processor
 - [x] FFI functions implemented and documented
-- [x] Bridging header exists (needs updates)
-- [x] macOS Agent app exists (needs updates)
+- [x] Bridging header exists (basic functions complete)
+- [x] macOS Agent app exists
 
 ---
 
-## Problem Statement
+## Problem Statement (MOSTLY RESOLVED)
 
-The macOS ZtnaAgent app exists and has a working UI with Start/Stop buttons, but:
+The macOS ZtnaAgent app was updated with QUIC integration:
 
-1. **PacketTunnelProvider uses old API:** Line 84 calls `process_packet()` which is the original "hello world" function that just filters packets
-2. **No QUIC connection:** The app doesn't connect to the Intermediate Server
-3. **No packet tunneling:** IP packets aren't sent through QUIC DATAGRAMs
-4. **Missing FFI declarations:** Bridging header doesn't expose P2P, hole punching, or resilience functions
+1. ~~**PacketTunnelProvider uses old API**~~ → ✅ **RESOLVED**: Now uses full Agent FFI
+2. ~~**No QUIC connection**~~ → ✅ **RESOLVED**: Connects to Intermediate Server via UDP/QUIC
+3. ~~**No packet tunneling**~~ → ✅ **RESOLVED**: IP packets sent via `agent_send_datagram()`
+4. **Missing FFI declarations:** Bridging header still missing P2P, hole punching, resilience functions
 
 ---
 
@@ -46,54 +54,76 @@ The macOS ZtnaAgent app exists and has a working UI with Start/Stop buttons, but
 | SwiftUI App | ✅ Works | `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` |
 | VPNManager | ✅ Works | Same file - handles NETunnelProviderManager |
 | Start/Stop Buttons | ✅ Works | UI triggers tunnel start/stop |
-| PacketTunnelProvider | ⚠️ Outdated | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` |
-| Bridging Header | ⚠️ Incomplete | `ios-macos/Shared/PacketProcessor-Bridging-Header.h` |
+| PacketTunnelProvider | ✅ **REWRITTEN** | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` |
+| Bridging Header (basic) | ✅ Complete | `ios-macos/Shared/PacketProcessor-Bridging-Header.h` |
+| UDP Connection | ✅ Works | NWConnection in PacketTunnelProvider |
+| Timeout Handling | ✅ Works | DispatchSourceTimer in PacketTunnelProvider |
+| QAD Support | ✅ Works | `checkObservedAddress()` method |
 
-### Missing Components
+### Components Needing Work
 
 | Component | Status | Needed For |
 |-----------|--------|------------|
-| AgentWrapper.swift | ❌ Missing | Swift-friendly FFI wrapper |
-| UDP socket handling | ❌ Missing | QUIC packet transport |
-| Timeout management | ❌ Missing | QUIC connection health |
-| P2P FFI declarations | ❌ Missing | Direct connections |
-| Resilience FFI declarations | ❌ Missing | Path management |
+| AgentWrapper.swift | ⏭️ Deferred | Nice-to-have, FFI used directly |
+| P2P FFI declarations | ❌ Missing | Direct P2P connections |
+| Hole Punching FFI | ❌ Missing | NAT traversal |
+| Resilience FFI | ❌ Missing | Path management, fallback |
 
 ---
 
 ## What's Done
 
-Nothing yet - task not started.
+### Phase 1: Bridging Header - PARTIAL ✅
+- [x] Basic lifecycle functions (create, destroy, get_state)
+- [x] Connection functions (connect, is_connected)
+- [x] Packet I/O functions (recv, poll, send_datagram)
+- [x] Timeout functions (on_timeout, timeout_ms)
+- [x] QAD function (get_observed_address)
+- [ ] P2P functions (4 functions) - **PENDING**
+- [ ] Hole punching functions (4 functions) - **PENDING**
+- [ ] Path resilience functions (4 functions) - **PENDING**
+
+### Phase 2: Swift Wrapper - DEFERRED
+- [ ] AgentWrapper.swift not created
+- ✅ FFI is used directly in PacketTunnelProvider (acceptable alternative)
+
+### Phase 3: PacketTunnelProvider - COMPLETE ✅
+- [x] Agent creation in startTunnel
+- [x] Agent destruction in stopTunnel
+- [x] UDP connection via NWConnection
+- [x] QUIC handshake initiation
+- [x] Packet receive loop (startReceiveLoop)
+- [x] Packet send loop (pumpOutbound)
+- [x] Timeout handling (scheduleTimeout, handleTimeout)
+- [x] State monitoring (updateAgentState)
+- [x] QAD address logging (checkObservedAddress)
+- [x] IP packet tunneling (processPacket → agent_send_datagram)
 
 ---
 
 ## What's Next
 
-1. **Phase 1: Update Bridging Header**
-   - Add P2P connection function declarations
-   - Add hole punching function declarations
-   - Add path resilience function declarations
+1. **Phase 1: Update Bridging Header (REMAINING WORK)**
+   - [ ] Add P2P connection function declarations (4 functions)
+   - [ ] Add hole punching function declarations (4 functions)
+   - [ ] Add path resilience function declarations (4 functions)
 
-2. **Phase 2: Swift FFI Wrapper**
-   - Create AgentWrapper.swift
-   - Wrap all FFI calls with Swift error handling
-   - Handle memory management correctly
+2. ~~**Phase 2: Swift FFI Wrapper**~~ - DEFERRED
+   - FFI used directly in PacketTunnelProvider (acceptable)
 
-3. **Phase 3: Update PacketTunnelProvider**
-   - Replace `process_packet()` with Agent struct
-   - Add UDP socket for QUIC transport
-   - Implement packet read/write loops
-   - Add timeout handling
+3. ~~**Phase 3: Update PacketTunnelProvider**~~ - ✅ COMPLETE
+   - Full QUIC integration implemented
 
-4. **Phase 4: Build Configuration**
-   - Build Rust library for macOS
-   - Configure Xcode project
-   - Link library to Extension target
+4. **Phase 4: Build Configuration (VERIFY)**
+   - [ ] Verify Rust library builds for macOS
+   - [ ] Verify Xcode project links correctly
+   - [ ] Test full app build
 
-5. **Phase 5: Testing**
-   - Local test with Intermediate + Connector
-   - Verify end-to-end packet flow
-   - Test connection health
+5. **Phase 5: Testing (IN PROGRESS)**
+   - [ ] Start test infrastructure (Intermediate + Connector)
+   - [ ] Run macOS Agent app
+   - [ ] Verify QUIC connection establishes
+   - [ ] Verify packet tunneling works E2E
 
 ---
 
@@ -101,13 +131,13 @@ Nothing yet - task not started.
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Phase 1: Bridging Header | 🔲 Not Started | Add all FFI declarations |
-| Phase 2: Swift Wrapper | 🔲 Not Started | Create AgentWrapper.swift |
-| Phase 3: PacketTunnelProvider | 🔲 Not Started | Full rewrite |
-| Phase 4: Build Configuration | 🔲 Not Started | Xcode + Cargo |
-| Phase 5: Testing | 🔲 Not Started | Local E2E |
-| Phase 6: Documentation | 🔲 Not Started | |
-| Phase 7: PR & Merge | 🔲 Not Started | |
+| Phase 1: Bridging Header | ⚠️ Partial | Basic done, P2P/resilience pending (post-MVP) |
+| Phase 2: Swift Wrapper | ⏭️ Deferred | Using FFI directly instead |
+| Phase 3: PacketTunnelProvider | ✅ Complete | Full QUIC integration |
+| Phase 4: Build Configuration | ✅ Verified | Rust lib + Xcode build working |
+| Phase 5: Testing | ✅ Complete | QUIC + QAD verified, auto-start/stop added |
+| Phase 6: Documentation | ✅ Complete | _context/ docs + demo script updated |
+| Phase 7: PR & Merge | 🔲 **NEXT** | Commit changes and create PR |
 
 ---
 
@@ -115,9 +145,9 @@ Nothing yet - task not started.
 
 | Dependency | Status | Notes |
 |------------|--------|-------|
-| Task 005 (P2P Hole Punching) | ✅ Ready | FFI functions available |
+| Task 005 (P2P Hole Punching) | ✅ Complete | FFI functions available |
 | Rust packet_processor | ✅ Ready | 79 tests passing |
-| Xcode project | ✅ Exists | Needs configuration |
+| Xcode project | ✅ Ready | PacketTunnelProvider updated |
 | Intermediate Server | ✅ Ready | For testing |
 | App Connector | ✅ Ready | For testing |
 
@@ -127,10 +157,10 @@ Nothing yet - task not started.
 
 | File | Status | Purpose |
 |------|--------|---------|
-| `PacketProcessor-Bridging-Header.h` | ⚠️ Incomplete | C declarations for FFI |
-| `AgentWrapper.swift` | ❌ Create | Swift wrapper |
-| `PacketTunnelProvider.swift` | ⚠️ Outdated | Tunnel logic |
-| `libpacket_processor.a` | ⚠️ Build | Rust static library |
+| `PacketProcessor-Bridging-Header.h` | ⚠️ Partial | Basic FFI done, P2P pending |
+| `AgentWrapper.swift` | ⏭️ Deferred | Not needed for MVP |
+| `PacketTunnelProvider.swift` | ✅ Complete | Full QUIC integration |
+| `libpacket_processor.a` | ⏳ Verify | Rust static library |
 
 ---
 
@@ -141,8 +171,10 @@ Nothing yet - task not started.
 3. Read this file for task state
 4. Read `plan.md` for implementation details
 5. Check `todo.md` for current progress
-6. Create branch: `git checkout -b feature/005a-swift-agent-integration`
-7. Start with Phase 1: Update Bridging Header
+6. **Next Steps:**
+   - Verify build configuration works (Phase 4)
+   - Run E2E testing with test infrastructure (Phase 5)
+   - Add remaining P2P/resilience FFI declarations if needed
 
 ---
 

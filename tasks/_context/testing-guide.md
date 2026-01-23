@@ -1,11 +1,131 @@
 # ZTNA Testing & Demo Guide
 
-**Last Updated:** 2026-01-20
-**Status:** Phase 6 Complete + P2P Unit Tests (Task 005)
+**Last Updated:** 2026-01-23
+**Status:** Task 005a MVP Complete - macOS Agent Integration Working
 
 ---
 
-## Quick Start Demo
+## macOS Agent Demo (Task 005a) - NEW
+
+This section demonstrates the full ZTNA stack using the **native macOS Agent app**.
+
+### Quick Start (Automated)
+
+```bash
+# Build everything and run automated demo (30 seconds)
+tests/e2e/scenarios/macos-agent-demo.sh --build --auto --duration 30
+
+# Or run without rebuild
+tests/e2e/scenarios/macos-agent-demo.sh --auto --duration 60
+```
+
+### Quick Start (Interactive)
+
+```bash
+# Start infrastructure and launch app (manual Start/Stop)
+tests/e2e/scenarios/macos-agent-demo.sh --manual
+
+# The app will open - click "Start" to connect
+# View logs: log stream --predicate 'subsystem CONTAINS "ztna"' --info
+# Click "Stop" when done, then Ctrl+C to stop infrastructure
+```
+
+### Demo Script Options
+
+```bash
+tests/e2e/scenarios/macos-agent-demo.sh [OPTIONS]
+
+Options:
+  --build         Build all components first (Rust + Xcode)
+  --duration N    Run for N seconds (default: 30)
+  --auto          Full automation (start, wait, stop, exit)
+  --manual        Interactive mode (starts components, waits for user)
+  --logs          Open log windows in separate Terminal tabs
+  --help          Show help
+```
+
+### Manual Setup (Step by Step)
+
+**Terminal 1: Echo Server**
+```bash
+tests/e2e/fixtures/echo-server/target/release/udp-echo --port 9999
+```
+
+**Terminal 2: Intermediate Server**
+```bash
+RUST_LOG=info intermediate-server/target/release/intermediate-server 4433 \
+  certs/cert.pem certs/key.pem
+```
+
+**Terminal 3: App Connector**
+```bash
+RUST_LOG=info app-connector/target/release/app-connector \
+  --server 127.0.0.1:4433 \
+  --service test-service \
+  --forward 127.0.0.1:9999
+```
+
+**Terminal 4: Launch Agent App**
+```bash
+# Manual mode (use UI buttons)
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
+
+# OR automated mode (for testing)
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app \
+  --args --auto-start --auto-stop 30 --exit-after-stop
+```
+
+### Agent App Command Line Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `--auto-start` | Automatically start VPN when app launches |
+| `--auto-stop N` | Stop VPN after N seconds (requires `--auto-start`) |
+| `--exit-after-stop` | Quit app after VPN stops (requires `--auto-stop`) |
+
+### Viewing Agent Logs
+
+```bash
+# Real-time log stream (all agent logs)
+log stream --predicate 'subsystem CONTAINS "ztna"' --info
+
+# Recent logs (last 5 minutes)
+log show --last 5m --predicate 'subsystem CONTAINS "ztna"' --info
+
+# Filter for specific events
+log show --last 5m --predicate 'subsystem CONTAINS "ztna"' --info | grep -E "(Starting|connected|established|QAD)"
+
+# Extension-specific logs (find PID first)
+EXT_PID=$(pgrep -f "com.hankyeomans.ztna-agent.ZtnaAgent.Extension" | head -1)
+/usr/bin/log show --last 1m --predicate "processIdentifier == $EXT_PID" --info
+```
+
+### Expected Log Output
+
+When the agent connects successfully:
+```
+Starting tunnel...
+Tunnel settings applied successfully
+QUIC agent created
+UDP connection ready to 127.0.0.1:4433
+QUIC connection initiated
+QUIC connection established
+QAD observed address: 127.0.0.1:XXXXX
+```
+
+### Troubleshooting macOS Agent
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| "Start Error" on first click | First-time VPN config race | Click Start again (retry logic handles this) |
+| "Operation not permitted" | Missing entitlements | Rebuild with correct entitlements |
+| No logs appearing | Log filter not matching | Use PID-specific query (see above) |
+| Connection timeout | Infrastructure not running | Start Intermediate Server + Connector first |
+| App won't launch | Not signed for development | Open Xcode, run from there first |
+
+---
+
+## Quick Start Demo (QUIC Test Client)
 
 ### 1. Build All Components
 
@@ -854,6 +974,7 @@ pkill -f udp-echo
 | Reliability tests (Phase 5) | `tests/e2e/scenarios/reliability-tests.sh` |
 | Performance metrics (Phase 6) | `tests/e2e/scenarios/performance-metrics.sh` |
 | P2P hole punching (Phase 7) | `tests/e2e/scenarios/p2p-hole-punching.sh` (planned) |
+| **macOS Agent Demo (Task 005a)** | `tests/e2e/scenarios/macos-agent-demo.sh` |
 | **Test Fixtures** | |
 | QUIC test client | `tests/e2e/fixtures/quic-client/` |
 | UDP echo server | `tests/e2e/fixtures/echo-server/` |
