@@ -1,8 +1,8 @@
 # Task State: Swift Agent Integration
 
 **Task ID:** 005a-swift-agent-integration
-**Status:** ✅ MVP Complete (Phase 5 E2E Tested)
-**Branch:** `feature/005a-swift-agent-integration`
+**Status:** ✅ COMPLETE (Merged to master)
+**Branch:** `master` (PR #6 merged)
 **Last Updated:** 2026-01-23
 
 ### Fixes Applied This Session:
@@ -131,13 +131,13 @@ The macOS ZtnaAgent app was updated with QUIC integration:
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Phase 1: Bridging Header | ⚠️ Partial | Basic done, P2P/resilience pending (post-MVP) |
+| Phase 1: Bridging Header | ✅ Complete | Basic FFI (11 functions), P2P deferred |
 | Phase 2: Swift Wrapper | ⏭️ Deferred | Using FFI directly instead |
 | Phase 3: PacketTunnelProvider | ✅ Complete | Full QUIC integration |
-| Phase 4: Build Configuration | ✅ Verified | Rust lib + Xcode build working |
+| Phase 4: Build Configuration | ✅ Complete | Rust lib + Xcode build working |
 | Phase 5: Testing | ✅ Complete | QUIC + QAD verified, auto-start/stop added |
 | Phase 6: Documentation | ✅ Complete | _context/ docs + demo script updated |
-| Phase 7: PR & Merge | 🔲 **NEXT** | Commit changes and create PR |
+| Phase 7: PR & Merge | ✅ Complete | PR #6 merged 2026-01-23 |
 
 ---
 

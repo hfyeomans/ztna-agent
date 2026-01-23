@@ -194,13 +194,13 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ---
 
-### 005a: Swift Agent Integration ✅ MVP COMPLETE
+### 005a: Swift Agent Integration ✅ COMPLETE
 
 **Location:** `ios-macos/ZtnaAgent/`, `ios-macos/Shared/`
 
 **Dependencies:** 005 (P2P Hole Punching - FFI functions available)
 
-**Branch:** `feature/005a-swift-agent-integration`
+**Branch:** `master` (PR #6 merged 2026-01-23)
 
 **Purpose:**
 - Update macOS ZtnaAgent app to use new QUIC Agent FFI
@@ -224,10 +224,10 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 1: Bridging Header | ✅ Complete | Basic FFI (11 functions), P2P deferred |
 | Phase 2: Swift Wrapper | ⏭️ Deferred | Using FFI directly instead |
 | Phase 3: PacketTunnelProvider | ✅ Complete | Full QUIC + UDP + timeout handling |
-| Phase 4: Build Configuration | ✅ Verified | Rust lib + Xcode build working |
-| Phase 5: Testing | ✅ E2E Tested | QUIC connection + QAD verified |
-| Phase 6: Documentation | 🔲 In Progress | |
-| Phase 7: PR & Merge | 🔲 Pending | |
+| Phase 4: Build Configuration | ✅ Complete | Rust lib + Xcode build working |
+| Phase 5: Testing | ✅ Complete | QUIC connection + QAD verified |
+| Phase 6: Documentation | ✅ Complete | Demo script + _context/ docs |
+| Phase 7: PR & Merge | ✅ Complete | PR #6 merged 2026-01-23 |
 
 **Key Files:**
 - `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set)
