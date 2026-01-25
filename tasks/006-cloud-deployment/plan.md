@@ -2,8 +2,8 @@
 
 **Task ID:** 006-cloud-deployment
 **Branch:** `feature/006-cloud-deployment`
-**Depends On:** 004 (E2E Testing)
-**Last Updated:** 2026-01-19
+**Depends On:** 004 (E2E Testing), 005 (P2P Hole Punching)
+**Last Updated:** 2026-01-24
 
 ---
 
@@ -13,7 +13,42 @@ Deploy Intermediate Server and App Connector to cloud infrastructure to:
 1. Test Agent behavior behind real NAT environments
 2. Validate QAD (QUIC Address Discovery) with actual public IPs
 3. Prepare infrastructure for production deployment
-4. Enable Task 005 (P2P Hole Punching) testing with real NATs
+4. Validate P2P hole punching with real NATs (Task 005 complete)
+
+---
+
+## ⚠️ Critical Insight: NAT Testing Requirements
+
+> **Cloud VMs have direct public IPs - they are NOT behind NAT.**
+>
+> **To test real hole punching:**
+> - Agent must run behind real NAT (home network, mobile hotspot, corporate network)
+> - Cloud-only deployment tests relay, NOT hole punching
+> - Both Intermediate and Connector can be on same cloud VM (public IP)
+
+### What This Task Tests
+
+| Test Type | Cloud-Only | Cloud + Home NAT |
+|-----------|------------|------------------|
+| DATAGRAM relay | ✅ Yes | ✅ Yes |
+| QAD public IP discovery | ✅ Yes | ✅ Yes |
+| Cross-internet latency | ✅ Yes | ✅ Yes |
+| **P2P hole punching** | ❌ No | ✅ Yes |
+| **NAT type behavior** | ❌ No | ✅ Yes |
+
+### Minimum Test Topology
+
+```
+┌─────────────────┐                    ┌─────────────────────────┐
+│  Home Network   │                    │     Cloud VM            │
+│  (Behind NAT)   │                    │  (Direct Public IP)     │
+│                 │                    │                         │
+│  ┌───────────┐  │                    │  Intermediate Server    │
+│  │   Agent   │──┼──► Home Router ───►│       + App Connector   │
+│  │  (macOS)  │  │       NAT          │                         │
+│  └───────────┘  │                    └─────────────────────────┘
+└─────────────────┘
+```
 
 ---
 
@@ -62,11 +97,23 @@ git push -u origin feature/006-cloud-deployment
 
 ### 1.3 Decision
 
-TBD - Select provider based on:
-- Cost
-- NAT/network configuration options
-- Ease of automation
-- Regional availability
+**Recommended: Vultr or DigitalOcean**
+
+| Criteria | Vultr | DigitalOcean |
+|----------|-------|--------------|
+| Cost | ⭐ $2.50-5/mo | $4-6/mo |
+| UDP Support | ✅ Full | ✅ Full |
+| NAT Type | Direct public IP | Direct public IP |
+| Firewall | Simple | Very simple |
+| Regions | 32 locations | 13 locations |
+| Docs | Good | ⭐ Excellent |
+
+**Why NOT other providers:**
+- **AWS:** Security groups complexity, NAT Gateway issues
+- **Fly.io:** UDP requires dedicated IPv4, proxy layer complications
+- **Cloudflare Workers:** No raw UDP socket support (HTTP/WS only)
+
+See `research.md` for detailed analysis.
 
 ---
 

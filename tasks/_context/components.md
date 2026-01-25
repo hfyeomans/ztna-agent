@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-20 (Task 005 Phase 0-5 Complete)
+**Last Updated:** 2026-01-24 (Task 006 started)
 
 ---
 
@@ -245,60 +245,63 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ---
 
-### 006: Cloud Deployment 🔲 NOT STARTED
+### 006: Cloud Deployment 🔄 IN PROGRESS
 
 **Location:** Cloud infrastructure + deployment scripts
 
-**Dependencies:** 004 (E2E Testing - local validation first)
+**Dependencies:** 004 (E2E Testing), 005 (P2P), 005a (Swift Integration) ✅ All complete
+
+**Branch:** `feature/006-cloud-deployment`
 
 **Purpose:**
 - Deploy Intermediate Server and App Connector to cloud
 - Enable NAT testing with real public IPs
-- Validate QAD with actual network conditions
+- Validate P2P hole punching with real NATs
 - Prepare infrastructure for production
 
 **Deployment Targets:**
 | Component | Target |
 |-----------|--------|
 | Intermediate Server | Cloud VM with public IP |
-| App Connector | Cloud VM (same or separate) |
+| App Connector | Cloud VM (same VM for MVP) |
 | Test Service | Cloud VM (localhost) |
 
 **Capabilities needed:**
-- Cloud VM provisioning (DigitalOcean/AWS/Vultr/GCP)
+- Cloud VM provisioning (**Vultr or DigitalOcean recommended**)
 - TLS certificate management (self-signed or Let's Encrypt)
 - Systemd service configuration
 - Firewall rules (UDP 4433)
-- Remote Agent testing (NAT traversal)
+- Remote Agent testing (from home NAT)
 
-**Key Decisions (TBD):**
+**Key Decisions:**
 | Decision | Options | Status |
 |----------|---------|--------|
-| Cloud Provider | DO, AWS, Vultr, GCP | TBD |
-| Deployment | Single VM vs Separate VMs | TBD |
-| Certificates | Self-signed vs Let's Encrypt | TBD |
-| Automation | Manual, Terraform, Ansible | TBD |
+| Cloud Provider | Vultr, DigitalOcean | ✅ Decided (either) |
+| Deployment | Single VM vs Separate VMs | Single VM (MVP) |
+| Certificates | Self-signed vs Let's Encrypt | Self-signed (MVP) |
+| Automation | Manual, Terraform, Ansible | Manual (MVP) |
+
+**⚠️ Critical Testing Insight:**
+> Cloud VMs have **direct public IPs** - they are NOT behind NAT.
+> To test P2P hole punching, the **Agent must be behind real NAT** (home network).
 
 **P2P Testing Plan (from Task 005):**
 
-The following P2P tests require cloud deployment with real NAT:
-
-| Test | Description | Validation |
-|------|-------------|------------|
-| NAT hole punching | Agent behind home NAT, Connector on cloud | Direct path established |
-| Reflexive address accuracy | QAD returns real public IP | Compare with ifconfig.me |
-| NAT type detection | Test against Full Cone, Symmetric NAT | Appropriate fallback behavior |
-| Cross-network latency | Compare direct vs relay RTT | Direct < Relay |
-| Mobile handoff | WiFi → Cellular → WiFi | Connection survives |
-| Keepalive over WAN | 15s interval over internet | Path stays active |
-| Fallback under load | Stress test during path failure | Graceful relay switch |
+| Test | Description | Requires Home NAT? |
+|------|-------------|-------------------|
+| DATAGRAM relay | Agent → Intermediate → Connector | No |
+| QAD public IP | Correct external IP returned | No |
+| **NAT hole punching** | Agent behind NAT, direct path to cloud | **Yes** |
+| **Reflexive address accuracy** | QAD from home NAT | **Yes** |
+| **NAT type behavior** | Full Cone, Restricted, Symmetric | **Yes** |
+| Cross-network latency | Compare direct vs relay RTT | **Yes** |
+| Keepalive over WAN | 15s interval over internet | **Yes** |
 
 **Test Environment Setup:**
-1. Intermediate Server on cloud VM with public IP
-2. App Connector on same or separate cloud VM
-3. Echo server as test backend
-4. iOS/macOS Agent on home/office NAT
-5. Network impairment simulation (tc/netem)
+1. Intermediate Server + App Connector on cloud VM (single VM)
+2. Echo server as test backend (localhost)
+3. macOS Agent on home/office NAT ← **Required for P2P testing**
+4. Optional: Mobile hotspot for CGNAT testing
 
 ---
 
@@ -341,7 +344,7 @@ The following P2P tests require cloud deployment with real NAT:
                     ┌─────────────────────────┐
                     │  005a: Swift Agent      │
                     │  Integration            │
-                    │  🔲 NOT STARTED         │
+                    │  ✅ COMPLETE            │
                     │  (macOS Agent + QUIC)   │
                     └───────────┬─────────────┘
                                 │
@@ -349,7 +352,7 @@ The following P2P tests require cloud deployment with real NAT:
                                 ▼
                     ┌─────────────────────────┐
                     │  006: Cloud Deployment  │
-                    │  🔲 NOT STARTED         │
+                    │  🔄 IN PROGRESS         │
                     │  (NAT testing, prod)    │
                     └─────────────────────────┘
 ```
@@ -362,16 +365,16 @@ The following P2P tests require cloud deployment with real NAT:
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. ✅ 004: E2E Testing (Phases 1-6 complete, ready for PR)
+4. ✅ 004: E2E Testing (done - 61+ tests)
 
 **Path to P2P (primary goal):**
-- All of above + 005: P2P Hole Punching
+- ✅ All of above + 005: P2P Hole Punching (done - 79 tests)
 
 **Path to real macOS Agent E2E testing:**
-- All of above + 005a: Swift Agent Integration (wire up macOS Agent app with QUIC FFI)
+- ✅ All of above + 005a: Swift Agent Integration (done - macOS Agent + QUIC working)
 
 **Path to production deployment:**
-- All of above + 006: Cloud Deployment (NAT testing, production readiness)
+- 🔄 All of above + **006: Cloud Deployment** (IN PROGRESS - NAT testing, production readiness)
 
 ---
 

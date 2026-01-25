@@ -1,9 +1,9 @@
 # Task State: Cloud Deployment
 
 **Task ID:** 006-cloud-deployment
-**Status:** Not Started
+**Status:** In Progress
 **Branch:** `feature/006-cloud-deployment`
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-24
 
 ---
 
@@ -21,27 +21,31 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 
 ---
 
-## Current Phase: Not Started (Ready to Begin)
+## Current Phase: Phase 1 - Infrastructure Selection
 
 ### Prerequisites
 - [x] Task 004 complete (E2E Relay Testing - local validation) ✅
-- [ ] Task 005 complete (P2P Hole Punching - protocol implementation)
-- [ ] Cloud provider account (AWS/GCP/DigitalOcean/Vultr)
+- [x] Task 005 complete (P2P Hole Punching - protocol implementation) ✅
+- [x] Task 005a complete (Swift Agent Integration) ✅
+- [ ] Cloud provider account (Vultr or DigitalOcean recommended)
 - [ ] Domain name (optional, for TLS certificates)
 
 ### What's Done
 - Task planning documentation created
 - P2P validation phase added (Phase 7) with NAT testing matrix
 - Task 004 merged to master
+- Task 005 merged to master (P2P protocol complete - 79 tests)
+- Task 005a merged to master (Swift Agent integration)
+- Feature branch created: `feature/006-cloud-deployment`
+- Research updated with NAT testing requirements
+- Cloud provider analysis completed (Vultr/DigitalOcean recommended)
 
 ### What's Next
-1. Complete Task 005 (P2P protocol implementation - local PoC)
-2. Choose cloud provider
-3. Create feature branch: `git checkout -b feature/006-cloud-deployment`
-4. Set up cloud infrastructure
-5. Deploy and configure components
-6. Test NAT traversal
-7. **Validate P2P hole punching with real NATs**
+1. Choose cloud provider (Vultr or DigitalOcean)
+2. Provision cloud VM
+3. Deploy Intermediate Server + App Connector
+4. Test from Agent behind home NAT
+5. Validate P2P hole punching with real NATs
 
 ---
 
@@ -49,9 +53,10 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 
 | Dependency | Status | Notes |
 |------------|--------|-------|
-| Task 004 (E2E Testing) | ✅ Complete | Local testing passed |
-| Task 005 (P2P Protocol) | 🔄 In Progress | Protocol implementation (local PoC) |
-| Cloud Account | 🔲 Not Configured | Need provider credentials |
+| Task 004 (E2E Testing) | ✅ Complete | Local testing passed (61+ tests) |
+| Task 005 (P2P Protocol) | ✅ Complete | Protocol implementation (79 tests) |
+| Task 005a (Swift Integration) | ✅ Complete | macOS Agent wired up |
+| Cloud Account | 🔲 Not Configured | Vultr or DigitalOcean recommended |
 
 ---
 
@@ -66,11 +71,44 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 
 ---
 
+## Critical Testing Insight
+
+> **IMPORTANT:** Cloud VMs have **direct public IPs** - they are NOT behind NAT.
+> To test hole punching, the **Agent must be behind real NAT** (home network, mobile hotspot, etc.)
+
+### What Cloud Deployment Tests
+
+| Test Type | Cloud-Only | Cloud + Home NAT |
+|-----------|------------|------------------|
+| DATAGRAM relay | ✅ Yes | ✅ Yes |
+| QAD public IP discovery | ✅ Yes | ✅ Yes |
+| Cross-internet latency | ✅ Yes | ✅ Yes |
+| **P2P hole punching** | ❌ No* | ✅ Yes |
+| **NAT type behavior** | ❌ No* | ✅ Yes |
+
+*Both cloud peers have direct public IPs - no NAT to punch through.
+
+### Minimum Test Topology for P2P
+
+```
+┌─────────────────┐                    ┌─────────────────────────┐
+│  Home Network   │                    │     Cloud VM            │
+│  (Behind NAT)   │                    │  (Direct Public IP)     │
+│                 │                    │                         │
+│  ┌───────────┐  │                    │  Intermediate Server    │
+│  │   Agent   │──┼──► Home Router ───►│       + Connector       │
+│  │  (macOS)  │  │       NAT          │                         │
+│  └───────────┘  │                    └─────────────────────────┘
+└─────────────────┘
+```
+
+---
+
 ## P2P Validation Scope (From Task 005)
 
 > Task 005 implements P2P protocol locally. This task validates it with real NATs.
 
-### Testable Only with Cloud Deployment
+### Testable Only with Cloud Deployment + Real NAT
 
 | Feature | Local Testing | Cloud Testing |
 |---------|---------------|---------------|
@@ -81,12 +119,12 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 
 ### NAT Types to Test
 
-| NAT Type | Hole Punching | Priority |
-|----------|---------------|----------|
-| Full Cone | Easy | P1 |
-| Restricted Cone | Medium | P1 |
-| Port Restricted | Medium | P1 |
-| Symmetric | Hard (relay fallback) | P2 |
+| NAT Type | Hole Punching | Priority | Common Location |
+|----------|---------------|----------|-----------------|
+| Full Cone | Easy | P1 | Most home routers |
+| Restricted Cone | Medium | P1 | Some home routers |
+| Port Restricted | Medium | P1 | Some enterprise |
+| Symmetric | Hard (relay fallback) | P2 | Carrier-grade, enterprise |
 
 ### Key P2P Validation Items
 

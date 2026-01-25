@@ -2,26 +2,53 @@
 
 **Task ID:** 006-cloud-deployment
 **Branch:** `feature/006-cloud-deployment`
-**Depends On:** Task 004 (E2E Relay Testing), Task 005 (P2P Hole Punching - protocol implementation)
-**Last Updated:** 2026-01-20
+**Depends On:** Task 004 (E2E Relay Testing), Task 005 (P2P Hole Punching)
+**Last Updated:** 2026-01-24
 
 ---
 
 ## Prerequisites
 
-- [x] Task 004 (E2E Relay Testing) complete and merged
-- [ ] Task 005 (P2P Hole Punching) protocol implementation complete
-- [ ] Cloud provider account set up
-- [ ] Create feature branch: `git checkout -b feature/006-cloud-deployment`
+- [x] Task 004 (E2E Relay Testing) complete and merged ✅
+- [x] Task 005 (P2P Hole Punching) protocol implementation complete ✅
+- [x] Task 005a (Swift Agent Integration) complete ✅
+- [x] Create feature branch: `git checkout -b feature/006-cloud-deployment` ✅
+- [ ] Cloud provider account set up (Vultr or DigitalOcean recommended)
+
+---
+
+## ⚠️ Critical Testing Requirement
+
+> **Cloud VMs have direct public IPs - they are NOT behind NAT.**
+> To test real P2P hole punching, the **Agent must run behind a real NAT** (home network, mobile hotspot).
+> Cloud-only deployment tests relay, not hole punching.
+
+---
+
+## Phase 0: Optional - Docker NAT Simulation (Local Testing)
+
+> **Optional:** Validate protocol before incurring cloud costs
+
+- [ ] Set up Docker NAT simulation environment
+  - [ ] Create two Docker networks with NAT (iptables MASQUERADE)
+  - [ ] Network A: 192.168.0.0/24 (simulates home NAT)
+  - [ ] Network B: 192.168.1.0/24 (simulates different NAT)
+- [ ] Test signaling protocol through simulated NAT
+- [ ] Document simulation setup in research.md
+- [ ] Verify timing and binding exchange work correctly
+
+> **Note:** Docker simulation is useful for protocol testing but does not replace real NAT testing.
 
 ---
 
 ## Phase 1: Infrastructure Selection
 
-- [ ] Evaluate cloud providers (DigitalOcean, AWS, Vultr, GCP)
-- [ ] Choose provider based on cost/features/regions
-- [ ] Create cloud account (if needed)
-- [ ] Document provider choice in research.md
+- [x] Evaluate cloud providers (DigitalOcean, AWS, Vultr, GCP) ✅
+- [x] Choose provider based on cost/features/regions ✅
+  - **Decision:** Vultr or DigitalOcean (cheapest, direct public IP, simple firewall)
+  - See research.md for detailed comparison
+- [ ] Create cloud account (Vultr or DigitalOcean)
+- [x] Document provider choice in research.md ✅
 
 ---
 
