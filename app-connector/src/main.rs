@@ -44,6 +44,9 @@ const DEFAULT_SERVER_PORT: u16 = 4433;
 /// Default local forward port (for testing)
 const DEFAULT_FORWARD_PORT: u16 = 8080;
 
+/// Default P2P listen port (for direct Agent connections)
+const DEFAULT_P2P_PORT: u16 = 4434;
+
 /// Registration message type for Connector
 const REG_TYPE_CONNECTOR: u8 = 0x11;
 
@@ -94,11 +97,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
 
-    // --server <addr:port>  Intermediate Server address
-    // --service <id>        Service ID to register
-    // --forward <addr:port> Local address to forward traffic to
-    // --p2p-cert <path>     TLS certificate for P2P server mode (optional)
-    // --p2p-key <path>      TLS private key for P2P server mode (optional)
+    // --server <addr:port>       Intermediate Server address
+    // --service <id>             Service ID to register
+    // --forward <addr:port>      Local address to forward traffic to
+    // --p2p-cert <path>          TLS certificate for P2P server mode (optional)
+    // --p2p-key <path>           TLS private key for P2P server mode (optional)
+    // --p2p-listen-port <port>   Port for P2P connections (default: 4434)
 
     let server_addr = parse_arg(&args, "--server")
         .unwrap_or_else(|| format!("127.0.0.1:{}", DEFAULT_SERVER_PORT));
@@ -108,6 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| format!("127.0.0.1:{}", DEFAULT_FORWARD_PORT));
     let p2p_cert = parse_arg(&args, "--p2p-cert");
     let p2p_key = parse_arg(&args, "--p2p-key");
+    let p2p_port: u16 = parse_arg(&args, "--p2p-listen-port")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_P2P_PORT);
 
     let server_addr: SocketAddr = server_addr.parse()
         .map_err(|_| "Invalid server address")?;
@@ -118,6 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  Server:  {}", server_addr);
     log::info!("  Service: {}", service_id);
     log::info!("  Forward: {}", forward_addr);
+    log::info!("  P2P Port: {}", p2p_port);
     log::info!("  ALPN:    {:?}", std::str::from_utf8(ALPN_PROTOCOL));
     log::info!("  P2P:     {}", if p2p_cert.is_some() { "enabled" } else { "disabled" });
 
@@ -128,6 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         forward_addr,
         p2p_cert.as_deref(),
         p2p_key.as_deref(),
+        p2p_port,
     )?;
     connector.run()
 }
@@ -193,6 +202,7 @@ impl Connector {
         forward_addr: SocketAddr,
         p2p_cert_path: Option<&str>,
         p2p_key_path: Option<&str>,
+        p2p_port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create quiche client configuration (for connecting to Intermediate)
         let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -248,8 +258,8 @@ impl Connector {
         // Create mio poll
         let poll = Poll::new()?;
 
-        // Create UDP socket for QUIC (bind to any port)
-        let local_addr: SocketAddr = "0.0.0.0:0".parse()?;
+        // Create UDP socket for QUIC (bind to P2P port for predictable firewall rules)
+        let local_addr: SocketAddr = format!("0.0.0.0:{}", p2p_port).parse()?;
         let mut quic_socket = UdpSocket::bind(local_addr)?;
 
         // Register QUIC socket with poll
@@ -1223,5 +1233,13 @@ mod tests {
         assert_eq!(MAX_DATAGRAM_SIZE, 1350);
         assert_eq!(IDLE_TIMEOUT_MS, 30_000);
         assert_eq!(ALPN_PROTOCOL, b"ztna-v1");
+    }
+
+    #[test]
+    fn test_default_p2p_port() {
+        // P2P port should be 4434 (one above Intermediate's 4433)
+        assert_eq!(DEFAULT_P2P_PORT, 4434);
+        assert_eq!(DEFAULT_SERVER_PORT, 4433);
+        assert_eq!(DEFAULT_P2P_PORT, DEFAULT_SERVER_PORT + 1);
     }
 }

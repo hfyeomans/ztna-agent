@@ -23,7 +23,7 @@
 
 Critical issues identified and tasks added:
 - [x] Document NAT-to-NAT topology requirement (plan.md updated)
-- [ ] Define P2P listener ports (currently ephemeral)
+- [x] Define P2P listener ports (--p2p-listen-port 4434 added to app-connector)
 - [ ] Add direct vs relay verification methods
 - [ ] Add NAT classification tooling
 - [ ] Parameterize hard-coded configs before remote testing
@@ -63,10 +63,10 @@ Critical issues identified and tasks added:
 - [ ] Test locally with parameterized configs
 
 ### 1.3 P2P Port Definition
-- [ ] Add `--p2p-listen-port` CLI arg to app-connector
-- [ ] Default to 4434 (or configurable)
+- [x] Add `--p2p-listen-port` CLI arg to app-connector
+- [x] Default to 4434 (or configurable)
 - [ ] Update all firewall documentation to include UDP 4434
-- [ ] Test P2P with fixed port locally
+- [x] Test P2P with fixed port locally
 
 ---
 
