@@ -80,7 +80,7 @@ UDP 4434: App Connector P2P listener
 
 ### Implementation Required
 
-- [ ] Add `--p2p-listen-port` CLI arg to app-connector (Phase 1)
+- [x] Add `--p2p-listen-port` CLI arg to app-connector ✅ (commit ef40f19)
 - [ ] Update firewall rules in all deployments
 - [ ] Document port requirements
 
