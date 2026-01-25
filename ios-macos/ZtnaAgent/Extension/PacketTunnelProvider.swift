@@ -32,8 +32,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var timeoutTimer: DispatchSourceTimer?
 
     /// Server configuration (hardcoded for MVP)
-    private let serverHost = "127.0.0.1"
+    /// Use k8s LoadBalancer IP for E2E testing: 10.0.150.205
+    /// Use 127.0.0.1 for local testing
+    private let serverHost = "10.0.150.205"
     private let serverPort: UInt16 = 4433
+
+    /// Target service ID for registration (must match app-connector's --service flag)
+    private let targetServiceId = "echo-service"
+
+    /// Track if we've already registered to avoid duplicate registrations
+    private var hasRegistered = false
 
     /// Buffer for receiving UDP packets
     private var recvBuffer = [UInt8](repeating: 0, count: 1500)
@@ -69,6 +77,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func stopTunnel(with reason: NEProviderStopReason) async {
         logger.info("Stopping tunnel (reason: \(reason.rawValue))")
         isRunning = false
+        hasRegistered = false
 
         // Stop timeout timer
         timeoutTimer?.cancel()
@@ -221,8 +230,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let agent else { return }
 
         // Parse server address into IP bytes
-        // For MVP, hardcode server IP (127.0.0.1)
-        var ipBytes: [UInt8] = [127, 0, 0, 1]
+        // For k8s E2E testing: 10.0.150.205
+        // For local testing: 127.0.0.1
+        var ipBytes: [UInt8] = [10, 0, 150, 205]
 
         let result = data.withUnsafeBytes { buffer -> AgentResult in
             guard let baseAddress = buffer.baseAddress else { return AgentResultInvalidPointer }
@@ -280,6 +290,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case AgentStateConnected:
             logger.info("QUIC connection established")
             checkObservedAddress()
+            registerForService()
 
         case AgentStateDisconnected:
             logger.info("QUIC connection disconnected")
@@ -308,6 +319,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if result == AgentResultOk {
             let ip = "\(ipBytes[0]).\(ipBytes[1]).\(ipBytes[2]).\(ipBytes[3])"
             logger.info("QAD observed address: \(ip):\(port)")
+        }
+    }
+
+    private func registerForService() {
+        let currentHasRegistered = self.hasRegistered
+        let hasAgent = self.agent != nil
+        logger.info("registerForService() called, hasRegistered=\(currentHasRegistered)")
+        guard let agent, !hasRegistered else {
+            logger.info("registerForService() guard failed: agent=\(hasAgent), hasRegistered=\(currentHasRegistered)")
+            return
+        }
+
+        let serviceId = targetServiceId
+        logger.info("Calling agent_register for '\(serviceId)'")
+        let result = serviceId.withCString { servicePtr in
+            agent_register(agent, servicePtr)
+        }
+        logger.info("agent_register returned: \(result.rawValue)")
+
+        if result == AgentResultOk {
+            hasRegistered = true
+            logger.info("Registered for service '\(serviceId)'")
+            // Pump outbound to send registration DATAGRAM
+            networkQueue.async { [weak self] in
+                self?.pumpOutbound()
+            }
+        } else {
+            logger.warning("Failed to register for service '\(serviceId)': result=\(result.rawValue)")
         }
     }
 

@@ -79,8 +79,10 @@ metadata:
     io.cilium/lb-ipam-ips: ""
 spec:
   type: LoadBalancer
-  # externalTrafficPolicy: Local ensures client IP is preserved for QAD
-  externalTrafficPolicy: Local
+  # Use Cluster policy to allow any node to forward traffic
+  # Note: With L2 announcements, the lease holder may not be the pod's node
+  # This causes client IP to be NATted, affecting QAD observed addresses
+  externalTrafficPolicy: Cluster
   selector:
     app.kubernetes.io/name: intermediate-server
   ports:

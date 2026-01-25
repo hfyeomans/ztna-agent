@@ -224,6 +224,62 @@ deploy/docker-nat-sim/watch-logs.sh traffic       # Terminal 3
 # Terminal 4: Run the demo script
 ```
 
+### Run Pi k8s Cluster Demo
+
+```bash
+# 1. Verify cluster access
+kubectl --context k8s1 get nodes
+
+# 2. Check deployed components
+kubectl --context k8s1 get pods -n ztna
+kubectl --context k8s1 get svc -n ztna
+
+# 3. Test connection from macOS
+./app-connector/target/release/app-connector \
+  --server 10.0.150.205:4433 \
+  --service test-from-mac \
+  --insecure
+
+# Multi-terminal log watching
+# Terminal 1: Intermediate server
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
+
+# Terminal 2: App connector
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=app-connector -f
+
+# Terminal 3: Watch pods
+watch -n2 'kubectl --context k8s1 get pods -n ztna -o wide'
+
+# Terminal 4: Run test connection (above command)
+```
+
+**Note:** App Connector CrashLoopBackOff is expected - 30 second QUIC idle timeout causes restart when no traffic.
+
+### Run macOS ZtnaAgent E2E with k8s
+
+```bash
+# 1. Verify Extension has k8s IP
+grep "serverHost" ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift
+# Should show: private let serverHost = "10.0.150.205"
+
+# 2. Clean and rebuild if needed
+rm -rf ~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*
+xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
+    -scheme ZtnaAgent -configuration Debug \
+    -derivedDataPath /tmp/ZtnaAgent-build build
+
+# 3. Launch app (Click Start or use auto-start)
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app --args --auto-start
+
+# 4. Monitor k8s for connection
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
+# Look for: "New connection from 10.0.0.22:XXXXX"
+
+# 5. Send test traffic
+ping -c 1 1.1.1.1
+# K8s logs: "Received 84 bytes to relay" (ICMP packet tunneled)
+```
+
 ### View Logs
 
 ```bash
@@ -248,6 +304,15 @@ tail -f tests/e2e/artifacts/logs/*.log
 | **Hole Punching** | NAT traversal technique for direct P2P connection |
 | **Intermediate** | Relay server for bootstrap and fallback |
 | **Connector** | Component that decapsulates packets and forwards to apps |
+| **Service Registration** | Protocol for Agents/Connectors to register with Intermediate for routing |
+
+### Registration Protocol
+
+Both Agents and Connectors register with a service ID to enable relay routing:
+- **Agent (0x10)**: "I want to reach service X"
+- **Connector (0x11)**: "I provide service X"
+
+Message format: `[type_byte, service_id_length, service_id_bytes...]`
 
 ---
 

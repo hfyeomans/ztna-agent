@@ -81,6 +81,14 @@ AgentResult agent_connect(Agent* agent, const char* host, uint16_t port);
 /// @return true if connected, false otherwise.
 bool agent_is_connected(const Agent* agent);
 
+/// Register the Agent for a target service.
+/// This tells the Intermediate Server which service the Agent wants to reach.
+/// Must be called after the connection is established (agent_is_connected returns true).
+/// @param agent Agent pointer.
+/// @param service_id Service ID to register for (null-terminated C string).
+/// @return AgentResultOk on success, AgentResultNotConnected if not connected.
+AgentResult agent_register(Agent* agent, const char* service_id);
+
 // ============================================================================
 // QUIC Agent Packet I/O
 // ============================================================================

@@ -192,15 +192,70 @@ spec:
       stop: "10.0.150.210"
 ```
 
+### Enable L2 Announcements in Cilium (Required!)
+
+**CRITICAL**: Having the CRDs is not enough - L2 announcements must be **enabled** in Cilium itself via Helm:
+
+```bash
+# Check if L2 is currently enabled
+kubectl get cm cilium-config -n kube-system -o yaml | grep -i l2
+
+# If "enable-l2-announcements" is missing or "false", enable it:
+helm upgrade cilium cilium/cilium -n kube-system \
+  --reuse-values \
+  --set l2announcements.enabled=true \
+  --set l2announcements.leaseDuration=3s \
+  --set l2announcements.leaseRenewDeadline=1s \
+  --set l2announcements.leaseRetryPeriod=200ms \
+  --set devices='{eth0}' \
+  --set externalIPs.enabled=true
+
+# Restart Cilium daemonset to apply changes
+kubectl rollout restart ds/cilium -n kube-system
+kubectl rollout status -n kube-system ds/cilium --timeout=120s
+```
+
 ### Apply L2 Configuration
 
 ```bash
 # Apply cluster-scoped resources directly (not via kustomize)
 kubectl apply -f deploy/k8s/overlays/pi-home/cilium-l2.yaml
 
-# Verify
+# Verify IP pool
 kubectl get ciliumloadbalancerippool
 # Expected: DISABLED=false, IPS AVAILABLE=11
+
+# Verify L2 lease is acquired
+kubectl get leases -n kube-system | grep l2announce
+# Expected: cilium-l2announce-ztna-intermediate-server with a holder node
+```
+
+### Verify L2 Announcement is Active
+
+```bash
+# Check which node holds the L2 lease
+kubectl get lease cilium-l2announce-ztna-intermediate-server -n kube-system \
+  -o jsonpath='{.spec.holderIdentity}'
+
+# Check L2 announcement table on lease holder
+LEASE_NODE=$(kubectl get lease cilium-l2announce-ztna-intermediate-server -n kube-system -o jsonpath='{.spec.holderIdentity}')
+kubectl -n kube-system exec $(kubectl get pods -n kube-system -l k8s-app=cilium --field-selector spec.nodeName=$LEASE_NODE -o name | head -1) \
+  -- cilium-dbg shell -- db/show l2-announce
+
+# Expected output:
+# IP             NetworkInterface
+# 10.0.150.205   eth0
+```
+
+### Change LoadBalancer IP
+
+```bash
+# Patch service with new IP from the pool
+kubectl patch svc intermediate-server -n ztna \
+  -p '{"metadata":{"annotations":{"io.cilium/lb-ipam-ips":"10.0.150.205"}}}'
+
+# Verify new IP
+kubectl get svc -n ztna intermediate-server
 ```
 
 ### Key Insight: Cluster-Scoped Resources
@@ -473,13 +528,68 @@ kubectl get events -n ztna --sort-by='.lastTimestamp'
 
 ```bash
 # From macOS, test UDP connectivity
-nc -u -v 10.0.150.200 4433
+nc -u -v -z 10.0.150.205 4433
 
 # Check if service has endpoints
 kubectl get endpoints -n ztna intermediate-server
 
 # Check pod is running
 kubectl get pods -n ztna -o wide
+```
+
+### Destination Host Unreachable from macOS
+
+**Symptom**: Ping/UDP shows "Destination Host Unreachable" despite ARP working
+
+**Root Cause**: Usually `externalTrafficPolicy: Local` with L2 announcements where lease holder ≠ pod node
+
+**Diagnosis**:
+
+```bash
+# 1. Check ARP is working (MAC should resolve to a Pi node)
+arp -an | grep "10.0.150.205"
+
+# 2. Check which node holds L2 lease
+kubectl get lease cilium-l2announce-ztna-intermediate-server -n kube-system \
+  -o jsonpath='{.spec.holderIdentity}'
+
+# 3. Check which node has the pod
+kubectl get pods -n ztna -l app.kubernetes.io/name=intermediate-server -o wide
+
+# 4. If different nodes → traffic policy is the issue
+kubectl get svc -n ztna intermediate-server \
+  -o jsonpath='{.spec.externalTrafficPolicy}'
+```
+
+**Fix**:
+
+```bash
+# Change to Cluster policy
+kubectl patch svc -n ztna intermediate-server \
+  -p '{"spec":{"externalTrafficPolicy":"Cluster"}}'
+```
+
+### L2 Announcements Not Working
+
+**Symptom**: LoadBalancer has IP but not reachable, ARP fails
+
+**Check L2 is enabled in Cilium**:
+
+```bash
+kubectl get cm cilium-config -n kube-system -o yaml | grep -i l2
+
+# If "enable-l2-announcements: false", enable via Helm (see Cilium L2 Configuration section)
+```
+
+**Check BPF L2 responder map**:
+
+```bash
+# Get node holding lease
+LEASE_NODE=$(kubectl get lease cilium-l2announce-ztna-intermediate-server -n kube-system -o jsonpath='{.spec.holderIdentity}')
+
+# Check L2 responder map on that node
+kubectl exec -n kube-system $(kubectl get pods -n kube-system -l k8s-app=cilium --field-selector spec.nodeName=$LEASE_NODE -o name | head -1) \
+  -- bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_l2_responder_v4
 ```
 
 ---
@@ -529,13 +639,34 @@ Kustomize base includes placeholder secrets. Better to:
 
 When configuring Cilium L2 interfaces, Pi nodes use `eth0` for the physical network. Use regex `^eth0$` in the L2 announcement policy.
 
-### 6. externalTrafficPolicy: Local for QAD
+### 6. externalTrafficPolicy: Cluster Required for L2 Announcements
 
-For QUIC Address Discovery (QAD) to work correctly, the LoadBalancer service must preserve client source IPs:
+**CRITICAL**: With Cilium L2 announcements, the node holding the L2 lease (responding to ARP) may NOT be the node running the pod.
+
+With `externalTrafficPolicy: Local`:
+- Traffic arrives at the L2 lease holder node
+- If the pod isn't on that node, traffic is **dropped**
+- Results in "Destination Host Unreachable" errors
+
+**Solution**: Use `Cluster` policy:
 
 ```yaml
 spec:
-  externalTrafficPolicy: Local
+  externalTrafficPolicy: Cluster
+```
+
+**Trade-off**: Client source IP is NATted (affects QAD observed addresses). The intermediate server will see Cilium's internal IP (e.g., 10.0.0.22) instead of the actual client IP.
+
+**Debugging this issue**:
+```bash
+# Find which node has the L2 lease
+kubectl get lease cilium-l2announce-ztna-intermediate-server -n kube-system \
+  -o jsonpath='{.spec.holderIdentity}'
+
+# Find which node runs the pod
+kubectl get pods -n ztna -l app.kubernetes.io/name=intermediate-server -o wide
+
+# If different nodes → externalTrafficPolicy: Local won't work
 ```
 
 ### 7. Multi-Arch Builds Need Buildx
@@ -548,6 +679,39 @@ k3s nodes don't have Docker - they use containerd. This means:
 - Can't use `docker pull` on nodes for debugging
 - Use `crictl` instead for container operations
 - Image pulls go through containerd, not Docker daemon
+
+### 9. LoadBalancer IPs Must Be on Same Subnet as Nodes
+
+For L2 announcements to work, the LoadBalancer IP pool must be on the **same subnet** as the k8s nodes:
+
+```
+Nodes: 10.0.150.101-108
+IP Pool: 10.0.150.200-210  ← Same /24 subnet
+```
+
+**Why**: L2 announcements use ARP, which only works within a broadcast domain (same subnet). The node responds to ARP requests for the LoadBalancer IP using its own MAC address.
+
+**Router Configuration**: The router (10.0.150.1) does NOT need any special configuration:
+- L2/ARP happens directly between client (Mac) and k8s node
+- Router is not involved in L2 traffic forwarding
+- No static routes or NAT rules needed
+
+### 10. Debugging Cilium L2 BPF State
+
+To verify L2 announcements are correctly programmed in Cilium's BPF maps:
+
+```bash
+# Check L2 responder map (shows IPs Cilium will respond to ARP for)
+kubectl exec -n kube-system <cilium-pod> -- \
+  bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_l2_responder_v4
+
+# Key format: IP address in hex (e.g., 0a 00 96 cd = 10.0.150.205)
+# Value: 01 = enabled
+
+# Check LB BPF map (shows service-to-backend mappings)
+kubectl exec -n kube-system <cilium-pod> -- \
+  cilium-dbg bpf lb list | grep "10.0.150"
+```
 
 ---
 
@@ -574,6 +738,89 @@ kubectl logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
 # === Cleanup ===
 kubectl delete namespace ztna
 kubectl delete -f deploy/k8s/overlays/pi-home/cilium-l2.yaml
+```
+
+---
+
+## macOS ZtnaAgent E2E Testing
+
+### E2E Test Setup
+
+1. **Configure Extension with k8s IP:**
+   ```swift
+   // In PacketTunnelProvider.swift
+   private let serverHost = "10.0.150.205"  // k8s LoadBalancer IP
+   private let serverPort: UInt16 = 4433
+   ```
+
+2. **Clean and rebuild macOS app:**
+   ```bash
+   # Clean old cached Extension (critical!)
+   rm -rf ~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*
+
+   # Rebuild
+   xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
+       -scheme ZtnaAgent -configuration Debug \
+       -derivedDataPath /tmp/ZtnaAgent-build build
+   ```
+
+3. **Launch and connect:**
+   ```bash
+   open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app --args --auto-start
+   ```
+
+### Verify E2E Connection
+
+```bash
+# Check VPN tunnel is up
+ifconfig utun6
+# Expected: inet 100.64.0.1
+
+# Check UDP connection to k8s
+netstat -an | grep "10.0.150.205.4433"
+
+# Check k8s intermediate logs
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server --tail=20
+# Expected: "New connection from 10.0.0.XX:XXXXX"
+```
+
+### E2E Test Results (Phase 1.1)
+
+| Test | Result | Notes |
+|------|--------|-------|
+| VPN tunnel creation | ✅ | No popup dialog on macOS 26+ |
+| QUIC handshake | ✅ | Connects to LoadBalancer IP |
+| QAD (address discovery) | ✅ | Observed address returned (SNAT'd) |
+| Packet tunneling | ✅ | DATAGRAMs sent through tunnel |
+| Relay routing | ⚠️ | "No destination" - MVP gap |
+
+### Known Issues
+
+1. **Extension caching**: macOS caches the Extension binary path. After code changes, you MUST:
+   - Delete `~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*`
+   - Rebuild to `/tmp/ZtnaAgent-build`
+   - Stop and restart VPN
+
+2. **30-second idle timeout**: QUIC connection closes after 30s without traffic. Need keepalive.
+
+3. **SNAT hides client IP**: With `externalTrafficPolicy: Cluster`, intermediate sees k8s node IP (10.0.0.22) not the real client IP.
+
+4. **No service-based routing**: Current MVP doesn't map destination IPs to service IDs. Packets are tunneled but intermediate doesn't know which connector to route them to.
+
+### MVP Routing Gap
+
+The E2E test shows packets are successfully tunneled but "No destination for relay" because:
+
+```
+Current flow:
+1. macOS intercepts packet destined for X.X.X.X
+2. Packet is tunneled via QUIC DATAGRAM to intermediate
+3. Intermediate receives DATAGRAM but doesn't know which connector handles X.X.X.X
+4. "No destination for relay" - dropped
+
+Needed for full E2E:
+- Service-based routing (map destination IP → service ID)
+- Or destination-based lookup (connector registers IPs it handles)
 ```
 
 ---

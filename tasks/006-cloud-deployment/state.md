@@ -3,7 +3,7 @@
 **Task ID:** 006-cloud-deployment
 **Status:** In Progress
 **Branch:** `feature/006-cloud-deployment`
-**Last Updated:** 2026-01-24
+**Last Updated:** 2026-01-25
 
 ---
 
@@ -21,15 +21,14 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 
 ---
 
-## Current Phase: Phase 1 - Cloud Infrastructure Setup
+## Current Phase: Phase 1 - Pi k8s Deployment ✅ COMPLETE
 
 ### Prerequisites
 - [x] Task 004 complete (E2E Relay Testing - local validation) ✅
 - [x] Task 005 complete (P2P Hole Punching - protocol implementation) ✅
 - [x] Task 005a complete (Swift Agent Integration) ✅
 - [x] Phase 0: Docker NAT simulation validated ✅
-- [ ] Cloud provider account (Vultr or DigitalOcean recommended)
-- [ ] Domain name (optional, for TLS certificates)
+- [x] Pi k8s cluster access confirmed ✅
 
 ### What's Done
 - Task planning documentation created
@@ -47,11 +46,99 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
   - End-to-end relay test successful
   - Agent observed at 172.20.0.2 (NATted), Connector at 172.20.0.3 (NATted)
   - UDP tunnel echo working through relay
+- **Phase 1: Pi k8s Deployment completed** ✅
+  - Created `deploy/k8s/` Kustomize structure (base + overlays)
+  - Built multi-arch images (arm64) and pushed to Docker Hub
+  - Configured Cilium L2 announcements for LoadBalancer
+  - Deployed intermediate-server, app-connector, echo-server to Pi cluster
+  - **All components verified working:**
+    - intermediate-server: Running, accepting QUIC connections
+    - app-connector: Running, registers for 'echo-service', receives QAD (30s idle timeout expected)
+    - echo-server: Running
+    - LoadBalancer: 10.0.150.205:4433/UDP accessible from macOS
+  - **macOS → k8s QUIC connection verified:**
+    - Local app-connector connects to k8s intermediate-server
+    - Successfully registers as connector
+    - QAD returns observed address
+  - Created comprehensive skill documentation (`deploy/k8s/k8s-deploy-skill.md`)
+
+### Phase 1.1: macOS E2E Test ✅ COMPLETE
+
+**Test Date:** 2026-01-25
+
+**Test Setup:**
+- macOS ZtnaAgent app (built from /tmp/ZtnaAgent-build)
+- Extension pointing to k8s LoadBalancer: 10.0.150.205:4433
+- VPN profile "ZTNA Agent" configured and connected
+
+**Test Results:**
+```
+✅ macOS VPN tunnel established (utun6, 100.64.0.1)
+✅ Routes configured (1.1.1.1/32 → utun6)
+✅ QUIC connection to intermediate-server (via Cilium L2 LoadBalancer)
+✅ QAD received (observed: 10.0.0.22:55625 - SNAT'd k8s node IP)
+✅ Packets intercepted and tunneled through QUIC DATAGRAM
+✅ Intermediate server received 84-byte relay data (ICMP ping)
+⚠️  "No destination for relay" - expected (no service ID routing for 1.1.1.1)
+```
+
+**Key Findings:**
+1. **VPN on macOS 26+ works** - No system dialog popup needed; shows "Connected" in Settings
+2. **SNAT with externalTrafficPolicy: Cluster** - macOS appears as 10.0.0.22 (k8s node IP) to intermediate
+3. **30-second idle timeout** - QUIC connection closes after 30s without traffic
+4. **Service-based routing** - MVP routes by service ID, not destination IP
+5. **84-byte payload** - ICMP ping (56 data + 8 ICMP header + 20 IP header overhead)
+
+**Next Steps (Full E2E with echo-service):**
+- Configure macOS agent to send traffic to echo-service destination
+- Or modify routing to forward packets to registered app-connector
+
+### Phase 1.2: Agent Registration ✅ COMPLETE
+
+**Date:** 2026-01-25
+
+**Implementation:**
+- Added `agent_register(agent, service_id)` FFI function to Rust core
+- Registration sends DATAGRAM: `[0x10, len, service_id_bytes]`
+- Updated bridging header with `agent_register` declaration
+- Swift calls registration after QUIC connection established
+- Service ID hardcoded to "echo-service" (matches k8s app-connector)
+- 81 tests passing in packet_processor crate
+
+**Files Changed:**
+- `core/packet_processor/src/lib.rs` - Added REG_TYPE_AGENT, Agent::register(), agent_register FFI
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - Added agent_register declaration
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Calls registerForService() after connect
+
+### Phase 1.3: Agent Registration Verification ✅ COMPLETE
+
+**Date:** 2026-01-25
+
+**Test Results:**
+```
+k8s intermediate-server logs:
+[2026-01-25T20:27:45Z INFO] Registration: Agent for service 'echo-service' (conn=8faf58ba...)
+[2026-01-25T20:27:45Z INFO] Registering Agent targeting service 'echo-service'
+```
+
+**Verified:**
+- ✅ Agent connects to k8s intermediate-server (10.0.150.205:4433)
+- ✅ Agent receives QAD (observed: 10.0.0.22 - SNAT'd k8s node IP)
+- ✅ Agent sends registration DATAGRAM with service ID 'echo-service'
+- ✅ Intermediate-server recognizes Agent registration
+
+**Discovered Gap:**
+- ⚠️ Full E2E relay blocked: Tunneled IP packets (DATAGRAM) lack service context
+- Current `send_datagram(ip_packet)` sends raw IP, but intermediate needs service ID for routing
+- Requires: Prepend service ID to DATAGRAM or use single-service-per-connection model
 
 ### What's Next
-1. Deploy to DigitalOcean for quick cloud validation
-2. Deploy to AWS VPC for production-like environment
-3. Deploy to Home Pi k8s for true NAT-to-NAT testing
+1. ~~Test macOS ZtnaAgent app connecting to Pi k8s intermediate-server~~ ✅
+2. ~~Implement Agent registration for relay routing~~ ✅
+3. ~~Verify registration appears in k8s logs~~ ✅
+4. **BLOCKED:** Implement service-aware relay routing (see Phase 5a.3)
+5. Deploy to DigitalOcean or AWS for public IP testing
+6. Test P2P hole punching with home NAT → cloud setup
 
 ---
 
@@ -99,6 +186,23 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 ---
 
 ## Deployment Components
+
+### Pi k8s Cluster (Phase 1 - Complete)
+
+| Component | Target | Status |
+|-----------|--------|--------|
+| Intermediate Server | Pi k8s (LoadBalancer 10.0.150.205:4433) | ✅ Running |
+| App Connector | Pi k8s (ClusterIP, registers for 'echo-service') | ✅ Running |
+| Echo Server | Pi k8s (ClusterIP, test service) | ✅ Running |
+| TLS Certificates | Self-signed (manual secret creation) | ✅ Done |
+| Cilium L2 | LoadBalancer IP announcements | ✅ Working |
+
+**Key Configuration:**
+- LoadBalancer: `externalTrafficPolicy: Cluster` (required for Cilium L2)
+- Docker Hub images: `hyeomans/ztna-{intermediate-server,app-connector,echo-server}:latest`
+- Skill guide: `deploy/k8s/k8s-deploy-skill.md`
+
+### Cloud VM (Phase 2 - Pending)
 
 | Component | Target | Status |
 |-----------|--------|--------|

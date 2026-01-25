@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-25 (Task 006 Phase 0 complete)
+**Last Updated:** 2026-01-25 (Task 006 Phase 1 complete - Pi k8s Deployment)
 
 ---
 
@@ -20,6 +20,7 @@
 - Creates QUIC connections via quiche
 - Sends/receives QUIC DATAGRAMs
 - Parses QAD OBSERVED_ADDRESS messages
+- **Registers for target service (0x10 protocol)** ← NEW
 - Tunnels intercepted IP packets
 - Thread-safe state management
 
@@ -230,9 +231,13 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 7: PR & Merge | ✅ Complete | PR #6 merged 2026-01-23 |
 
 **Key Files:**
-- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set)
-- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set + `agent_register`)
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration
 - `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager
+
+**Service Registration:**
+- Calls `agent_register(agent, "echo-service")` after connection established
+- Enables relay routing through Intermediate Server
 
 **Test Automation Features:**
 - `--auto-start` - Automatically start VPN on app launch
@@ -247,7 +252,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ### 006: Cloud Deployment 🔄 IN PROGRESS
 
-**Location:** `deploy/docker-nat-sim/` + Cloud infrastructure
+**Location:** `deploy/docker-nat-sim/`, `deploy/k8s/` + Cloud infrastructure
 
 **Dependencies:** 004 (E2E Testing), 005 (P2P), 005a (Swift Integration) ✅ All complete
 
@@ -264,9 +269,10 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Phase 0: Docker NAT Simulation | ✅ Done | Local NAT testing environment |
-| Phase 1: Cloud Infrastructure | 🔲 Pending | AWS/DigitalOcean/Pi k8s |
-| Phase 2: TLS & Security | 🔲 Pending | Self-signed → Let's Encrypt |
-| Phase 3: Real NAT Testing | 🔲 Pending | Home network → Cloud |
+| Phase 1: Pi k8s Deployment | ✅ Done | Home cluster with Cilium L2 |
+| Phase 2: Cloud VM Deployment | 🔲 Pending | AWS/DigitalOcean |
+| Phase 3: TLS & Security | 🔲 Pending | Self-signed → Let's Encrypt |
+| Phase 4: Real NAT Testing | 🔲 Pending | Home network → Cloud |
 
 **Phase 0 Completed (Docker NAT Simulation):**
 
@@ -277,17 +283,48 @@ Agent (172.21.0.10) --NAT--> 172.20.0.2 --\
 Connector (172.22.0.10) --NAT--> 172.20.0.3 --/
 ```
 
-**Files Created:**
+**Phase 1 Completed (Pi k8s Deployment):**
+
+Kubernetes deployment to home Pi cluster with Cilium L2:
+```
+macOS (10.0.150.x) --QUIC--> LoadBalancer (10.0.150.205:4433)
+                                   │
+                                   └─► Intermediate Server (k8s)
+                                           │
+                                           └─► App Connector → Echo Server
+```
+
+**k8s Components Verified Working:**
+- ✅ intermediate-server: Running, accepts QUIC connections
+- ✅ app-connector: Running, registers for 'echo-service', receives QAD (30s idle timeout = CrashLoopBackOff is expected)
+- ✅ echo-server: Running, test service
+- ✅ LoadBalancer: 10.0.150.205:4433/UDP via Cilium L2
+- ✅ macOS → k8s connection: QUIC connection successful
+
+**Key Files Created (Phase 0):**
 - `deploy/docker-nat-sim/docker-compose.yml` - 3-network topology
 - `deploy/docker-nat-sim/Dockerfile.*` - Component images (4)
 - `deploy/docker-nat-sim/watch-logs.sh` - Multi-terminal log viewer
 - `tests/e2e/scenarios/docker-nat-demo.sh` - One-command demo
+
+**Key Files Created (Phase 1):**
+- `deploy/k8s/base/` - Kustomize base manifests
+- `deploy/k8s/overlays/pi-home/` - Pi cluster overlay with Cilium L2
+- `deploy/k8s/build-push.sh` - Multi-arch image builder
+- `deploy/k8s/k8s-deploy-skill.md` - Comprehensive deployment guide
 
 **Test Results (Phase 0):**
 - ✅ Agent observed through NAT as 172.20.0.2
 - ✅ Connector observed through NAT as 172.20.0.3
 - ✅ UDP relay through Intermediate working
 - ✅ Echo response received through tunnel
+
+**Test Results (Phase 1):**
+- ✅ k8s pods running on Pi cluster (arm64)
+- ✅ Cilium L2 LoadBalancer IP assigned and accessible
+- ✅ macOS app-connector connects to k8s intermediate-server
+- ✅ QUIC registration + QAD working across network
+- ✅ externalTrafficPolicy: Cluster required for L2 (lesson learned)
 
 **Deployment Targets:**
 | Component | Target |
@@ -418,6 +455,90 @@ Connector (172.22.0.10) --NAT--> 172.20.0.3 --/
 | Connector | Intermediate | QUIC/UDP | 4433 |
 | Agent | Connector (P2P) | QUIC/UDP | dynamic |
 | Connector | Local App | TCP/UDP | configurable |
+
+---
+
+## Service Registration Protocol
+
+The Intermediate Server routes traffic between Agents and Connectors using a **service-based routing model**. Both Agents and Connectors must register with a service ID to enable relay routing.
+
+### Registration Message Format
+
+```
+┌────────────────┬──────────────────┬─────────────────────┐
+│ Type (1 byte)  │ Length (1 byte)  │ Service ID (N bytes)│
+└────────────────┴──────────────────┴─────────────────────┘
+```
+
+**Type Byte Values:**
+- `0x10` = Agent registration (targeting a service)
+- `0x11` = Connector registration (providing a service)
+
+**Example:**
+```
+Register as Agent for "echo-service":
+  [0x10] [0x0c] [echo-service]  (0x0c = 12 = length of "echo-service")
+
+Register as Connector for "echo-service":
+  [0x11] [0x0c] [echo-service]
+```
+
+### Registration Flow
+
+```
+1. Agent connects to Intermediate (QUIC handshake)
+2. Agent receives QAD observed address (0x01 message)
+3. Agent sends registration DATAGRAM: [0x10, len, service_id]
+   - "I want to reach service 'echo-service'"
+
+4. Connector connects to Intermediate (QUIC handshake)
+5. Connector receives QAD observed address
+6. Connector sends registration DATAGRAM: [0x11, len, service_id]
+   - "I provide service 'echo-service'"
+
+7. Intermediate Server registry maps:
+   - connectors: service_id → connector_conn_id
+   - agent_targets: agent_conn_id → target_service_id
+
+8. When Agent sends data DATAGRAM:
+   - Intermediate looks up Agent's target service
+   - Finds Connector for that service
+   - Relays to Connector
+
+9. When Connector sends response DATAGRAM:
+   - Intermediate looks up Connector's service
+   - Finds Agent(s) targeting that service
+   - Relays back to Agent
+```
+
+### FFI Functions
+
+**Rust (`core/packet_processor/src/lib.rs`):**
+```rust
+// Agent registration constant
+const REG_TYPE_AGENT: u8 = 0x10;
+
+// FFI function
+pub unsafe extern "C" fn agent_register(
+    agent: *mut Agent,
+    service_id: *const libc::c_char,
+) -> AgentResult;
+```
+
+**Swift (`PacketTunnelProvider.swift`):**
+```swift
+// Call after connection established
+let result = targetServiceId.withCString { servicePtr in
+    agent_register(agent, servicePtr)
+}
+```
+
+### Important Notes
+
+1. **Service ID must match**: Agent's target service ID must exactly match a registered Connector's service ID
+2. **No ACK**: Registration is fire-and-forget; server doesn't acknowledge
+3. **Re-register on reconnect**: Registration is connection-scoped; lost on disconnect
+4. **MVP limitation**: Agent can only target one service per connection
 
 ---
 

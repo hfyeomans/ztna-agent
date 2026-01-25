@@ -1,11 +1,294 @@
 # ZTNA Testing & Demo Guide
 
 **Last Updated:** 2026-01-25
-**Status:** Task 006 Phase 0 Complete - Docker NAT Simulation Working
+**Status:** Task 006 Phase 1 Complete - Pi k8s Deployment Working
 
 ---
 
-## Docker NAT Simulation Demo (Task 006) - NEW
+## Pi k8s Cluster Demo (Task 006 Phase 1) - NEW
+
+This section demonstrates ZTNA deployed to a **real Kubernetes cluster** with Cilium L2 LoadBalancer.
+
+### Network Topology
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Pi k8s Cluster Deployment                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────┐                ┌─────────────────────────────────────────┐ │
+│  │   macOS     │                │           Pi k8s Cluster                 │ │
+│  │  (Home LAN) │                │           (10.0.150.101-108)            │ │
+│  │             │                │                                          │ │
+│  │  App or     │◄──── QUIC ────►│  ┌─────────────────────────────────────┐ │ │
+│  │  Test CLI   │   UDP:4433     │  │    Intermediate Server              │ │ │
+│  │             │                │  │    LoadBalancer: 10.0.150.205:4433  │ │ │
+│  └─────────────┘                │  │    (Cilium L2 announcement)         │ │ │
+│                                  │  └─────────────────────────────────────┘ │ │
+│                                  │                    │                      │ │
+│                                  │                    │ ClusterIP            │ │
+│                                  │                    ▼                      │ │
+│                                  │  ┌─────────────────────────────────────┐ │ │
+│                                  │  │    App Connector                    │ │ │
+│                                  │  │    Registers for 'echo-service'     │ │ │
+│                                  │  └───────────────┬─────────────────────┘ │ │
+│                                  │                   │ ClusterIP             │ │
+│                                  │                   ▼                       │ │
+│                                  │  ┌─────────────────────────────────────┐ │ │
+│                                  │  │    Echo Server (test service)       │ │ │
+│                                  │  │    UDP :9999                        │ │ │
+│                                  │  └─────────────────────────────────────┘ │ │
+│                                  └──────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Prerequisites
+
+- Pi k8s cluster with Cilium (kubectl context: `k8s1`)
+- Docker Hub images pushed (public repos)
+- TLS secrets created in cluster
+
+### Quick Start
+
+```bash
+# 1. Verify cluster access
+kubectl --context k8s1 get nodes
+
+# 2. Apply Cilium L2 configuration (cluster-scoped)
+kubectl apply -f deploy/k8s/overlays/pi-home/cilium-l2.yaml
+
+# 3. Deploy ZTNA components
+kubectl apply -k deploy/k8s/overlays/pi-home
+
+# 4. Check status
+kubectl --context k8s1 get pods -n ztna
+kubectl --context k8s1 get svc -n ztna
+```
+
+### Test Connection from macOS
+
+```bash
+# Build local app-connector
+(cd app-connector && cargo build --release)
+
+# Connect to k8s intermediate-server
+./app-connector/target/release/app-connector \
+  --server 10.0.150.205:4433 \
+  --service test-from-mac \
+  --insecure
+```
+
+**Expected output:**
+```
+[INFO] ZTNA App Connector starting...
+[INFO]   Server:  10.0.150.205:4433
+[INFO]   Service: test-from-mac
+[INFO] Connecting to Intermediate at 10.0.150.205:4433
+[INFO] Registered as Connector for service 'test-from-mac'
+[INFO] QAD: Observed address is 10.0.0.22:XXXXX
+```
+
+### Multi-Terminal Live Monitoring
+
+**Terminal 1 - Intermediate Server Logs:**
+```bash
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
+```
+*Watch for: "New connection", "Registration", "Sent QAD"*
+
+**Terminal 2 - App Connector Logs:**
+```bash
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=app-connector -f
+```
+*Watch for: "Registered as Connector", "QAD: Observed address is"*
+
+**Terminal 3 - Pod Status:**
+```bash
+watch -n2 'kubectl --context k8s1 get pods -n ztna -o wide'
+```
+*Watch for: Running status, restart counts*
+
+**Terminal 4 - Run Test:**
+```bash
+./app-connector/target/release/app-connector \
+  --server 10.0.150.205:4433 \
+  --service test-external \
+  --insecure
+```
+
+### Quick Copy Commands
+
+```bash
+# Check LoadBalancer IP
+kubectl --context k8s1 get svc -n ztna intermediate-server
+
+# Check Cilium L2 lease holder
+kubectl --context k8s1 get leases -n kube-system | grep l2announce
+
+# Check all ZTNA pods
+kubectl --context k8s1 get pods -n ztna -o wide
+
+# Intermediate server logs
+kubectl --context k8s1 logs -n ztna deployment/intermediate-server --tail=50
+
+# App connector logs (may restart due to 30s idle timeout)
+kubectl --context k8s1 logs -n ztna deployment/app-connector --tail=50
+
+# Test UDP connectivity from Mac
+nc -u -v -z 10.0.150.205 4433
+```
+
+### Troubleshooting
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| "Destination Host Unreachable" | `externalTrafficPolicy: Local` with L2 lease on different node | Change to `Cluster` policy |
+| App Connector CrashLoopBackOff | Normal - 30s idle timeout | Expected behavior, will restart |
+| LoadBalancer `<pending>` | Cilium L2 not enabled | Run helm upgrade to enable L2 |
+| ErrImagePull | Docker Hub repos private | Make repos public on hub.docker.com |
+
+### Expected App Connector Behavior
+
+The app-connector in k8s registers for 'echo-service' and has **expected CrashLoopBackOff**:
+
+1. Connects to intermediate-server ✅
+2. Registers as Connector for 'echo-service' ✅
+3. Receives QAD observed address ✅
+4. Waits for traffic... (idle)
+5. **30 second idle timeout** - QUIC connection closes
+6. Process exits, Kubernetes restarts
+7. Repeat from step 1
+
+This is **working as designed** - the connector stays registered while there's activity.
+
+### Files Reference
+
+| File | Purpose |
+|------|---------|
+| `deploy/k8s/k8s-deploy-skill.md` | Comprehensive deployment skill guide |
+| `deploy/k8s/base/` | Kustomize base manifests |
+| `deploy/k8s/overlays/pi-home/` | Pi cluster overlay |
+| `deploy/k8s/build-push.sh` | Multi-arch image builder |
+
+---
+
+## macOS ZtnaAgent E2E Test (Task 006 Phase 1.1) - NEW
+
+This section demonstrates the **full E2E tunnel path** from macOS VPN app through k8s intermediate-server.
+
+### Network Flow
+
+```
+┌─────────────────┐          ┌───────────────────┐          ┌─────────────────┐
+│  macOS ZtnaAgent│          │  Pi k8s Cluster   │          │  Echo Service   │
+│  (VPN Tunnel)   │          │                   │          │                 │
+│                 │   QUIC   │  Intermediate     │   QUIC   │  App Connector  │
+│  100.64.0.1 ────┼────────►│  Server           │◄─────────┤  (echo-service) │
+│  utun6          │  UDP:4433│  10.0.150.205     │          │                 │
+│                 │          │       │           │          │  ▼              │
+└─────────────────┘          │       │ DATAGRAM  │          │  Echo Server    │
+       │                     │       ▼ Relay     │          │  UDP :9999      │
+       │ IP Packets          └───────────────────┘          └─────────────────┘
+       ▼ (1.1.1.1/32 routed)
+```
+
+### Prerequisites
+
+1. **Build macOS app with k8s IP:**
+   ```bash
+   # Verify PacketTunnelProvider.swift has k8s IP
+   grep "serverHost" ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift
+   # Should show: private let serverHost = "10.0.150.205"
+
+   # Build the app
+   xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
+       -scheme ZtnaAgent -configuration Debug \
+       -derivedDataPath /tmp/ZtnaAgent-build build
+   ```
+
+2. **K8s components running:**
+   ```bash
+   kubectl --context k8s1 get pods -n ztna
+   # intermediate-server: Running
+   # app-connector: Running (or CrashLoopBackOff - expected)
+   # echo-server: Running
+   ```
+
+### Run the E2E Test
+
+**Terminal 1 - K8s Intermediate Server Logs:**
+```bash
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
+```
+
+**Terminal 2 - Launch macOS App:**
+```bash
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app --args --auto-start
+```
+
+**Terminal 3 - macOS System Logs:**
+```bash
+log stream --predicate 'subsystem CONTAINS "ztna"' --info
+```
+
+### Expected Results
+
+1. **macOS VPN connects:**
+   - System Settings → VPN shows "ZTNA Agent" as "Connected"
+   - `ifconfig utun6` shows tunnel with 100.64.0.1
+
+2. **K8s logs show connection:**
+   ```
+   [INFO] New connection from 10.0.0.22:XXXXX (scid=...)
+   [INFO] Sent QAD to ... (observed: 10.0.0.22:XXXXX)
+   ```
+   Note: Source IP is SNAT'd to k8s node IP (externalTrafficPolicy: Cluster)
+
+3. **Traffic tunneled successfully:**
+   ```bash
+   # Send traffic through tunnel
+   ping -c 1 1.1.1.1
+
+   # K8s logs should show:
+   # [INFO] Received 84 bytes to relay from ...
+   # [WARN] No destination for relay from ...
+   ```
+   The "No destination" warning is expected - MVP routes by service ID, not by destination IP.
+
+### Verify VPN Status
+
+```bash
+# Check VPN interface
+ifconfig utun6
+
+# Check routes
+netstat -rn | grep utun6
+
+# Check UDP connection to k8s
+netstat -an | grep "10.0.150.205.4433"
+
+# Check Extension process
+pgrep -fl Extension | grep tmp
+```
+
+### Troubleshooting
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| VPN shows "Disconnected" | Extension not running | Click Start in app |
+| No k8s connection logs | Wrong server IP in Extension | Rebuild with correct IP, clean DerivedData |
+| Extension from wrong path | macOS caches old Extension | `rm -rf ~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*` |
+| 30s connection timeout | No traffic to keep alive | Expected - QUIC idle timeout |
+
+### Current Limitations (MVP)
+
+1. **Service-based routing only:** Packets to 1.1.1.1 don't route to echo-service
+2. **No keepalive:** QUIC connection times out after 30s idle
+3. **SNAT hides real IP:** QAD returns k8s node IP, not macOS real IP (due to externalTrafficPolicy: Cluster)
+
+---
+
+## Docker NAT Simulation Demo (Task 006 Phase 0)
 
 This section demonstrates the ZTNA relay through **simulated NAT environments** using Docker.
 

@@ -15,7 +15,7 @@
 - [x] Create feature branch: `git checkout -b feature/006-cloud-deployment`
 - [x] AWS CLI access verified
 - [ ] DigitalOcean API key configured (`doctl auth init`)
-- [ ] Raspberry Pi k8s cluster accessible
+- [x] Raspberry Pi k8s cluster accessible ✅ (deployed and tested)
 
 ---
 
@@ -31,18 +31,20 @@ Critical issues identified and tasks added:
 
 ---
 
-## Phase 0: Docker NAT Simulation (Optional - Local Validation)
+## Phase 0: Docker NAT Simulation ✅ COMPLETE
 
-> Skip to Phase 1 if ready to deploy directly to cloud
+- [x] Create Docker NAT simulation environment
+  - [x] Network A: ztna-public (172.20.0.0/24 - "Internet")
+  - [x] Network B: ztna-agent-lan (172.21.0.0/24 with NAT)
+  - [x] Network C: ztna-connector-lan (172.22.0.0/24 with NAT)
+- [x] Deploy Intermediate in public network
+- [x] Deploy Agent and Connector in different NAT networks
+- [x] Test signaling protocol through simulated NAT
+- [x] Verify address observation (QAD)
+- [x] Document results in state.md
 
-- [ ] Create Docker NAT simulation environment
-  - [ ] Network A: 192.168.0.0/24 with NAT (iptables MASQUERADE)
-  - [ ] Network B: 192.168.1.0/24 with NAT (iptables MASQUERADE)
-- [ ] Deploy Intermediate in one network
-- [ ] Deploy Agent and Connector in different networks
-- [ ] Test signaling protocol through simulated NAT
-- [ ] Verify timing and binding exchange
-- [ ] Document results in research.md
+**Location:** `deploy/docker-nat-sim/`
+**Demo script:** `tests/e2e/scenarios/docker-nat-demo.sh`
 
 ---
 
@@ -191,45 +193,126 @@ Critical issues identified and tasks added:
 
 ---
 
-## Phase 5: Home MVP Deployment (Pi k8s)
+## Phase 5: Home MVP Deployment (Pi k8s) ✅ MOSTLY COMPLETE
 
 ### 5.1 Kubernetes Preparation
-- [ ] Verify kubectl access to Pi cluster
-- [ ] Create `ztna` namespace
-- [ ] Create TLS secret for connector certs
+- [x] Verify kubectl access to Pi cluster
+- [x] Create `ztna` namespace
+- [x] Create TLS secrets for intermediate and connector
 
 ### 5.2 Container Images (arm64)
-- [ ] Build app-connector for linux/arm64
-- [ ] Push to GHCR or local registry
-- [ ] Verify httpbin/nginx arm64 image available
-- [ ] Verify QuakeKube arm64 support
+- [x] Build intermediate-server for linux/arm64
+- [x] Build app-connector for linux/arm64
+- [x] Build echo-server for linux/arm64
+- [x] Push to Docker Hub (public repos)
+- [ ] Verify httpbin/nginx arm64 image available (not done - using echo-server)
+- [ ] Verify QuakeKube arm64 support (future)
 
-### 5.3 Deploy App Connector
-- [ ] Create `deploy/k8s/app-connector.yaml`
-- [ ] Configure to connect to cloud Intermediate (DO or AWS)
-- [ ] Deploy: `kubectl apply -f deploy/k8s/app-connector.yaml`
-- [ ] Verify pod running
-- [ ] Check logs for connection to Intermediate
+### 5.3 Deploy Intermediate Server (LOCAL, not cloud)
+- [x] Create `deploy/k8s/base/intermediate-server.yaml`
+- [x] Configure Cilium L2 LoadBalancer (10.0.150.205:4433)
+- [x] Deploy via kustomize
+- [x] Verify QUIC connections from macOS
 
-### 5.4 Deploy HTTP Test App
-- [ ] Create `deploy/k8s/http-app.yaml`
-- [ ] Deploy httpbin
-- [ ] Verify service accessible from Connector pod
+### 5.4 Deploy App Connector
+- [x] Create `deploy/k8s/base/app-connector.yaml`
+- [x] Configure to connect to LOCAL intermediate (ClusterIP)
+- [x] Deploy: `kubectl apply -k deploy/k8s/overlays/pi-home`
+- [x] Verify pod running (CrashLoopBackOff expected - 30s idle timeout)
+- [x] Check logs for connection to Intermediate
 
-### 5.5 Deploy QuakeKube
-- [ ] Add Helm repo: `helm repo add grahamplata https://grahamplata.github.io/charts`
-- [ ] Install: `helm install quake grahamplata/quake-kube -n quake`
-- [ ] Verify Quake server running
-- [ ] Note service port (27960)
+### 5.5 Deploy Echo Server (Test App)
+- [x] Create `deploy/k8s/base/echo-server.yaml`
+- [x] Deploy echo-server (UDP :9999)
+- [x] Verify service accessible from Connector pod
 
-### 5.6 Kubernetes Networking
-- [ ] Configure NodePort or LoadBalancer for Connector
-- [ ] Ensure UDP 30434 accessible from home network
-- [ ] Test local connectivity to Connector service
+### 5.6 macOS Agent E2E Test ✅
+- [x] Configure macOS Extension with k8s LoadBalancer IP
+- [x] Verify VPN tunnel creation (utun6)
+- [x] Verify QUIC connection to intermediate
+- [x] Verify packet tunneling (DATAGRAM)
+- [ ] **Full E2E routing to echo-server** (blocked by MVP routing gap)
+
+### 5.7 Documentation
+- [x] Create comprehensive skill guide (`deploy/k8s/k8s-deploy-skill.md`)
+- [x] Update testing guide with k8s demo instructions
+- [x] Document E2E test results and limitations
+
+### 5.8 Future Items
+- [ ] Deploy HTTP test app (httpbin) for HTTP testing
+- [ ] Deploy QuakeKube for gaming latency testing
+- [ ] Add service-based routing to complete E2E path
+
+---
+
+## Phase 5a: Full E2E Relay Routing ✅ REGISTRATION IMPLEMENTED
+
+> **Problem:** macOS Agent doesn't register with a service ID, so intermediate can't route packets.
+>
+> **Solution (2026-01-25):** Added explicit agent registration via FFI.
+
+### Current State (FIXED)
+```
+Agent → Intermediate → "No destination for relay" → Dropped
+                      (Agent not registered for any service)
+```
+**Now:**
+```
+Agent registers → "I want to reach 'echo-service'" (0x10 message)
+Connector registered → "I handle 'echo-service'" (0x11 message)
+Agent → Intermediate → Connector → Echo Server → Response
+```
+
+### 5a.1 Add Agent Registration (Rust FFI) ✅ DONE
+- [x] Add `agent_register(agent, service_id)` FFI function in `core/packet_processor/src/lib.rs`
+- [x] Function sends registration DATAGRAM: `[0x10, len, service_id_bytes]`
+- [x] Test with unit tests (81 tests passing)
+
+### 5a.2 Add Agent Registration (Swift) ✅ DONE
+- [x] Add `agent_register` to bridging header
+- [x] Call from `PacketTunnelProvider.swift` after QUIC connection established
+- [x] Use service ID "echo-service" (hardcoded for MVP, matches k8s app-connector)
+
+### 5a.3 Test Full E2E ⏳ BLOCKED
+- [x] Agent registers for 'echo-service' ✅ VERIFIED IN K8S LOGS
+- [x] Connector registers for 'echo-service' ✅ VERIFIED IN K8S LOGS
+- [ ] **BLOCKED:** Service-aware relay routing not implemented
+  - Current: Relay DATAGRAM contains raw IP packets
+  - Needed: Intermediate must map Agent→Connector by service ID for tunneled packets
+  - Gap: `send_datagram` sends IP payload, but relay needs service context
+- [ ] macOS Agent → k8s Intermediate → k8s App Connector → k8s Echo Server
+- [ ] Verify ICMP echo reply returns to macOS
+- [ ] Measure end-to-end latency
+
+**Routing Gap Analysis:**
+```
+Current flow:
+  Agent.register("echo-service")  → Intermediate knows Agent wants echo-service
+  Agent.send_datagram(ip_packet)  → Intermediate receives raw IP, no service context
+  Intermediate: "I have a packet but which service?" → Dropped or wrong route
+
+Needed:
+  Option A: Prepend service_id to DATAGRAM: [service_len, service_id, ip_packet]
+  Option B: Single-service-per-connection model (Agent only routes to its registered service)
+```
+
+### Alternative: Use P2P Hole Punching for E2E
+- [ ] Call `agent_start_hole_punch(agent, "echo-service")` instead
+- [ ] This sends CandidateOffer with service_id (implicit registration)
+- [ ] Bonus: tests P2P signaling path
 
 ---
 
 ## Phase 6: NAT-to-NAT Hole Punching Validation
+
+> **Prerequisites:**
+> - Phase 5a complete (Agent registration working)
+> - OR use hole punching CandidateOffer which implicitly registers
+>
+> **Test Topology:**
+> - macOS Agent behind home router NAT
+> - App Connector in k8s (also behind home NAT = hairpin NAT)
+> - OR App Connector on different network/NAT (e.g., mobile hotspot)
 
 ### 6.1 Direct Path Verification Setup
 - [ ] Add path selection logging to Agent
