@@ -1,0 +1,63 @@
+# Dockerfile for ZTNA Intermediate Server
+# Multi-stage build for optimized image size
+
+# =============================================================================
+# Build Stage
+# =============================================================================
+FROM rust:1.83-slim-bookworm AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    cmake \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy intermediate server source (no workspace, standalone crate)
+COPY intermediate-server ./intermediate-server
+
+# Build the intermediate server in release mode
+WORKDIR /build/intermediate-server
+RUN cargo build --release
+
+# =============================================================================
+# Runtime Stage
+# =============================================================================
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN useradd -r -s /bin/false ztna
+
+# Copy binary from builder
+COPY --from=builder /build/intermediate-server/target/release/intermediate-server /usr/local/bin/
+
+# Create certs directory
+RUN mkdir -p /etc/ztna/certs && chown ztna:ztna /etc/ztna/certs
+
+# Default port
+EXPOSE 4433/udp
+
+# Switch to non-root user
+USER ztna
+
+# Default environment variables
+ENV RUST_LOG=info
+ENV ZTNA_PORT=4433
+ENV ZTNA_CERT=/etc/ztna/certs/cert.pem
+ENV ZTNA_KEY=/etc/ztna/certs/key.pem
+
+# Health check - intermediate server logs to stderr
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD test -f /proc/1/cmdline || exit 1
+
+ENTRYPOINT ["/usr/local/bin/intermediate-server"]
+CMD ["4433", "/etc/ztna/certs/cert.pem", "/etc/ztna/certs/key.pem"]

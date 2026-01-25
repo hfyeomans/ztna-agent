@@ -1,0 +1,48 @@
+# Dockerfile for UDP Echo Server
+# Multi-stage build for optimized image size
+
+# =============================================================================
+# Build Stage
+# =============================================================================
+FROM rust:1.83-slim-bookworm AS builder
+
+WORKDIR /build
+
+# Copy echo server source (no workspace, standalone crate)
+COPY tests/e2e/fixtures/echo-server ./echo-server
+
+# Build the echo server in release mode
+WORKDIR /build/echo-server
+RUN cargo build --release
+
+# =============================================================================
+# Runtime Stage
+# =============================================================================
+FROM debian:bookworm-slim
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN useradd -r -s /bin/false ztna
+
+# Copy binary from builder
+COPY --from=builder /build/echo-server/target/release/udp-echo /usr/local/bin/
+
+# Default port
+EXPOSE 9999/udp
+
+# Switch to non-root user
+USER ztna
+
+# Default environment variables
+ENV ECHO_PORT=9999
+
+# Health check - echo server should be listening
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD test -f /proc/1/cmdline || exit 1
+
+ENTRYPOINT ["/usr/local/bin/udp-echo"]
+CMD ["--port", "9999"]

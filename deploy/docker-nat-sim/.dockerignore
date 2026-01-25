@@ -1,0 +1,48 @@
+# Docker build context optimization
+# Exclude files not needed for building ZTNA components
+
+# Git
+.git
+.gitignore
+
+# IDE and editor files
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Build artifacts (will be rebuilt in container)
+target/
+*/target/
+
+# Documentation
+*.md
+!README.md
+docs/
+tasks/
+
+# Test artifacts (except fixtures we need)
+tests/e2e/artifacts/
+tests/e2e/scenarios/
+tests/e2e/config/
+tests/e2e/lib/
+
+# Development files
+.env
+.env.*
+*.log
+
+# macOS files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Deployment files (we're already in deploy/)
+deploy/
+
+# Claude AI files
+.claude/
+CLAUDE.md
+AGENTS.md
+oracle-review*.md

@@ -21,12 +21,13 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 
 ---
 
-## Current Phase: Phase 1 - Infrastructure Selection
+## Current Phase: Phase 1 - Cloud Infrastructure Setup
 
 ### Prerequisites
 - [x] Task 004 complete (E2E Relay Testing - local validation) ✅
 - [x] Task 005 complete (P2P Hole Punching - protocol implementation) ✅
 - [x] Task 005a complete (Swift Agent Integration) ✅
+- [x] Phase 0: Docker NAT simulation validated ✅
 - [ ] Cloud provider account (Vultr or DigitalOcean recommended)
 - [ ] Domain name (optional, for TLS certificates)
 
@@ -39,13 +40,18 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 - Feature branch created: `feature/006-cloud-deployment`
 - Research updated with NAT testing requirements
 - Cloud provider analysis completed (Vultr/DigitalOcean recommended)
+- **P2P fixed port (4434) implemented in app-connector** ✅
+- **Phase 0: Docker NAT Simulation completed** ✅
+  - Created `deploy/docker-nat-sim/` environment
+  - NAT gateway containers with iptables MASQUERADE
+  - End-to-end relay test successful
+  - Agent observed at 172.20.0.2 (NATted), Connector at 172.20.0.3 (NATted)
+  - UDP tunnel echo working through relay
 
 ### What's Next
-1. Implement P2P fixed port (4434) in app-connector
-2. Start Phase 0: Docker NAT simulation for local validation
-3. Deploy to DigitalOcean for quick cloud validation
-4. Deploy to AWS VPC for production-like environment
-5. Deploy to Home Pi k8s for true NAT-to-NAT testing
+1. Deploy to DigitalOcean for quick cloud validation
+2. Deploy to AWS VPC for production-like environment
+3. Deploy to Home Pi k8s for true NAT-to-NAT testing
 
 ---
 
