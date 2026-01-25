@@ -1,0 +1,39 @@
+---
+# Pi Home Cluster Overlay
+# Configures ZTNA for deployment on home Pi k8s cluster with Cilium
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ztna
+
+resources:
+  - ../../base
+
+# Replace placeholder image owner with your GHCR username
+images:
+  - name: ghcr.io/OWNER/ztna-intermediate-server
+    newName: ghcr.io/hfyeomans/ztna-intermediate-server
+    newTag: latest
+  - name: ghcr.io/OWNER/ztna-app-connector
+    newName: ghcr.io/hfyeomans/ztna-app-connector
+    newTag: latest
+  - name: ghcr.io/OWNER/ztna-echo-server
+    newName: ghcr.io/hfyeomans/ztna-echo-server
+    newTag: latest
+
+# Patch intermediate-server Service with Cilium L2 IP
+# Update the IP address to match your Cilium L2 announcement pool
+patches:
+  - patch: |-
+      - op: replace
+        path: /metadata/annotations/io.cilium~1lb-ipam-ips
+        value: "10.0.150.200"
+    target:
+      kind: Service
+      name: intermediate-server
+
+labels:
+  - pairs:
+      app.kubernetes.io/instance: pi-home
+      environment: home-lab
+    includeSelectors: false

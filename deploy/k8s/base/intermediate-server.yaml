@@ -1,0 +1,90 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: intermediate-server
+  namespace: ztna
+  labels:
+    app.kubernetes.io/name: intermediate-server
+    app.kubernetes.io/component: relay
+    app.kubernetes.io/part-of: ztna-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: intermediate-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: intermediate-server
+        app.kubernetes.io/component: relay
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: intermediate-server
+          image: ghcr.io/OWNER/ztna-intermediate-server:latest
+          imagePullPolicy: Always
+          args:
+            - "4433"
+            - "/etc/ztna/certs/tls.crt"
+            - "/etc/ztna/certs/tls.key"
+          ports:
+            - name: quic
+              containerPort: 4433
+              protocol: UDP
+          env:
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef:
+                  name: ztna-config
+                  key: RUST_LOG
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /etc/ztna/certs
+              readOnly: true
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /proc/1/cmdline"
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: ztna-intermediate-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: intermediate-server
+  namespace: ztna
+  labels:
+    app.kubernetes.io/name: intermediate-server
+    app.kubernetes.io/component: relay
+  annotations:
+    # Cilium L2 announcement annotations (overlay will set IP pool)
+    io.cilium/lb-ipam-ips: ""
+spec:
+  type: LoadBalancer
+  # externalTrafficPolicy: Local ensures client IP is preserved for QAD
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: intermediate-server
+  ports:
+    - name: quic
+      port: 4433
+      targetPort: 4433
+      protocol: UDP
