@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-24 (Task 006 started)
+**Last Updated:** 2026-01-25 (Task 006 Phase 0 complete)
 
 ---
 
@@ -247,7 +247,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ### 006: Cloud Deployment 🔄 IN PROGRESS
 
-**Location:** Cloud infrastructure + deployment scripts
+**Location:** `deploy/docker-nat-sim/` + Cloud infrastructure
 
 **Dependencies:** 004 (E2E Testing), 005 (P2P), 005a (Swift Integration) ✅ All complete
 
@@ -258,6 +258,36 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Enable NAT testing with real public IPs
 - Validate P2P hole punching with real NATs
 - Prepare infrastructure for production
+
+**Status:**
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 0: Docker NAT Simulation | ✅ Done | Local NAT testing environment |
+| Phase 1: Cloud Infrastructure | 🔲 Pending | AWS/DigitalOcean/Pi k8s |
+| Phase 2: TLS & Security | 🔲 Pending | Self-signed → Let's Encrypt |
+| Phase 3: Real NAT Testing | 🔲 Pending | Home network → Cloud |
+
+**Phase 0 Completed (Docker NAT Simulation):**
+
+Docker-based NAT simulation for local P2P testing:
+```
+Agent (172.21.0.10) --NAT--> 172.20.0.2 --\
+                                           +--> Intermediate (172.20.0.10)
+Connector (172.22.0.10) --NAT--> 172.20.0.3 --/
+```
+
+**Files Created:**
+- `deploy/docker-nat-sim/docker-compose.yml` - 3-network topology
+- `deploy/docker-nat-sim/Dockerfile.*` - Component images (4)
+- `deploy/docker-nat-sim/watch-logs.sh` - Multi-terminal log viewer
+- `tests/e2e/scenarios/docker-nat-demo.sh` - One-command demo
+
+**Test Results (Phase 0):**
+- ✅ Agent observed through NAT as 172.20.0.2
+- ✅ Connector observed through NAT as 172.20.0.3
+- ✅ UDP relay through Intermediate working
+- ✅ Echo response received through tunnel
 
 **Deployment Targets:**
 | Component | Target |
@@ -270,16 +300,18 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Cloud VM provisioning (**Vultr or DigitalOcean recommended**)
 - TLS certificate management (self-signed or Let's Encrypt)
 - Systemd service configuration
-- Firewall rules (UDP 4433)
+- Firewall rules (UDP 4433, 4434)
 - Remote Agent testing (from home NAT)
 
 **Key Decisions:**
 | Decision | Options | Status |
 |----------|---------|--------|
+| AWS VPC | New vs Existing | ✅ NEW VPC "ztna-test" |
+| P2P Port | Ephemeral vs Fixed | ✅ Fixed port 4434 |
 | Cloud Provider | Vultr, DigitalOcean | ✅ Decided (either) |
 | Deployment | Single VM vs Separate VMs | Single VM (MVP) |
 | Certificates | Self-signed vs Let's Encrypt | Self-signed (MVP) |
-| Automation | Manual, Terraform, Ansible | Manual (MVP) |
+| Home k8s | Pi cluster | ✅ 10.0.150.101-108 available |
 
 **⚠️ Critical Testing Insight:**
 > Cloud VMs have **direct public IPs** - they are NOT behind NAT.

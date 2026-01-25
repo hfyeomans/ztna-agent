@@ -205,6 +205,25 @@ tests/e2e/scenarios/reliability-tests.sh     # 11 tests
 tests/e2e/scenarios/performance-metrics.sh   # 6 tests
 ```
 
+### Run Docker NAT Simulation Demo
+
+```bash
+# Full demo (builds Docker images + runs NAT simulation test)
+tests/e2e/scenarios/docker-nat-demo.sh
+
+# Skip builds if images already exist
+tests/e2e/scenarios/docker-nat-demo.sh --no-build
+
+# Cleanup Docker resources
+tests/e2e/scenarios/docker-nat-demo.sh --clean
+
+# Multi-terminal log watching (open 4 terminals)
+deploy/docker-nat-sim/watch-logs.sh intermediate  # Terminal 1
+deploy/docker-nat-sim/watch-logs.sh connector     # Terminal 2
+deploy/docker-nat-sim/watch-logs.sh traffic       # Terminal 3
+# Terminal 4: Run the demo script
+```
+
 ### View Logs
 
 ```bash
