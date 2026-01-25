@@ -1,11 +1,168 @@
 # ZTNA Testing & Demo Guide
 
-**Last Updated:** 2026-01-23
-**Status:** Task 005a MVP Complete - macOS Agent Integration Working
+**Last Updated:** 2026-01-25
+**Status:** Task 006 Phase 0 Complete - Docker NAT Simulation Working
 
 ---
 
-## macOS Agent Demo (Task 005a) - NEW
+## Docker NAT Simulation Demo (Task 006) - NEW
+
+This section demonstrates the ZTNA relay through **simulated NAT environments** using Docker.
+
+### Network Topology
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Docker Host                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ztna-public (172.20.0.0/24) - "Internet" (no NAT)              │
+│  └─ intermediate-server (172.20.0.10:4433)                      │
+│  └─ nat-agent (172.20.0.2) - Agent's public interface           │
+│  └─ nat-connector (172.20.0.3) - Connector's public interface   │
+│                                                                  │
+│  ztna-agent-lan (172.21.0.0/24) - Agent's private network       │
+│  └─ quic-client (172.21.0.10) - behind NAT                      │
+│  └─ nat-agent (172.21.0.2) - NAT gateway                        │
+│                                                                  │
+│  ztna-connector-lan (172.22.0.0/24) - Connector's private net   │
+│  └─ app-connector (172.22.0.10) - behind NAT                    │
+│  └─ echo-server (172.22.0.20:9999) - local service              │
+│  └─ nat-connector (172.22.0.2) - NAT gateway                    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Quick Start (One Command)
+
+```bash
+# Build everything and run full demo
+tests/e2e/scenarios/docker-nat-demo.sh
+
+# Or skip builds if images exist
+tests/e2e/scenarios/docker-nat-demo.sh --no-build
+```
+
+### Demo Script Options
+
+```bash
+tests/e2e/scenarios/docker-nat-demo.sh [OPTIONS]
+
+Options:
+  --no-build    Skip Docker image builds (use existing images)
+  --clean       Clean up containers and networks only
+  --status      Show current container status
+  --logs        Show container logs after demo
+  --help        Show help
+```
+
+### What the Demo Tests
+
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| NAT simulation | Agent/Connector behind separate NATs | Both NATted to public IPs |
+| Agent NAT | 172.21.0.10 → 172.20.0.2 | Correct NATted address |
+| Connector NAT | 172.22.0.10 → 172.20.0.3 | Correct NATted address |
+| UDP relay | Send "Hello from NAT!" through tunnel | Echo response received |
+| End-to-end | Agent → NAT → Intermediate → NAT → Echo | Complete round-trip |
+
+### Expected Output
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║          ZTNA Docker NAT Simulation Demo                     ║
+╠══════════════════════════════════════════════════════════════╣
+║  Agent (172.21.0.10)    --NAT-->  172.20.0.2                ║
+║  Connector (172.22.0.10) --NAT-->  172.20.0.3               ║
+║  Intermediate Server             @ 172.20.0.10:4433         ║
+║  Echo Server                     @ 172.22.0.20:9999         ║
+╚══════════════════════════════════════════════════════════════╝
+
+==> Building Docker images...
+[SUCCESS] All images built
+
+==> Starting NAT simulation infrastructure...
+[SUCCESS] Infrastructure started
+
+==> Running NAT simulation test...
+[INFO] Connection established!
+[INFO] Registering as Agent for service: test-service
+[INFO] Received DATAGRAM: 43 bytes
+[SUCCESS] Echo response received through NAT tunnel!
+
+╔══════════════════════════════════════════════════════════════╗
+║                    Demo Summary                               ║
+╠══════════════════════════════════════════════════════════════╣
+║  ✓ Agent observed through NAT as: 172.20.0.2                 ║
+║  ✓ Connector observed through NAT as: 172.20.0.3             ║
+║  ✓ UDP relay through Intermediate Server working             ║
+║  ✓ Echo response received through tunnel                     ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+### Manual Testing
+
+**Start infrastructure only:**
+```bash
+cd deploy/docker-nat-sim
+docker compose up -d intermediate-server echo-server nat-agent nat-connector app-connector
+```
+
+**Run test client manually:**
+```bash
+docker compose --profile test run --rm quic-client
+```
+
+**View NAT statistics:**
+```bash
+# Agent NAT gateway
+docker exec ztna-nat-agent iptables -t nat -L -v
+
+# Connector NAT gateway
+docker exec ztna-nat-connector iptables -t nat -L -v
+```
+
+**Debug with netshoot containers:**
+```bash
+# Start debug containers
+docker compose --profile debug up -d debug-agent debug-connector debug-public
+
+# Test connectivity from agent LAN
+docker exec ztna-debug-agent ping 172.20.0.10
+
+# Packet capture on NAT gateway
+docker exec ztna-nat-agent tcpdump -i eth1 -n
+```
+
+**Cleanup:**
+```bash
+tests/e2e/scenarios/docker-nat-demo.sh --clean
+# Or manually:
+cd deploy/docker-nat-sim && docker compose --profile debug --profile test down -v
+```
+
+### Troubleshooting
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| "Docker daemon not running" | Docker Desktop not started | Start Docker Desktop |
+| "Address already in use" | Previous containers still running | Run `--clean` first |
+| "NAT not working" | Interface order changed | Containers detect interfaces dynamically |
+| "Connection timeout" | Route not configured | Entrypoint scripts set up routes automatically |
+| "No echo response" | Connector not registered | Check `docker logs ztna-app-connector` |
+
+### Files Reference
+
+| File | Purpose |
+|------|---------|
+| `deploy/docker-nat-sim/docker-compose.yml` | Network topology and services |
+| `deploy/docker-nat-sim/Dockerfile.*` | Container images |
+| `deploy/docker-nat-sim/entrypoint-*.sh` | Route setup scripts |
+| `tests/e2e/scenarios/docker-nat-demo.sh` | Demo runner script |
+
+---
+
+## macOS Agent Demo (Task 005a)
 
 This section demonstrates the full ZTNA stack using the **native macOS Agent app**.
 
@@ -975,6 +1132,8 @@ pkill -f udp-echo
 | Performance metrics (Phase 6) | `tests/e2e/scenarios/performance-metrics.sh` |
 | P2P hole punching (Phase 7) | `tests/e2e/scenarios/p2p-hole-punching.sh` (planned) |
 | **macOS Agent Demo (Task 005a)** | `tests/e2e/scenarios/macos-agent-demo.sh` |
+| **Docker NAT Demo (Task 006)** | `tests/e2e/scenarios/docker-nat-demo.sh` |
+| **Docker NAT Infrastructure** | `deploy/docker-nat-sim/` |
 | **Test Fixtures** | |
 | QUIC test client | `tests/e2e/fixtures/quic-client/` |
 | UDP echo server | `tests/e2e/fixtures/echo-server/` |
