@@ -100,6 +100,61 @@ Options:
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
+### Multi-Terminal Live Monitoring
+
+Open 4 terminal windows to watch traffic flow in real-time:
+
+**Terminal 1 - Intermediate Server (Relay Hub):**
+```bash
+docker logs -f ztna-intermediate
+```
+*Watch for: "New connection", "Registration", "Relayed X bytes"*
+
+**Terminal 2 - App Connector:**
+```bash
+docker logs -f ztna-app-connector
+```
+*Watch for: "Registered as Connector", "QAD: Observed address is 172.20.0.3"*
+
+**Terminal 3 - NAT Traffic Stats (Refreshing):**
+```bash
+watch -n1 'echo "=== Agent NAT ===" && docker exec ztna-nat-agent iptables -t nat -L POSTROUTING -v -n 2>/dev/null | grep -E "MASQ|pkts" && echo && echo "=== Connector NAT ===" && docker exec ztna-nat-connector iptables -t nat -L POSTROUTING -v -n 2>/dev/null | grep -E "MASQ|pkts"'
+```
+*Watch for: packet counts increasing on MASQUERADE rules*
+
+**Terminal 4 - Run Test:**
+```bash
+cd deploy/docker-nat-sim
+docker compose --profile test run --rm quic-client
+```
+
+**Alternative: Use the log watcher script:**
+```bash
+# Helper script with colored output
+deploy/docker-nat-sim/watch-logs.sh intermediate  # Terminal 1
+deploy/docker-nat-sim/watch-logs.sh connector     # Terminal 2
+deploy/docker-nat-sim/watch-logs.sh traffic       # Terminal 3
+```
+
+### Quick Copy Commands
+
+```bash
+# Watch Intermediate Server relay activity
+docker logs -f ztna-intermediate
+
+# Watch Connector registration and forwarding
+docker logs -f ztna-app-connector
+
+# Watch NAT packet counts (one-shot)
+docker exec ztna-nat-agent iptables -t nat -L POSTROUTING -v -n | grep MASQ
+
+# Packet capture on Agent NAT gateway
+docker exec ztna-nat-agent tcpdump -i eth1 -n udp port 4433
+
+# All logs combined
+docker compose -f deploy/docker-nat-sim/docker-compose.yml logs -f
+```
+
 ### Manual Testing
 
 **Start infrastructure only:**
