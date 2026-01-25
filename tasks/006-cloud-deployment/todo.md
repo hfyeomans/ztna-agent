@@ -2,226 +2,340 @@
 
 **Task ID:** 006-cloud-deployment
 **Branch:** `feature/006-cloud-deployment`
-**Depends On:** Task 004 (E2E Relay Testing), Task 005 (P2P Hole Punching)
-**Last Updated:** 2026-01-24
+**Depends On:** Task 004, Task 005, Task 005a
+**Last Updated:** 2026-01-25
 
 ---
 
 ## Prerequisites
 
-- [x] Task 004 (E2E Relay Testing) complete and merged ✅
-- [x] Task 005 (P2P Hole Punching) protocol implementation complete ✅
-- [x] Task 005a (Swift Agent Integration) complete ✅
-- [x] Create feature branch: `git checkout -b feature/006-cloud-deployment` ✅
-- [ ] Cloud provider account set up (Vultr or DigitalOcean recommended)
+- [x] Task 004 (E2E Relay Testing) complete and merged
+- [x] Task 005 (P2P Hole Punching) protocol implementation complete
+- [x] Task 005a (Swift Agent Integration) complete
+- [x] Create feature branch: `git checkout -b feature/006-cloud-deployment`
+- [x] AWS CLI access verified
+- [ ] DigitalOcean API key configured (`doctl auth init`)
+- [ ] Raspberry Pi k8s cluster accessible
 
 ---
 
-## ⚠️ Critical Testing Requirement
+## ⚠️ Oracle Review Findings (2026-01-25)
 
-> **Cloud VMs have direct public IPs - they are NOT behind NAT.**
-> To test real P2P hole punching, the **Agent must run behind a real NAT** (home network, mobile hotspot).
-> Cloud-only deployment tests relay, not hole punching.
+Critical issues identified and tasks added:
+- [x] Document NAT-to-NAT topology requirement (plan.md updated)
+- [ ] Define P2P listener ports (currently ephemeral)
+- [ ] Add direct vs relay verification methods
+- [ ] Add NAT classification tooling
+- [ ] Parameterize hard-coded configs before remote testing
+- [ ] Document TLS trust flow for self-signed certs
 
 ---
 
-## Phase 0: Optional - Docker NAT Simulation (Local Testing)
+## Phase 0: Docker NAT Simulation (Optional - Local Validation)
 
-> **Optional:** Validate protocol before incurring cloud costs
+> Skip to Phase 1 if ready to deploy directly to cloud
 
-- [ ] Set up Docker NAT simulation environment
-  - [ ] Create two Docker networks with NAT (iptables MASQUERADE)
-  - [ ] Network A: 192.168.0.0/24 (simulates home NAT)
-  - [ ] Network B: 192.168.1.0/24 (simulates different NAT)
+- [ ] Create Docker NAT simulation environment
+  - [ ] Network A: 192.168.0.0/24 with NAT (iptables MASQUERADE)
+  - [ ] Network B: 192.168.1.0/24 with NAT (iptables MASQUERADE)
+- [ ] Deploy Intermediate in one network
+- [ ] Deploy Agent and Connector in different networks
 - [ ] Test signaling protocol through simulated NAT
-- [ ] Document simulation setup in research.md
-- [ ] Verify timing and binding exchange work correctly
-
-> **Note:** Docker simulation is useful for protocol testing but does not replace real NAT testing.
+- [ ] Verify timing and binding exchange
+- [ ] Document results in research.md
 
 ---
 
-## Phase 1: Infrastructure Selection
+## Phase 1: Configuration Parameterization
 
-- [x] Evaluate cloud providers (DigitalOcean, AWS, Vultr, GCP) ✅
-- [x] Choose provider based on cost/features/regions ✅
-  - **Decision:** Vultr or DigitalOcean (cheapest, direct public IP, simple firewall)
-  - See research.md for detailed comparison
-- [ ] Create cloud account (Vultr or DigitalOcean)
-- [x] Document provider choice in research.md ✅
+> **Must complete before remote testing (Oracle finding)**
 
----
+### 1.1 Environment Configuration
+- [ ] Create `deploy/env/` directory
+- [ ] Create `cloud.env` template
+- [ ] Create `home.env` template
+- [ ] Update test scripts to source env files
 
-## Phase 2: VM Provisioning
+### 1.2 Remove Hard-Coded Values
+- [ ] Replace `127.0.0.1:4433` with `$INTERMEDIATE_HOST:$INTERMEDIATE_PORT`
+- [ ] Replace `test-service` with `$SERVICE_ID`
+- [ ] Replace cert paths with `$CERT_DIR`
+- [ ] Test locally with parameterized configs
 
-- [ ] Provision cloud VM with required specs
-  - [ ] 1 vCPU, 512MB-1GB RAM
-  - [ ] Public IPv4 address
-  - [ ] Ubuntu 22.04 or 24.04 LTS
-- [ ] Configure firewall/security group
-  - [ ] Allow UDP 4433 inbound (QUIC)
-  - [ ] Allow SSH (22) from admin IPs only
-- [ ] Set up SSH key access
-- [ ] Install required packages (Rust, build tools)
-
----
-
-## Phase 3: TLS Certificates
-
-- [ ] Generate TLS certificates
-  - [ ] Option A: Self-signed for MVP
-  - [ ] Option B: Let's Encrypt for domain (if available)
-- [ ] Place certificates on VM
+### 1.3 P2P Port Definition
+- [ ] Add `--p2p-listen-port` CLI arg to app-connector
+- [ ] Default to 4434 (or configurable)
+- [ ] Update all firewall documentation to include UDP 4434
+- [ ] Test P2P with fixed port locally
 
 ---
 
-## Phase 4: Component Deployment
+## Phase 2: DigitalOcean Deployment (Simple Relay Testing)
 
-### 4.1 Intermediate Server
-- [ ] Build release binary: `cargo build --release -p intermediate-server`
-- [ ] Copy binary to cloud VM
-- [ ] Create systemd service file
-- [ ] Create `ztna` user for service
-- [ ] Enable and start service
+### 2.1 Account Setup
+- [ ] Configure doctl CLI: `doctl auth init`
+- [ ] Verify API access: `doctl account get`
+- [ ] Note SSH key ID for droplet creation
+
+### 2.2 Infrastructure Provisioning
+- [ ] Create Droplet (Ubuntu 24.04, s-1vcpu-1gb, nyc1)
+  ```bash
+  doctl compute droplet create ztna-relay \
+    --image ubuntu-24-04-x64 \
+    --size s-1vcpu-1gb \
+    --region nyc1 \
+    --ssh-keys $SSH_KEY_ID
+  ```
+- [ ] Create firewall rules
+  - [ ] UDP 4433 inbound (Intermediate)
+  - [ ] UDP 4434 inbound (Connector P2P)
+  - [ ] TCP 22 inbound (SSH, admin IP only)
+- [ ] Note public IP address
+
+### 2.3 Component Deployment
+- [ ] SSH to droplet
+- [ ] Install Rust and build dependencies
+- [ ] Clone repository and build release binaries
+- [ ] Generate self-signed TLS certificates
+- [ ] Create `ztna` user
+- [ ] Install Intermediate Server systemd service
+- [ ] Install App Connector systemd service
+- [ ] Start services and verify
+
+### 2.4 Test Backend Deployment
+- [ ] Install httpbin or nginx as test backend
+- [ ] Verify backend accessible locally (curl localhost:8080)
+
+### 2.5 TLS Certificate Trust
+- [ ] Copy cert to local machine
+- [ ] Add to macOS Keychain (for Agent)
+- [ ] Verify trust: `security verify-cert`
+
+---
+
+## Phase 3: Basic Relay Validation (DO + Home NAT)
+
+### 3.1 Agent Configuration
+- [ ] Update Agent config to use cloud Intermediate IP
+- [ ] Configure service ID to match Connector
+- [ ] Verify cert trust on macOS
+
+### 3.2 Connectivity Tests
+- [ ] Agent connects to cloud Intermediate
+- [ ] QAD returns correct public IP (home NAT external)
+- [ ] DATAGRAM relay works end-to-end
+- [ ] HTTP backend accessible through tunnel
+- [ ] Measure relay latency (expected: 50-150ms)
+
+### 3.3 NAT Classification
+- [ ] Run `pystun3` from home network
+- [ ] Record NAT type in `nat-classification.md`
+- [ ] Run QAD multiple times, check port consistency
+- [ ] Document results
+
+---
+
+## Phase 4: AWS VPC Deployment (Production-like)
+
+### 4.1 VPC Infrastructure
+- [ ] Create VPC (10.0.0.0/16) in us-east-2
+- [ ] Create public subnet (10.0.1.0/24)
+- [ ] Create private subnet (10.0.2.0/24)
+- [ ] Create Internet Gateway
+- [ ] Create NAT Gateway
+- [ ] Configure route tables
+
+### 4.2 Security Groups
+- [ ] Create `ztna-intermediate-sg`
+  - [ ] UDP 4433 from 0.0.0.0/0
+  - [ ] TCP 22 from admin IP
+- [ ] Create `ztna-connector-sg`
+  - [ ] UDP 4434 from 0.0.0.0/0
+  - [ ] All outbound allowed
+- [ ] Create `ztna-backend-sg`
+  - [ ] TCP 8080 from connector SG
+  - [ ] TCP 27960 from connector SG (Quake)
+
+### 4.3 EC2 for Intermediate Server
+- [ ] Launch t3.micro with Ubuntu 24.04
+- [ ] Assign Elastic IP
+- [ ] Install and configure Intermediate Server
 - [ ] Verify listening on UDP 4433
-- [ ] Check logs for errors
 
-### 4.2 App Connector
-- [ ] Build release binary: `cargo build --release -p app-connector`
-- [ ] Copy binary to cloud VM
-- [ ] Create systemd service file
-- [ ] Enable and start service
-- [ ] Verify connection to Intermediate
-- [ ] Check logs for QAD response
+### 4.4 ECR Repositories
+- [ ] Create `ztna/app-connector` repository
+- [ ] Create `ztna/http-app` repository
+- [ ] Create `ztna/quakekube` repository
 
-### 4.3 Test Service
-- [ ] Deploy simple UDP echo server
-- [ ] Verify echo server is reachable from Connector
+### 4.5 Container Images
+- [ ] Build app-connector for linux/amd64
+- [ ] Push to ECR
+- [ ] Build/tag httpbin image
+- [ ] Push to ECR
 
----
+### 4.6 ECS Cluster and Services
+- [ ] Create ECS Fargate cluster
+- [ ] Create task definition for App Connector
+  - [ ] UDP port 4434
+  - [ ] TCP health check
+- [ ] Create task definition for HTTP App
+- [ ] Create NLB with UDP listeners
+- [ ] Create target groups
+- [ ] Deploy services
 
-## Phase 5: Local Validation (on cloud VM)
-
-- [ ] Verify Intermediate Server is running
-- [ ] Verify App Connector is connected
-- [ ] Test echo service locally (nc or similar)
-- [ ] Check firewall rules are correct
-
----
-
-## Phase 6: Remote Agent Testing
-
-### 6.1 Agent Configuration
-- [ ] Update Agent to connect to cloud Intermediate IP
-- [ ] Use matching self-signed cert (or skip verification for MVP)
-
-### 6.2 Basic Connectivity
-- [ ] Verify Agent connects to cloud Intermediate
-- [ ] Verify Agent receives QAD with correct public IP
-- [ ] Test DATAGRAM relay: Agent → Cloud → Connector → Echo
-
-### 6.3 NAT Testing
-- [ ] Test from home network (behind home NAT)
-- [ ] Test from mobile hotspot (carrier NAT)
-- [ ] Document observed behaviors
-
-### 6.4 Performance Testing
-- [ ] Measure round-trip latency (Agent to Echo)
-- [ ] Compare to local-only testing
-- [ ] Document network overhead
+### 4.7 AWS Validation
+- [ ] Verify Intermediate accessible from internet
+- [ ] Verify NLB routes to Fargate tasks
+- [ ] Test relay through AWS infrastructure
+- [ ] Compare latency with DigitalOcean
 
 ---
 
-## Phase 7: P2P Hole Punching Validation (From Task 005)
+## Phase 5: Home MVP Deployment (Pi k8s)
 
-> **Note:** Task 005 implements P2P protocol locally. This phase validates it works with real NATs.
+### 5.1 Kubernetes Preparation
+- [ ] Verify kubectl access to Pi cluster
+- [ ] Create `ztna` namespace
+- [ ] Create TLS secret for connector certs
 
-### 7.1 NAT Type Testing Matrix
+### 5.2 Container Images (arm64)
+- [ ] Build app-connector for linux/arm64
+- [ ] Push to GHCR or local registry
+- [ ] Verify httpbin/nginx arm64 image available
+- [ ] Verify QuakeKube arm64 support
 
-| NAT Type | Hole Punching | Priority | Test Method |
-|----------|---------------|----------|-------------|
-| Full Cone | Easy | P1 | Home router (most common) |
-| Restricted Cone | Medium | P1 | Some home routers |
-| Port Restricted | Medium | P1 | Some enterprise routers |
-| Symmetric | Hard (relay fallback) | P2 | Carrier-grade NAT, enterprise |
+### 5.3 Deploy App Connector
+- [ ] Create `deploy/k8s/app-connector.yaml`
+- [ ] Configure to connect to cloud Intermediate (DO or AWS)
+- [ ] Deploy: `kubectl apply -f deploy/k8s/app-connector.yaml`
+- [ ] Verify pod running
+- [ ] Check logs for connection to Intermediate
 
-- [ ] Test Full Cone NAT (home router)
-- [ ] Test Restricted Cone NAT
-- [ ] Test Port Restricted Cone NAT
-- [ ] Test Symmetric NAT (carrier-grade/enterprise)
-- [ ] Document success/failure rates per NAT type
+### 5.4 Deploy HTTP Test App
+- [ ] Create `deploy/k8s/http-app.yaml`
+- [ ] Deploy httpbin
+- [ ] Verify service accessible from Connector pod
 
-### 7.2 Connection Priority Validation
+### 5.5 Deploy QuakeKube
+- [ ] Add Helm repo: `helm repo add grahamplata https://grahamplata.github.io/charts`
+- [ ] Install: `helm install quake grahamplata/quake-kube -n quake`
+- [ ] Verify Quake server running
+- [ ] Note service port (27960)
 
-```
-Expected Priority Order:
-1. Direct LAN (same network) → lowest latency
-2. Direct WAN (hole punching) → moderate latency
-3. Relay (via Intermediate) → highest latency (fallback)
-```
-
-- [ ] Same network: Agent and Connector on same cloud VPC
-- [ ] Different networks: Agent behind home NAT, Connector on cloud
-- [ ] Relay fallback: Block direct path, verify relay works
-- [ ] Measure and compare latency for each path type
-
-### 7.3 Hole Punching Protocol Tests
-
-| Test | Description | Expected Result |
-|------|-------------|-----------------|
-| Address exchange | Candidates exchanged via Intermediate | Both sides receive peer candidates |
-| Simultaneous open | Both sides send UDP simultaneously | NAT mappings created, packets pass |
-| Direct QUIC connection | Agent connects directly to Connector | New QUIC connection established |
-| Path selection | Compare direct vs relay RTT | Direct path selected when faster |
-| Fallback to relay | Block direct path | Traffic continues via relay |
-
-- [ ] Verify address exchange via Intermediate works across NAT
-- [ ] Verify simultaneous UDP open creates NAT mappings
-- [ ] Verify direct QUIC connection establishes after hole punch
-- [ ] Verify path selection prefers direct when available
-- [ ] Verify fallback to relay when hole punching fails
-
-### 7.4 NAT Behavior Observation
-
-Document observed behaviors for each NAT type tested:
-
-- [ ] QAD reflexive address accuracy
-- [ ] Port mapping consistency (same port for multiple destinations?)
-- [ ] Binding timeout (how long until NAT mapping expires?)
-- [ ] Filtering behavior (IP-restricted vs port-restricted)
-
-### 7.5 Symmetric NAT Handling
-
-- [ ] Detect symmetric NAT (different reflexive port per destination)
-- [ ] Verify relay fallback when hole punching fails
-- [ ] Test port prediction (if implemented in Task 005)
-- [ ] Document success/failure rates for symmetric NAT
-
-### 7.6 QUIC Connection Migration (If Applicable)
-
-> Note: P2P uses NEW QUIC connection, not path migration. But test if relevant.
-
-- [ ] Verify direct QUIC connection data flow
-- [ ] Verify connection survives brief network interruption
-- [ ] Test graceful transition between paths
+### 5.6 Kubernetes Networking
+- [ ] Configure NodePort or LoadBalancer for Connector
+- [ ] Ensure UDP 30434 accessible from home network
+- [ ] Test local connectivity to Connector service
 
 ---
 
-## Phase 8: Documentation
+## Phase 6: NAT-to-NAT Hole Punching Validation
 
-- [ ] Document deployment steps in README
-- [ ] Create troubleshooting guide
-- [ ] Document firewall/network requirements
-- [ ] Update architecture docs
-- [ ] Document P2P validation results and NAT compatibility
+### 6.1 Direct Path Verification Setup
+- [ ] Add path selection logging to Agent
+  ```rust
+  info!("Path selected: {} (peer: {})", path_type, peer_addr);
+  ```
+- [ ] Add path selection logging to Connector
+- [ ] Rebuild and redeploy components
+
+### 6.2 Hole Punch Tests
+- [ ] Start Agent on macOS (home WiFi)
+- [ ] Start Connector on Pi k8s (home network)
+- [ ] Both connect to cloud Intermediate
+- [ ] Verify candidate exchange completes
+- [ ] Check logs for "Path selected: DIRECT"
+
+### 6.3 Direct Path Proof
+- [ ] **Log proof:** Grep logs for "DIRECT" path selection
+- [ ] **Packet capture proof:** Run tcpdump on Mac
+  ```bash
+  tcpdump -i en0 udp and not host <intermediate-ip>
+  ```
+  - Verify packets going to Connector's IP, not Intermediate
+- [ ] **Relay disable proof:**
+  - SSH to Intermediate, stop DATAGRAM relay
+  - Verify traffic continues (if truly direct)
+  - Restart relay after test
+
+### 6.4 Fallback Test
+- [ ] Block direct UDP between Agent and Connector (iptables or firewall)
+- [ ] Verify traffic switches to relay
+- [ ] Measure relay latency vs direct latency
+- [ ] Unblock and verify direct path resumes
+
+### 6.5 Hairpin NAT Test
+- [ ] Document home router model
+- [ ] If hairpin fails, document limitation
+- [ ] Test with mobile hotspot (different NAT) if available
 
 ---
 
-## Phase 9: Automation (Stretch)
+## Phase 7: Test Application Validation
 
-- [ ] Create Terraform configuration (optional)
-- [ ] Create Ansible playbook (optional)
-- [ ] Document IaC usage
+### 7.1 HTTP App Testing
+- [ ] Configure Agent to route to http-app service
+- [ ] Test basic connectivity: `curl http://<tunnel>/get`
+- [ ] Test latency endpoint: `curl http://<tunnel>/delay/1`
+- [ ] Test POST echo: `curl -X POST http://<tunnel>/post -d "test"`
+- [ ] Measure end-to-end latency
+- [ ] Document results
+
+### 7.2 QuakeKube Testing
+- [ ] Configure Connector to route to QuakeKube service
+- [ ] Connect browser to QuakeJS web client
+- [ ] Verify game loads and connects
+- [ ] Measure in-game ping
+- [ ] Play test game, note any lag
+- [ ] Document playability results:
+  - [ ] Ping < 150ms? (Acceptable)
+  - [ ] Ping < 80ms? (Good)
+  - [ ] Visible lag during movement?
+  - [ ] Packet loss observed?
+
+### 7.3 Native Quake Client (Optional)
+- [ ] Install native Quake 3 client
+- [ ] Connect via UDP to QuakeKube
+- [ ] Compare latency with WebSocket client
+
+---
+
+## Phase 8: Performance Metrics
+
+### 8.1 Latency Testing
+- [ ] Measure relay path latency (Agent → Intermediate → Connector)
+- [ ] Measure direct path latency (Agent → Connector P2P)
+- [ ] Calculate latency improvement from direct path
+- [ ] Test under load (multiple requests/packets)
+
+### 8.2 Throughput Testing
+- [ ] Measure sustained throughput via relay
+- [ ] Measure sustained throughput via direct path
+- [ ] Compare with baseline (non-tunneled)
+
+### 8.3 Stability Testing
+- [ ] Run continuous traffic for 1 hour
+- [ ] Monitor for disconnections
+- [ ] Monitor for path flapping (direct ↔ relay)
+- [ ] Check keepalive effectiveness
+
+---
+
+## Phase 9: Documentation
+
+### 9.1 Deployment Guides
+- [ ] `docs/deploy-digitalocean.md` - DO deployment guide
+- [ ] `docs/deploy-aws.md` - AWS deployment guide
+- [ ] `docs/deploy-k8s.md` - Kubernetes deployment guide
+
+### 9.2 Test Results
+- [ ] `tasks/006-cloud-deployment/nat-classification.md` - NAT types tested
+- [ ] `tasks/006-cloud-deployment/results.md` - Test results summary
+- [ ] `tasks/006-cloud-deployment/performance.md` - Performance metrics
+
+### 9.3 Architecture Updates
+- [ ] Update `docs/architecture.md` with cloud diagrams
+- [ ] Update `tasks/_context/` with cloud deployment status
 
 ---
 
@@ -229,6 +343,7 @@ Document observed behaviors for each NAT type tested:
 
 - [ ] Update state.md with completion status
 - [ ] Update `_context/components.md` status
+- [ ] Review all documentation
 - [ ] Push branch to origin
 - [ ] Create PR for review
 - [ ] Address review feedback
@@ -238,22 +353,64 @@ Document observed behaviors for each NAT type tested:
 
 ## Stretch Goals (Optional)
 
-- [ ] Multi-region deployment
-- [ ] Automated certificate renewal
-- [ ] Monitoring/alerting setup
-- [ ] Load testing with cloud infrastructure
+- [ ] Multi-region deployment (DO NYC + SF)
+- [ ] Automated certificate renewal (Let's Encrypt)
+- [ ] Monitoring/alerting setup (Prometheus/Grafana)
 - [ ] CI/CD pipeline for cloud deployment
+- [ ] Terraform infrastructure-as-code
+- [ ] Different NAT environments (mobile hotspot, coffee shop WiFi)
 
 ---
 
-## Deferred P2P Items (From Task 005)
+## Open Questions (From Oracle)
 
-> These items require real NAT testing and were deferred from Task 005's local PoC.
+1. **Can Connector be placed behind a second real NAT?**
+   - Answer: Yes - using Raspberry Pi k8s behind home NAT ✅
 
-- [ ] Reflexive candidate validation (requires real NAT)
-- [ ] Port prediction for symmetric NAT
-- [ ] IPv6 P2P support
-- [ ] UPnP/NAT-PMP port mapping
-- [ ] Mobile handoff (WiFi → Cellular)
-- [ ] ICE restart on path failure
-- [ ] Multiple simultaneous paths (QUIC multipath)
+2. **What UDP port does the P2P listener use?**
+   - Current: ephemeral (0.0.0.0:0)
+   - Action: Add `--p2p-listen-port 4434` flag ⬜
+
+3. **Do Agent/Connector emit "path = direct/relay" signal?**
+   - Current: Not explicitly
+   - Action: Add logging in Phase 6 ⬜
+
+---
+
+## Quick Reference
+
+### DigitalOcean Commands
+```bash
+# Create droplet
+doctl compute droplet create ztna-relay --image ubuntu-24-04-x64 --size s-1vcpu-1gb --region nyc1
+
+# Get IP
+doctl compute droplet list --format ID,Name,PublicIPv4
+
+# Create firewall
+doctl compute firewall create --name ztna-fw --inbound-rules "protocol:udp,ports:4433-4434,address:0.0.0.0/0"
+```
+
+### AWS Commands
+```bash
+# Create VPC
+aws ec2 create-vpc --cidr-block 10.0.0.0/16 --region us-east-2
+
+# Create ECR repo
+aws ecr create-repository --repository-name ztna/app-connector --region us-east-2
+
+# Create ECS cluster
+aws ecs create-cluster --cluster-name ztna-cluster --region us-east-2
+```
+
+### Kubernetes Commands
+```bash
+# Deploy to Pi cluster
+kubectl apply -f deploy/k8s/ -n ztna
+
+# Check pods
+kubectl get pods -n ztna
+
+# View connector logs
+kubectl logs -f deployment/app-connector -n ztna
+```
