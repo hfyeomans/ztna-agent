@@ -127,18 +127,79 @@ k8s intermediate-server logs:
 - ✅ Agent sends registration DATAGRAM with service ID 'echo-service'
 - ✅ Intermediate-server recognizes Agent registration
 
-**Discovered Gap:**
-- ⚠️ Full E2E relay blocked: Tunneled IP packets (DATAGRAM) lack service context
-- Current `send_datagram(ip_packet)` sends raw IP, but intermediate needs service ID for routing
-- Requires: Prepend service ID to DATAGRAM or use single-service-per-connection model
+**Discovered (Previously Thought to be Gap):**
+- ~~⚠️ Full E2E relay blocked: Tunneled IP packets (DATAGRAM) lack service context~~
+- **RESOLVED:** The routing logic was already implemented (implicit single-service-per-connection model)
+- The issue was **timing** - Agent and Connector weren't connected simultaneously
+
+### Phase 1.4: Connector Keepalive ✅ COMPLETE
+
+**Date:** 2026-01-25
+
+**Problem:** App-connector disconnected after 30s idle timeout, causing CrashLoopBackOff in k8s
+
+**Solution:** Added QUIC keepalive mechanism
+- `KEEPALIVE_INTERVAL_SECS = 10` constant in app-connector/src/main.rs
+- `maybe_send_keepalive()` method calls `conn.send_ack_eliciting()` (QUIC PING)
+- Called in main loop after `process_timeouts()`
+- Connector now stays connected indefinitely (tested 20+ minutes)
+
+**k8s Fix:** Added kustomize patch to override entrypoint (skip gosu)
+```yaml
+- patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/command
+      value: ["/usr/local/bin/app-connector"]
+  target:
+    kind: Deployment
+    name: app-connector
+```
+
+### Phase 1.5: Full E2E Relay Test ✅ COMPLETE
+
+**Date:** 2026-01-25 21:02 UTC
+
+**Test Setup:**
+- macOS Agent connected to k8s intermediate-server (10.0.150.205:4433)
+- k8s app-connector registered for 'echo-service' (keepalive active)
+- k8s echo-server running (UDP 9999)
+- VPN routes 1.1.1.1/32 → utun6
+
+**Test Command:**
+```bash
+echo "ZTNA-TEST" | nc -u -w1 1.1.1.1 9999
+```
+
+**Results - FULL E2E SUCCESS:**
+```
+[21:02:13Z] Received 38 bytes to relay from aa7443... (Agent)
+[21:02:13Z] Found destination e8780... for aa7443...
+[21:02:13Z] Relayed 38 bytes from aa7443... to e8780... (→ Connector)
+[21:02:13Z] Received 38 bytes to relay from e8780... (echo response)
+[21:02:13Z] Found destination 176b5... for e8780...
+[21:02:13Z] Relayed 38 bytes from e8780... to 176b5... (→ Agent)
+```
+
+**Data Flow Verified:**
+```
+macOS Agent → Intermediate → Connector → echo-server
+                                              ↓
+macOS Agent ← Intermediate ← Connector ← echo response
+```
+
+**Key Notes:**
+- Only UDP traffic supported (Connector drops ICMP/TCP)
+- Service-based routing works: Agent(echo-service) ↔ Connector(echo-service)
+- macOS Agent still has 30s timeout - needs keepalive (future task)
 
 ### What's Next
 1. ~~Test macOS ZtnaAgent app connecting to Pi k8s intermediate-server~~ ✅
 2. ~~Implement Agent registration for relay routing~~ ✅
 3. ~~Verify registration appears in k8s logs~~ ✅
-4. **BLOCKED:** Implement service-aware relay routing (see Phase 5a.3)
-5. Deploy to DigitalOcean or AWS for public IP testing
-6. Test P2P hole punching with home NAT → cloud setup
+4. ~~Test full E2E relay~~ ✅
+5. Add keepalive to macOS Agent (Swift/Rust FFI)
+6. Deploy to DigitalOcean or AWS for public IP testing
+7. Test P2P hole punching with home NAT → cloud setup
 
 ---
 

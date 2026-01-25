@@ -29,10 +29,18 @@ patches:
   - patch: |-
       - op: replace
         path: /metadata/annotations/io.cilium~1lb-ipam-ips
-        value: "10.0.150.200"
+        value: "10.0.150.205"
     target:
       kind: Service
       name: intermediate-server
+  # Override app-connector entrypoint to skip gosu (k8s runs as non-root via securityContext)
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/command
+        value: ["/usr/local/bin/app-connector"]
+    target:
+      kind: Deployment
+      name: app-connector
 
 labels:
   - pairs:

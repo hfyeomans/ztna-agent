@@ -35,6 +35,9 @@ const MAX_DATAGRAM_SIZE: usize = 1350;
 /// QUIC idle timeout in milliseconds (must match Intermediate Server)
 const IDLE_TIMEOUT_MS: u64 = 30_000;
 
+/// Keepalive interval in seconds (should be less than half of idle timeout)
+const KEEPALIVE_INTERVAL_SECS: u64 = 10;
+
 /// ALPN protocol identifier (CRITICAL: must match Intermediate Server)
 const ALPN_PROTOCOL: &[u8] = b"ztna-v1";
 
@@ -193,6 +196,8 @@ struct Connector {
     signaling_buffer: Vec<u8>,
     /// P2P session manager
     session_manager: P2PSessionManager,
+    /// Last time we sent a keepalive PING to Intermediate
+    last_keepalive: Instant,
 }
 
 impl Connector {
@@ -294,6 +299,7 @@ impl Connector {
             flow_map: HashMap::new(),
             signaling_buffer: Vec::new(),
             session_manager: P2PSessionManager::new(),
+            last_keepalive: Instant::now(),
         })
     }
 
@@ -333,6 +339,9 @@ impl Connector {
 
             // Process timeouts for all connections
             self.process_timeouts();
+
+            // Send keepalive to Intermediate if needed
+            self.maybe_send_keepalive();
 
             // Send pending packets for all connections
             self.send_pending()?;
@@ -840,6 +849,26 @@ impl Connector {
         // Clean up old flow mappings (older than 60 seconds)
         let now = Instant::now();
         self.flow_map.retain(|_, ts| now.duration_since(*ts).as_secs() < 60);
+    }
+
+    /// Send a QUIC PING to keep the Intermediate connection alive
+    fn maybe_send_keepalive(&mut self) {
+        if self.last_keepalive.elapsed().as_secs() >= KEEPALIVE_INTERVAL_SECS {
+            if let Some(ref mut conn) = self.intermediate_conn {
+                if conn.is_established() {
+                    // send_ack_eliciting() sends a PING frame to keep connection alive
+                    match conn.send_ack_eliciting() {
+                        Ok(_) => {
+                            log::debug!("Sent keepalive PING to Intermediate");
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to send keepalive: {:?}", e);
+                        }
+                    }
+                }
+            }
+            self.last_keepalive = Instant::now();
+        }
     }
 
     fn send_pending(&mut self) -> Result<(), Box<dyn std::error::Error>> {

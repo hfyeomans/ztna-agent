@@ -51,6 +51,7 @@ Critical issues identified and tasks added:
 ## Phase 1: Configuration Parameterization
 
 > **Must complete before remote testing (Oracle finding)**
+> **CRITICAL for cloud deployment and scaling**
 
 ### 1.1 Environment Configuration
 - [ ] Create `deploy/env/` directory
@@ -63,6 +64,25 @@ Critical issues identified and tasks added:
 - [ ] Replace `test-service` with `$SERVICE_ID`
 - [ ] Replace cert paths with `$CERT_DIR`
 - [ ] Test locally with parameterized configs
+
+### 1.3 Address Hardcoding Technical Debt (Added 2026-01-25)
+
+**Problem**: Multiple places have hardcoded IPs that must stay in sync:
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift`: `serverHost = "10.0.150.205"`
+- `deploy/k8s/overlays/pi-home/kustomization.yaml`: `io.cilium/lb-ipam-ips: "10.0.150.205"`
+- Test commands use `1.1.1.1` which has no semantic meaning
+
+**Required Changes for Cloud Deployment:**
+- [ ] macOS Agent: Read server address from configuration (UserDefaults, plist, or MDM profile)
+- [ ] K8s overlays: Use environment-specific kustomization files (`pi-home/`, `do-nyc1/`, `aws-us-east-2/`)
+- [ ] Test scripts: Use a service-specific virtual IP (e.g., `100.64.0.100` for echo-service) instead of `1.1.1.1`
+- [ ] Document IP allocation scheme for different environments
+
+**Why This Matters:**
+- Pi cluster: 10.0.150.x (home LAN)
+- DigitalOcean: Public IP from droplet
+- AWS: Elastic IP or NLB DNS
+- Each requires different LoadBalancer annotations and macOS Agent config
 
 ### 1.3 P2P Port Definition
 - [x] Add `--p2p-listen-port` CLI arg to app-connector
@@ -226,12 +246,14 @@ Critical issues identified and tasks added:
 - [x] Deploy echo-server (UDP :9999)
 - [x] Verify service accessible from Connector pod
 
-### 5.6 macOS Agent E2E Test ✅
-- [x] Configure macOS Extension with k8s LoadBalancer IP
+### 5.6 macOS Agent E2E Test ✅ COMPLETE
+- [x] Configure macOS Extension with k8s LoadBalancer IP (10.0.150.205)
 - [x] Verify VPN tunnel creation (utun6)
 - [x] Verify QUIC connection to intermediate
 - [x] Verify packet tunneling (DATAGRAM)
-- [ ] **Full E2E routing to echo-server** (blocked by MVP routing gap)
+- [x] **Full E2E routing to echo-server** ✅ (2026-01-25)
+  - UDP traffic relayed: Agent → Intermediate → Connector → echo-server → response back
+  - Test: `echo "ZTNA-TEST" | nc -u -w1 1.1.1.1 9999` (routed via VPN tunnel)
 
 ### 5.7 Documentation
 - [x] Create comprehensive skill guide (`deploy/k8s/k8s-deploy-skill.md`)
@@ -273,31 +295,29 @@ Agent → Intermediate → Connector → Echo Server → Response
 - [x] Call from `PacketTunnelProvider.swift` after QUIC connection established
 - [x] Use service ID "echo-service" (hardcoded for MVP, matches k8s app-connector)
 
-### 5a.3 Test Full E2E ⏳ TIMING ISSUE
+### 5a.3 Test Full E2E ✅ COMPLETE (2026-01-25)
 - [x] Agent registers for 'echo-service' ✅ VERIFIED IN K8S LOGS
 - [x] Connector registers for 'echo-service' ✅ VERIFIED IN K8S LOGS
 - [x] **Routing logic implemented:** Registry uses implicit single-service-per-connection model
   - Agent connection → registered service → Connector connection
   - No per-packet service ID needed (MVP approach)
   - See `tasks/_context/components.md` for architecture decision
-- [ ] **TIMING ISSUE:** Agent and Connector must be connected simultaneously
-  - Connector has 30s idle timeout → CrashLoopBackOff → 5min restart delay
-  - Agent has 30s idle timeout if no traffic
-  - Window for overlap is small (~8-30 seconds)
-- [ ] macOS Agent → k8s Intermediate → k8s App Connector → k8s Echo Server
-- [ ] Verify relay logs show "Found destination" and packet forwarding
-- [ ] Measure end-to-end latency
-
-**Current Timing Analysis:**
-```
-20:38:12 - Connector registers for 'echo-service'
-20:38:20 - Agent closes (30s timeout from 20:37:50)
-20:38:42 - Connector closes (30s timeout)
-          Gap: Agent closed 22s before Connector!
-
-Next opportunity: ~20:43-44 when Connector restarts
-Need: Start Agent immediately when Connector connects
-```
+- [x] **TIMING FIXED:** Connector keepalive implemented (KEEPALIVE_INTERVAL_SECS = 10)
+  - Connector now sends QUIC PING frames every 10 seconds
+  - Connector stays connected indefinitely (tested 20+ minutes)
+  - kustomize patch added to skip gosu in k8s securityContext
+- [x] **macOS Agent → k8s Intermediate → k8s App Connector → k8s Echo Server** ✅
+- [x] **Relay logs confirmed:**
+  ```
+  [21:02:13] Received 38 bytes to relay from aa7443... (Agent)
+  [21:02:13] Found destination e8780... for aa7443...
+  [21:02:13] Relayed 38 bytes from aa7443... to e8780... (→ Connector)
+  [21:02:13] Received 38 bytes to relay from e8780... (Connector echo response)
+  [21:02:13] Found destination 176b5... for e8780...
+  [21:02:13] Relayed 38 bytes from e8780... to 176b5... (→ Agent)
+  ```
+- [ ] Measure end-to-end latency (deferred to Phase 8)
+- [ ] **Note:** macOS Agent also needs keepalive (30s timeout observed)
 
 ### Alternative: Use P2P Hole Punching for E2E
 - [ ] Call `agent_start_hole_punch(agent, "echo-service")` instead

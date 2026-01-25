@@ -713,6 +713,110 @@ kubectl exec -n kube-system <cilium-pod> -- \
   cilium-dbg bpf lb list | grep "10.0.150"
 ```
 
+### 11. QUIC Keepalive Required for Long-Running Connections
+
+**Problem**: QUIC has a 30-second idle timeout. Pods without traffic disconnect and restart.
+
+**Symptom**: app-connector pod shows `CrashLoopBackOff` with logs showing connection closed after 30s.
+
+**Solution**: Implement QUIC keepalive (PING frames) in long-running components:
+
+```rust
+// In app-connector/src/main.rs
+const KEEPALIVE_INTERVAL_SECS: u64 = 10;  // Less than half of idle timeout
+
+fn maybe_send_keepalive(&mut self) {
+    if self.last_keepalive.elapsed().as_secs() >= KEEPALIVE_INTERVAL_SECS {
+        if let Some(ref mut conn) = self.intermediate_conn {
+            if conn.is_established() {
+                let _ = conn.send_ack_eliciting();  // Sends QUIC PING
+            }
+        }
+        self.last_keepalive = Instant::now();
+    }
+}
+```
+
+### 12. Docker Entrypoint vs K8s SecurityContext
+
+**Problem**: Docker images that use `gosu` or `su` to drop privileges fail in k8s with "operation not permitted".
+
+**Root Cause**: k8s `securityContext` already runs containers as non-root (UID 1000). Using `gosu` inside the container tries to switch users, which is not permitted.
+
+**Symptom**:
+```
+app-connector   0/1     CrashLoopBackOff   3 (25s ago)
+Logs: "operation not permitted"
+```
+
+**Solution**: Override the entrypoint via kustomize patch to skip the privilege-dropping script:
+
+```yaml
+# In overlays/pi-home/kustomization.yaml
+patches:
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/command
+        value: ["/usr/local/bin/app-connector"]
+    target:
+      kind: Deployment
+      name: app-connector
+```
+
+**Debugging**:
+```bash
+# Check if container is trying to switch users
+kubectl logs -n ztna deployment/app-connector
+
+# Verify securityContext in deployment
+kubectl get deployment app-connector -n ztna -o jsonpath='{.spec.template.spec.securityContext}'
+```
+
+### 13. Keep macOS Agent Config in Sync with K8s LoadBalancer IP
+
+**Problem**: macOS Agent has hardcoded server IP that must match the k8s LoadBalancer.
+
+**Files to keep in sync**:
+1. `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift`:
+   ```swift
+   private let serverHost = "10.0.150.205"  // Must match k8s
+   ```
+2. `deploy/k8s/overlays/pi-home/kustomization.yaml`:
+   ```yaml
+   - op: replace
+     path: /metadata/annotations/io.cilium~1lb-ipam-ips
+     value: "10.0.150.205"  # Must match Swift
+   ```
+
+**Symptom if mismatched**: VPN shows "connected" but no QUIC connection. Check intermediate logs - no new connections.
+
+**⚠️ TECHNICAL DEBT**: This hardcoding approach doesn't scale for cloud deployment. Before deploying to DigitalOcean/AWS:
+- macOS Agent should read server address from configuration (UserDefaults, plist, or MDM profile)
+- Each environment needs its own kustomize overlay with correct IPs
+- See `tasks/006-cloud-deployment/todo.md` Phase 1.3 for full plan
+
+### 14. Building and Pushing Updated Images After Code Changes
+
+After modifying component code (e.g., adding keepalive to app-connector):
+
+```bash
+# 1. Build and push updated image
+cd /path/to/ztna-agent
+./deploy/k8s/build-push.sh --arm64-only app-connector
+
+# 2. Or build manually
+docker buildx build --platform linux/arm64 \
+  -t docker.io/hyeomans/ztna-app-connector:latest \
+  -f deploy/docker-nat-sim/Dockerfile.connector \
+  --push .
+
+# 3. Force k8s to pull new image
+kubectl rollout restart deployment app-connector -n ztna
+
+# 4. Watch pod restart
+kubectl get pods -n ztna -w
+```
+
 ---
 
 ## Quick Reference Commands
@@ -784,7 +888,7 @@ kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-serve
 # Expected: "New connection from 10.0.0.XX:XXXXX"
 ```
 
-### E2E Test Results (Phase 1.1)
+### E2E Test Results (Phase 1.5 - FULL SUCCESS)
 
 | Test | Result | Notes |
 |------|--------|-------|
@@ -792,36 +896,82 @@ kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-serve
 | QUIC handshake | ✅ | Connects to LoadBalancer IP |
 | QAD (address discovery) | ✅ | Observed address returned (SNAT'd) |
 | Packet tunneling | ✅ | DATAGRAMs sent through tunnel |
-| Relay routing | ⚠️ | "No destination" - MVP gap |
+| Agent registration | ✅ | Agent registers for 'echo-service' |
+| Connector registration | ✅ | Connector registers for 'echo-service' |
+| **Relay routing** | ✅ | **Full E2E relay working!** |
+| **Return traffic** | ✅ | **Echo response returns to Agent** |
 
-### Known Issues
+### E2E Test Procedure
+
+```bash
+# 1. Reconnect VPN to establish fresh QUIC connection
+networksetup -disconnectpppoeservice "ZTNA Agent"
+sleep 2
+networksetup -connectpppoeservice "ZTNA Agent"
+sleep 3
+
+# 2. Verify Agent registration
+kubectl logs -n ztna deployment/intermediate-server --tail=10 | grep Agent
+# Expected: "Registration: Agent for service 'echo-service'"
+
+# 3. Send UDP test traffic (route goes through VPN tunnel)
+# NOTE: 1.1.1.1 is a placeholder - the actual destination IP doesn't matter for MVP
+# because routing is by service_id, not destination IP. The Connector forwards
+# all traffic to its configured forward_addr (echo-server).
+# TODO: Use service-specific virtual IP (e.g., 100.64.0.100) instead of 1.1.1.1
+echo "ZTNA-TEST" | nc -u -w1 1.1.1.1 9999
+
+# 4. Check relay logs
+kubectl logs -n ztna deployment/intermediate-server --tail=15 | grep -E "relay|destination"
+# Expected:
+#   "Received 38 bytes to relay from ..."
+#   "Found destination ... for ..."
+#   "Relayed 38 bytes from ... to ..."
+```
+
+### E2E Success Log Sample (2026-01-25)
+
+```
+[21:02:13Z] Received 38 bytes to relay from aa7443... (Agent)
+[21:02:13Z] Found destination e8780... for aa7443...
+[21:02:13Z] Relayed 38 bytes from aa7443... to e8780... (→ Connector)
+[21:02:13Z] Received 38 bytes to relay from e8780... (echo response)
+[21:02:13Z] Found destination 176b5... for e8780...
+[21:02:13Z] Relayed 38 bytes from e8780... to 176b5... (→ Agent)
+```
+
+### Known Issues (Updated)
 
 1. **Extension caching**: macOS caches the Extension binary path. After code changes, you MUST:
    - Delete `~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*`
    - Rebuild to `/tmp/ZtnaAgent-build`
    - Stop and restart VPN
 
-2. **30-second idle timeout**: QUIC connection closes after 30s without traffic. Need keepalive.
+2. **macOS Agent 30-second idle timeout**: Agent QUIC connection closes after 30s without traffic.
+   - **Workaround**: Keep sending traffic, or run test quickly after VPN connect
+   - **TODO**: Add keepalive to Swift/Rust FFI (same pattern as Connector)
 
 3. **SNAT hides client IP**: With `externalTrafficPolicy: Cluster`, intermediate sees k8s node IP (10.0.0.22) not the real client IP.
 
-4. **No service-based routing**: Current MVP doesn't map destination IPs to service IDs. Packets are tunneled but intermediate doesn't know which connector to route them to.
+4. **UDP only**: Connector currently only forwards UDP traffic. TCP/ICMP packets are dropped.
+   - Connector extracts UDP payload from IP packet
+   - Forwards UDP payload to echo-server
+   - TCP support is future work
 
-### MVP Routing Gap
+### Routing Architecture (Implicit Single-Service-Per-Connection)
 
-The E2E test shows packets are successfully tunneled but "No destination for relay" because:
-
+The relay routing uses an implicit model:
 ```
-Current flow:
-1. macOS intercepts packet destined for X.X.X.X
-2. Packet is tunneled via QUIC DATAGRAM to intermediate
-3. Intermediate receives DATAGRAM but doesn't know which connector handles X.X.X.X
-4. "No destination for relay" - dropped
-
-Needed for full E2E:
-- Service-based routing (map destination IP → service ID)
-- Or destination-based lookup (connector registers IPs it handles)
+1. Agent registers: "I want to reach service 'echo-service'" (DATAGRAM 0x10)
+2. Connector registers: "I handle service 'echo-service'" (DATAGRAM 0x11)
+3. When Agent sends DATAGRAM (IP packet):
+   - Intermediate looks up Agent's registered service
+   - Finds Connector for that service
+   - Forwards DATAGRAM to Connector
+4. Return traffic follows reverse path
 ```
+
+**No per-packet service ID needed** - the connection registration determines routing.
 
 ---
 
