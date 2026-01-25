@@ -7,7 +7,8 @@ namespace: ztna
 resources:
   - namespace.yaml
   - configmap.yaml
-  - secrets.yaml
+  # secrets.yaml excluded - create TLS secrets manually before deploying
+  # See README.md for certificate generation instructions
   - intermediate-server.yaml
   - app-connector.yaml
   - echo-server.yaml

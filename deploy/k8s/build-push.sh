@@ -28,8 +28,8 @@ NC='\033[0m'
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-REGISTRY="${REGISTRY:-ghcr.io}"
-OWNER="${OWNER:-hfyeomans}"
+REGISTRY="${REGISTRY:-docker.io}"
+OWNER="${OWNER:-hyeomans}"
 TAG="${TAG:-latest}"
 PLATFORMS="${PLATFORMS:-linux/arm64,linux/amd64}"
 DO_PUSH=true

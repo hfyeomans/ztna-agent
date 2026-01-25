@@ -8,17 +8,19 @@ namespace: ztna
 
 resources:
   - ../../base
+  # Note: cilium-l2.yaml contains cluster-scoped resources
+  # Apply separately with: kubectl apply -f cilium-l2.yaml
 
-# Replace placeholder image owner with your GHCR username
+# Replace placeholder image owner with your Docker Hub username
 images:
   - name: ghcr.io/OWNER/ztna-intermediate-server
-    newName: ghcr.io/hfyeomans/ztna-intermediate-server
+    newName: docker.io/hyeomans/ztna-intermediate-server
     newTag: latest
   - name: ghcr.io/OWNER/ztna-app-connector
-    newName: ghcr.io/hfyeomans/ztna-app-connector
+    newName: docker.io/hyeomans/ztna-app-connector
     newTag: latest
   - name: ghcr.io/OWNER/ztna-echo-server
-    newName: ghcr.io/hfyeomans/ztna-echo-server
+    newName: docker.io/hyeomans/ztna-echo-server
     newTag: latest
 
 # Patch intermediate-server Service with Cilium L2 IP
