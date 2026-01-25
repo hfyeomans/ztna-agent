@@ -273,27 +273,30 @@ Agent → Intermediate → Connector → Echo Server → Response
 - [x] Call from `PacketTunnelProvider.swift` after QUIC connection established
 - [x] Use service ID "echo-service" (hardcoded for MVP, matches k8s app-connector)
 
-### 5a.3 Test Full E2E ⏳ BLOCKED
+### 5a.3 Test Full E2E ⏳ TIMING ISSUE
 - [x] Agent registers for 'echo-service' ✅ VERIFIED IN K8S LOGS
 - [x] Connector registers for 'echo-service' ✅ VERIFIED IN K8S LOGS
-- [ ] **BLOCKED:** Service-aware relay routing not implemented
-  - Current: Relay DATAGRAM contains raw IP packets
-  - Needed: Intermediate must map Agent→Connector by service ID for tunneled packets
-  - Gap: `send_datagram` sends IP payload, but relay needs service context
+- [x] **Routing logic implemented:** Registry uses implicit single-service-per-connection model
+  - Agent connection → registered service → Connector connection
+  - No per-packet service ID needed (MVP approach)
+  - See `tasks/_context/components.md` for architecture decision
+- [ ] **TIMING ISSUE:** Agent and Connector must be connected simultaneously
+  - Connector has 30s idle timeout → CrashLoopBackOff → 5min restart delay
+  - Agent has 30s idle timeout if no traffic
+  - Window for overlap is small (~8-30 seconds)
 - [ ] macOS Agent → k8s Intermediate → k8s App Connector → k8s Echo Server
-- [ ] Verify ICMP echo reply returns to macOS
+- [ ] Verify relay logs show "Found destination" and packet forwarding
 - [ ] Measure end-to-end latency
 
-**Routing Gap Analysis:**
+**Current Timing Analysis:**
 ```
-Current flow:
-  Agent.register("echo-service")  → Intermediate knows Agent wants echo-service
-  Agent.send_datagram(ip_packet)  → Intermediate receives raw IP, no service context
-  Intermediate: "I have a packet but which service?" → Dropped or wrong route
+20:38:12 - Connector registers for 'echo-service'
+20:38:20 - Agent closes (30s timeout from 20:37:50)
+20:38:42 - Connector closes (30s timeout)
+          Gap: Agent closed 22s before Connector!
 
-Needed:
-  Option A: Prepend service_id to DATAGRAM: [service_len, service_id, ip_packet]
-  Option B: Single-service-per-connection model (Agent only routes to its registered service)
+Next opportunity: ~20:43-44 when Connector restarts
+Need: Start Agent immediately when Connector connects
 ```
 
 ### Alternative: Use P2P Hole Punching for E2E

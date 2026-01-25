@@ -540,6 +540,45 @@ let result = targetServiceId.withCString { servicePtr in
 3. **Re-register on reconnect**: Registration is connection-scoped; lost on disconnect
 4. **MVP limitation**: Agent can only target one service per connection
 
+### Routing Architecture Decision
+
+**MVP (Current): Single-Service-Per-Connection (Implicit Routing)**
+
+The Intermediate Server uses **implicit routing** based on connection registration. When an Agent sends a DATAGRAM (raw IP packet), the server looks up the Agent's registered service and routes to the corresponding Connector. No per-packet service ID is required.
+
+```
+Agent connects → registers for "echo-service" → all DATAGRAMs route to echo-service Connector
+```
+
+**Why this approach for MVP:**
+- Already implemented (registry maps conn_id → service_id)
+- Zero per-packet overhead
+- Simple to understand and debug
+- Sufficient for single-service use cases
+
+**Future: Session ID Header or QUIC Streams (Multi-Tenant)**
+
+When scaling to multi-tenant with multiple services per Agent:
+
+| Approach | Overhead | Migration Path | Recommendation |
+|----------|----------|----------------|----------------|
+| **Session ID Header** | 1 byte/packet | Direct (ID ≅ StreamID) | ✅ Recommended |
+| **Full Service ID** | 12+ bytes/packet | Same as above | ❌ Too much overhead |
+| **Connection-per-service** | N connections | Architectural rewrite | ❌ Doesn't scale |
+
+**Recommended future approach:** Prepend 1-byte session ID to DATAGRAMs:
+```
+Format: [session_id(1 byte), ip_packet(remaining)]
+Mapping: Control message establishes session_id ↔ service_id
+```
+
+This aligns with eventual migration to **QUIC Streams per service**, where Stream ID naturally replaces the session ID header.
+
+**Migration steps:**
+1. Add control message: `ESTABLISH_SESSION(service_id) → session_id`
+2. Prepend session_id to DATAGRAMs
+3. Later: Replace DATAGRAM + session_id with QUIC Stream frames
+
 ---
 
 ## Shared Code
