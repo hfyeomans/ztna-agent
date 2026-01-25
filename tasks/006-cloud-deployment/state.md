@@ -41,11 +41,41 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 - Cloud provider analysis completed (Vultr/DigitalOcean recommended)
 
 ### What's Next
-1. Choose cloud provider (Vultr or DigitalOcean)
-2. Provision cloud VM
-3. Deploy Intermediate Server + App Connector
-4. Test from Agent behind home NAT
-5. Validate P2P hole punching with real NATs
+1. Implement P2P fixed port (4434) in app-connector
+2. Start Phase 0: Docker NAT simulation for local validation
+3. Deploy to DigitalOcean for quick cloud validation
+4. Deploy to AWS VPC for production-like environment
+5. Deploy to Home Pi k8s for true NAT-to-NAT testing
+
+---
+
+## Decisions Made
+
+| Question | Decision | Notes |
+|----------|----------|-------|
+| AWS VPC | Create NEW VPC | Dedicated ZTNA testing environment |
+| P2P Listen Port | Fixed port **4434** | Predictable firewall rules |
+| TLS Certificates | Self-signed (MVP) | Domain + Let's Encrypt for later |
+| Home k8s Cluster | Pi cluster available | 10.0.150.101-108 |
+
+---
+
+## Home MVP Infrastructure
+
+**Raspberry Pi Kubernetes Cluster:**
+
+| Role | IP Address | Notes |
+|------|------------|-------|
+| Control Plane | 10.0.150.101 | kubectl access confirmed |
+| Worker 1 | 10.0.150.102 | |
+| Worker 2 | 10.0.150.103 | |
+| Worker 3 | 10.0.150.104 | |
+| Worker 4 | 10.0.150.105 | |
+| Worker 5 | 10.0.150.106 | |
+| Worker 6 | 10.0.150.107 | |
+| Worker 7 | 10.0.150.108 | |
+
+**Purpose:** True NAT-to-NAT hole punching validation (both Agent and Connector behind home NAT)
 
 ---
 
@@ -56,7 +86,9 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 | Task 004 (E2E Testing) | ✅ Complete | Local testing passed (61+ tests) |
 | Task 005 (P2P Protocol) | ✅ Complete | Protocol implementation (79 tests) |
 | Task 005a (Swift Integration) | ✅ Complete | macOS Agent wired up |
-| Cloud Account | 🔲 Not Configured | Vultr or DigitalOcean recommended |
+| AWS CLI | ✅ Configured | Access confirmed |
+| DigitalOcean API | ✅ Available | API key ready |
+| Pi k8s Cluster | ✅ Available | kubectl access confirmed |
 
 ---
 

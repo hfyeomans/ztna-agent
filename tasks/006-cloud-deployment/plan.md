@@ -68,25 +68,19 @@ Deploy ZTNA components to multiple environments for comprehensive NAT testing:
 
 ### Required Firewall Changes
 
-**Option A: Fixed P2P Port (Recommended)**
+**Decision: Fixed P2P Port 4434 ✅**
 ```bash
 # Add to app-connector CLI
 --p2p-listen-port 4434
 
-# Firewall rules
+# Firewall rules (all environments)
 UDP 4433: Intermediate Server (relay/signaling)
 UDP 4434: App Connector P2P listener
 ```
 
-**Option B: Port Range**
-```bash
-# Open port range for P2P
-UDP 4433-4450: ZTNA services
-```
-
 ### Implementation Required
 
-- [ ] Add `--p2p-listen-port` CLI arg to app-connector
+- [ ] Add `--p2p-listen-port` CLI arg to app-connector (Phase 1)
 - [ ] Update firewall rules in all deployments
 - [ ] Document port requirements
 
@@ -176,6 +170,10 @@ Create `nat-classification.md` for each test environment:
 
 > **Oracle Finding:** Self-signed cert trust unspecified.
 
+**Decision: Self-signed certificates for MVP ✅**
+- Domain + Let's Encrypt available for production migration
+- Self-signed simplifies initial deployment and testing
+
 ### For macOS Agent
 
 ```bash
@@ -207,12 +205,14 @@ Use Let's Encrypt with a real domain - no manual trust required.
 
 ## Environment 1: AWS Deployment
 
+**Decision: Create NEW VPC ✅** (dedicated ZTNA testing environment)
+
 ### Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        AWS VPC (us-east-2)                                   │
-│                        CIDR: 10.0.0.0/16                                     │
+│                     AWS VPC - ztna-test (us-east-2)                          │
+│                     CIDR: 10.0.0.0/16 (NEW VPC)                              │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │                      Public Subnet (10.0.1.0/24)                         ││
@@ -441,12 +441,25 @@ DROPLET_IP=$(doctl compute droplet get $DROPLET_ID --format PublicIPv4 --no-head
                    └───────────────────────────────────────────┘
 ```
 
+### Pi Cluster Configuration
+
+| Role | IP Address | Notes |
+|------|------------|-------|
+| Control Plane | 10.0.150.101 | kubectl access confirmed |
+| Worker 1 | 10.0.150.102 | |
+| Worker 2 | 10.0.150.103 | |
+| Worker 3 | 10.0.150.104 | |
+| Worker 4 | 10.0.150.105 | |
+| Worker 5 | 10.0.150.106 | |
+| Worker 6 | 10.0.150.107 | |
+| Worker 7 | 10.0.150.108 | |
+
 ### Why This Tests NAT-to-NAT
 
 | Component | Network | NAT Status |
 |-----------|---------|------------|
 | Agent | Home WiFi | Behind home router NAT |
-| Connector | Home k8s | Behind SAME home router NAT |
+| Connector | Home k8s (10.0.150.x) | Behind SAME home router NAT |
 | Intermediate | Cloud | Public IP (signaling only) |
 
 **For P2P to work:** Agent and Connector must punch holes through the home NAT to reach each other directly, using reflexive addresses learned via Intermediate.
