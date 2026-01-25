@@ -89,6 +89,13 @@ bool agent_is_connected(const Agent* agent);
 /// @return AgentResultOk on success, AgentResultNotConnected if not connected.
 AgentResult agent_register(Agent* agent, const char* service_id);
 
+/// Send a keepalive PING on the Intermediate connection.
+/// Call this periodically (e.g., every 10 seconds) to prevent the QUIC
+/// connection from timing out due to inactivity (30 second idle timeout).
+/// @param agent Agent pointer.
+/// @return AgentResultOk if keepalive was sent, AgentResultNotConnected if not connected.
+AgentResult agent_send_intermediate_keepalive(Agent* agent);
+
 // ============================================================================
 // QUIC Agent Packet I/O
 // ============================================================================

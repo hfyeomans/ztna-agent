@@ -317,7 +317,7 @@ Agent → Intermediate → Connector → Echo Server → Response
   [21:02:13] Relayed 38 bytes from e8780... to 176b5... (→ Agent)
   ```
 - [ ] Measure end-to-end latency (deferred to Phase 8)
-- [ ] **Note:** macOS Agent also needs keepalive (30s timeout observed)
+- [x] **macOS Agent keepalive implemented** (2026-01-25) - 10s interval prevents 30s idle timeout
 
 ### Alternative: Use P2P Hole Punching for E2E
 - [ ] Call `agent_start_hole_punch(agent, "echo-service")` instead

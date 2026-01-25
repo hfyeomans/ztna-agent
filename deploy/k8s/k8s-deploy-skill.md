@@ -940,16 +940,17 @@ kubectl logs -n ztna deployment/intermediate-server --tail=15 | grep -E "relay|d
 [21:02:13Z] Relayed 38 bytes from e8780... to 176b5... (→ Agent)
 ```
 
-### Known Issues (Updated)
+### Known Issues (Updated 2026-01-25)
 
 1. **Extension caching**: macOS caches the Extension binary path. After code changes, you MUST:
    - Delete `~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*`
    - Rebuild to `/tmp/ZtnaAgent-build`
    - Stop and restart VPN
 
-2. **macOS Agent 30-second idle timeout**: Agent QUIC connection closes after 30s without traffic.
-   - **Workaround**: Keep sending traffic, or run test quickly after VPN connect
-   - **TODO**: Add keepalive to Swift/Rust FFI (same pattern as Connector)
+2. **~~macOS Agent 30-second idle timeout~~**: ✅ **FIXED** (2026-01-25)
+   - Agent now sends keepalive PING every 10 seconds
+   - Connection stays alive indefinitely without traffic
+   - Rebuild required to get the fix: `/Applications/ZtnaAgent.app`
 
 3. **SNAT hides client IP**: With `externalTrafficPolicy: Cluster`, intermediate sees k8s node IP (10.0.0.22) not the real client IP.
 
@@ -972,6 +973,255 @@ The relay routing uses an implicit model:
 ```
 
 **No per-packet service ID needed** - the connection registration determines routing.
+
+---
+
+---
+
+## Human Demo Guide: Multi-Terminal E2E Demo
+
+This section provides copy-paste commands for running a live demo across multiple terminals. Perfect for showing the ZTNA stack to others.
+
+### Prerequisites
+
+1. **Pi k8s cluster running** with ZTNA deployed
+2. **macOS Agent app** built and installed at `/Applications/ZtnaAgent.app`
+3. **Terminal app** (or iTerm2 for better multi-pane support)
+
+### Terminal Layout (4 Terminals)
+
+```
+┌─────────────────────────────────────┬─────────────────────────────────────┐
+│ Terminal 1: K8s Intermediate Logs   │ Terminal 2: K8s Connector Logs      │
+│ (Relay hub - see connections)       │ (Service handler)                   │
+├─────────────────────────────────────┼─────────────────────────────────────┤
+│ Terminal 3: K8s Echo Server Logs    │ Terminal 4: macOS Commands          │
+│ (Backend service)                   │ (VPN control + test traffic)        │
+└─────────────────────────────────────┴─────────────────────────────────────┘
+```
+
+### Step-by-Step Demo Commands
+
+**Terminal 1 - Intermediate Server Logs (Start First)**
+```bash
+# Watch the relay hub - shows all connections and relayed traffic
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f --tail=50
+```
+*Look for: "New connection", "Registration", "Relayed X bytes"*
+
+---
+
+**Terminal 2 - App Connector Logs**
+```bash
+# Watch the service handler - shows registration and forwarding
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=app-connector -f --tail=50
+```
+*Look for: "Registered as Connector for 'echo-service'", "QAD: Observed address"*
+
+---
+
+**Terminal 3 - Echo Server Logs**
+```bash
+# Watch the backend service - shows received UDP packets
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=echo-server -f --tail=50
+```
+*Look for: "Received X bytes", "Echoing back"*
+
+---
+
+**Terminal 4 - macOS Commands (Run Demo)**
+```bash
+# === PREPARATION ===
+# Check VPN status
+scutil --nc list | grep ZTNA
+
+# === START THE DEMO ===
+# 1. Disconnect any existing VPN connection
+networksetup -disconnectpppoeservice "ZTNA Agent" 2>/dev/null || true
+
+# 2. Wait for clean state
+sleep 2
+
+# 3. Connect VPN (starts QUIC connection to k8s)
+networksetup -connectpppoeservice "ZTNA Agent"
+
+# 4. Wait for connection establishment
+sleep 3
+
+# 5. Verify VPN tunnel is up
+ifconfig utun6 | grep inet
+# Expected: inet 100.64.0.1 --> 100.64.0.1 netmask 0xffffffff
+
+# 6. Verify UDP socket to k8s
+netstat -an | grep "10.0.150.205.4433"
+# Expected: udp connection entry
+
+# === SEND TEST TRAFFIC ===
+# 7. Send UDP through the tunnel (routed via VPN)
+echo "ZTNA-DEMO-$(date +%H%M%S)" | nc -u -w2 1.1.1.1 9999
+
+# 8. Send multiple test packets
+for i in 1 2 3; do
+  echo "ZTNA-TEST-$i" | nc -u -w1 1.1.1.1 9999
+  sleep 1
+done
+
+# === CLEANUP ===
+# 9. Disconnect VPN when done
+networksetup -disconnectpppoeservice "ZTNA Agent"
+```
+
+### What to Point Out During Demo
+
+**When VPN connects (Terminal 1 shows):**
+```
+[INFO] New connection from 10.0.0.22:XXXXX (scid=...)
+[INFO] Sent QAD to ... (observed: 10.0.0.22:XXXXX)
+[INFO] Registration: Agent for service 'echo-service' from ...
+```
+
+**When test traffic is sent (Terminal 1 shows):**
+```
+[INFO] Received 43 bytes to relay from aa7443... (Agent)
+[INFO] Found destination e8780... for aa7443...
+[INFO] Relayed 43 bytes from aa7443... to e8780... (→ Connector)
+[INFO] Received 43 bytes to relay from e8780... (echo response)
+[INFO] Relayed 43 bytes from e8780... to 176b5... (→ Agent)
+```
+
+**Terminal 2 shows:**
+```
+[INFO] Forwarding 15 bytes UDP to echo-server:9999
+[INFO] Received response: 15 bytes from echo-server
+```
+
+**Terminal 3 shows:**
+```
+Received 15 bytes: ZTNA-DEMO-163025
+Echoing back...
+```
+
+### Quick Status Check Commands
+
+```bash
+# === K8s Status ===
+# All pods running?
+kubectl --context k8s1 get pods -n ztna -o wide
+
+# LoadBalancer IP assigned?
+kubectl --context k8s1 get svc -n ztna intermediate-server
+
+# Recent events?
+kubectl --context k8s1 get events -n ztna --sort-by='.lastTimestamp' | tail -10
+
+# === Network Verification ===
+# Can reach LoadBalancer?
+nc -u -v -z 10.0.150.205 4433
+
+# ARP working?
+arp -an | grep "10.0.150.205"
+
+# === macOS Agent Status ===
+# VPN configuration exists?
+scutil --nc list | grep -i ztna
+
+# Extension process running?
+pgrep -fl Extension | grep -i ztna
+
+# System logs (last 1 minute)
+log show --last 1m --predicate 'subsystem CONTAINS "ztna"' --info
+```
+
+### Troubleshooting During Demo
+
+| Symptom | Quick Fix |
+|---------|-----------|
+| VPN won't connect | `networksetup -disconnectpppoeservice "ZTNA Agent"` then retry |
+| No traffic in logs | Check `ifconfig utun6` - tunnel might not be up |
+| "Destination unreachable" | Verify k8s pods are Running: `kubectl get pods -n ztna` |
+| 30s timeout disconnect | **Expected** - send traffic or wait for keepalive (if enabled) |
+| Connector CrashLoop | **Expected** without traffic - it reconnects automatically |
+
+### Demo Reset (Clean Slate)
+
+```bash
+# 1. Stop macOS VPN
+networksetup -disconnectpppoeservice "ZTNA Agent" 2>/dev/null
+
+# 2. Restart k8s deployments (forces fresh connections)
+kubectl --context k8s1 rollout restart deployment -n ztna --all
+
+# 3. Wait for pods to be ready
+kubectl --context k8s1 wait --for=condition=ready pod -l app.kubernetes.io/part-of=ztna-system -n ztna --timeout=60s
+
+# 4. Verify all running
+kubectl --context k8s1 get pods -n ztna
+```
+
+### Extended Demo: Keepalive Verification
+
+After the macOS Agent keepalive was implemented (2026-01-25), verify it works:
+
+```bash
+# Terminal 1: Watch intermediate logs
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
+
+# Terminal 4: Connect and wait
+networksetup -connectpppoeservice "ZTNA Agent"
+
+# Wait 45+ seconds (should stay connected past 30s idle timeout)
+# Watch Terminal 1 for keepalive PING activity every 10 seconds
+
+# Verify still connected after 60 seconds
+sleep 60
+scutil --nc status "ZTNA Agent" | grep -i status
+# Should show: Connected
+```
+
+---
+
+## P2P Hole Punching Status
+
+> **Current Status:** Protocol IMPLEMENTED, Real NAT Testing NOT YET DONE
+
+### What's Complete
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| P2P Protocol (Task 005) | ✅ Done | 79 unit tests, signaling, connectivity checks |
+| Docker NAT Simulation | ✅ Done | Local testing with simulated NAT |
+| Relay Path (E2E) | ✅ Done | macOS → k8s Intermediate → Connector → Echo |
+| macOS Agent Keepalive | ✅ Done | 10s PING interval prevents idle timeout |
+
+### What's NOT Done (Phase 6)
+
+| Test | Status | Notes |
+|------|--------|-------|
+| Real NAT hole punching | ❌ Pending | Requires Agent behind real NAT, Connector on different network |
+| Direct path verification | ❌ Pending | Need to verify "Path selected: DIRECT" in logs |
+| NAT classification | ❌ Pending | Run pystun3, document NAT type |
+| Hairpin NAT test | ❌ Pending | Both behind same NAT (home router) |
+| Fallback test | ❌ Pending | Block direct, verify relay fallback |
+
+### Why P2P Testing is Deferred
+
+Current topology has both Agent and Connector on the same home network:
+- macOS Agent: 10.0.150.x (home WiFi)
+- K8s Cluster: 10.0.150.101-108 (home LAN)
+- Same NAT: Both behind home router
+
+**For real P2P hole punching**, we need:
+1. Agent behind home NAT
+2. Connector on **different** network (cloud VM, mobile hotspot, or different location)
+3. Intermediate Server accessible to both
+
+### Next Steps for P2P Testing
+
+1. Deploy Intermediate Server to cloud (DigitalOcean/AWS)
+2. Deploy App Connector to cloud (same VM for simplicity)
+3. Keep macOS Agent behind home NAT
+4. Test P2P candidate exchange and direct path establishment
+5. Verify direct connection bypasses relay
 
 ---
 

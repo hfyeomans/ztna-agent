@@ -31,6 +31,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Timer for QUIC timeout handling
     private var timeoutTimer: DispatchSourceTimer?
 
+    /// Timer for sending keepalive PINGs to prevent 30s idle timeout
+    private var keepaliveTimer: DispatchSourceTimer?
+
+    /// Keepalive interval in seconds (should be less than half of 30s idle timeout)
+    private let keepaliveIntervalSeconds: Int = 10
+
     /// Server configuration (hardcoded for MVP)
     /// Use k8s LoadBalancer IP for E2E testing: 10.0.150.205
     /// Use 127.0.0.1 for local testing
@@ -79,9 +85,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         isRunning = false
         hasRegistered = false
 
-        // Stop timeout timer
+        // Stop timers
         timeoutTimer?.cancel()
         timeoutTimer = nil
+        keepaliveTimer?.cancel()
+        keepaliveTimer = nil
 
         // Cancel UDP connection
         udpConnection?.cancel()
@@ -279,6 +287,45 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         pumpOutbound()
     }
 
+    // MARK: - Keepalive Timer
+
+    private func startKeepaliveTimer() {
+        guard isRunning else { return }
+
+        keepaliveTimer?.cancel()
+
+        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
+        timer.schedule(
+            deadline: .now() + .seconds(keepaliveIntervalSeconds),
+            repeating: .seconds(keepaliveIntervalSeconds)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.sendKeepalive()
+        }
+        timer.resume()
+        keepaliveTimer = timer
+        logger.info("Keepalive timer started (interval: \(self.keepaliveIntervalSeconds)s)")
+    }
+
+    private func sendKeepalive() {
+        guard let agent, isRunning else { return }
+
+        let result = agent_send_intermediate_keepalive(agent)
+
+        if result == AgentResultOk {
+            logger.debug("Keepalive PING sent")
+            // Pump outbound to actually send the PING frame
+            pumpOutbound()
+        } else if result == AgentResultNotConnected {
+            logger.warning("Keepalive failed: not connected")
+            // Stop the timer if we're no longer connected
+            keepaliveTimer?.cancel()
+            keepaliveTimer = nil
+        } else {
+            logger.warning("Keepalive failed: \(result.rawValue)")
+        }
+    }
+
     // MARK: - Agent State Monitoring
 
     private func updateAgentState() {
@@ -345,6 +392,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             networkQueue.async { [weak self] in
                 self?.pumpOutbound()
             }
+            // Start keepalive timer to prevent 30s idle timeout
+            startKeepaliveTimer()
         } else {
             logger.warning("Failed to register for service '\(serviceId)': result=\(result.rawValue)")
         }

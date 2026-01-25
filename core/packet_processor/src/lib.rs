@@ -345,6 +345,23 @@ impl Agent {
         Ok(())
     }
 
+    /// Send a keepalive PING on the Intermediate connection to prevent idle timeout.
+    ///
+    /// This should be called periodically (e.g., every 10 seconds) to keep the
+    /// QUIC connection alive when there's no other traffic.
+    fn send_intermediate_keepalive(&mut self) -> Result<(), quiche::Error> {
+        let conn = self.intermediate_conn.as_mut().ok_or(quiche::Error::InvalidState)?;
+
+        if !conn.is_established() {
+            return Err(quiche::Error::InvalidState);
+        }
+
+        conn.send_ack_eliciting()?;
+        self.last_activity = Instant::now();
+
+        Ok(())
+    }
+
     /// Queue an IP packet for sending via DATAGRAM (P2P connection)
     fn send_datagram_p2p(&mut self, data: &[u8], connector_addr: SocketAddr) -> Result<(), quiche::Error> {
         let p2p = self.p2p_conns.get_mut(&connector_addr)
@@ -867,6 +884,37 @@ pub unsafe extern "C" fn agent_register(
 
         // Send registration
         match agent.register(service_str) {
+            Ok(()) => AgentResult::Ok,
+            Err(quiche::Error::InvalidState) => AgentResult::NotConnected,
+            Err(_) => AgentResult::QuicError,
+        }
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
+/// Send a keepalive PING on the Intermediate connection
+///
+/// Call this periodically (e.g., every 10 seconds) to prevent the QUIC
+/// connection from timing out due to inactivity. The QUIC idle timeout
+/// is typically 30 seconds.
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+///
+/// # Returns
+/// * `AgentResult::Ok` if keepalive was sent
+/// * `AgentResult::NotConnected` if not connected to Intermediate
+#[no_mangle]
+pub unsafe extern "C" fn agent_send_intermediate_keepalive(agent: *mut Agent) -> AgentResult {
+    if agent.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &mut *agent;
+
+        match agent.send_intermediate_keepalive() {
             Ok(()) => AgentResult::Ok,
             Err(quiche::Error::InvalidState) => AgentResult::NotConnected,
             Err(_) => AgentResult::QuicError,

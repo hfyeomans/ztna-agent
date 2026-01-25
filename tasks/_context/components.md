@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-25 (Task 006 Phase 1 complete - Pi k8s Deployment)
+**Last Updated:** 2026-01-25 (Task 006 Phase 5a complete, macOS Agent keepalive added)
 
 ---
 
@@ -231,13 +231,18 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 7: PR & Merge | ✅ Complete | PR #6 merged 2026-01-23 |
 
 **Key Files:**
-- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set + `agent_register`)
-- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set + `agent_register` + `agent_send_intermediate_keepalive`)
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration and keepalive
 - `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager
 
 **Service Registration:**
 - Calls `agent_register(agent, "echo-service")` after connection established
 - Enables relay routing through Intermediate Server
+
+**Keepalive (Added 2026-01-25):**
+- 10-second keepalive timer prevents 30s QUIC idle timeout
+- Calls `agent_send_intermediate_keepalive()` which sends QUIC PING frame
+- Timer starts after successful registration, stops on disconnect
 
 **Test Automation Features:**
 - `--auto-start` - Automatically start VPN on app launch
@@ -269,10 +274,11 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Phase 0: Docker NAT Simulation | ✅ Done | Local NAT testing environment |
-| Phase 1: Pi k8s Deployment | ✅ Done | Home cluster with Cilium L2 |
+| Phase 1/5: Pi k8s Deployment | ✅ Done | Home cluster with Cilium L2, full E2E relay working |
+| Phase 5a: E2E Relay Routing | ✅ Done | macOS → k8s Intermediate → Connector → Echo |
 | Phase 2: Cloud VM Deployment | 🔲 Pending | AWS/DigitalOcean |
 | Phase 3: TLS & Security | 🔲 Pending | Self-signed → Let's Encrypt |
-| Phase 4: Real NAT Testing | 🔲 Pending | Home network → Cloud |
+| **Phase 6: P2P NAT Testing** | 🔲 **NOT DONE** | Requires Agent behind real NAT, Connector on different network |
 
 **Phase 0 Completed (Docker NAT Simulation):**
 

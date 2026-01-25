@@ -1,7 +1,7 @@
 # ZTNA Testing & Demo Guide
 
 **Last Updated:** 2026-01-25
-**Status:** Task 006 Phase 1 Complete - Pi k8s Deployment Working
+**Status:** Task 006 Phase 5a Complete - Full E2E Relay + macOS Agent Keepalive Working
 
 ---
 
@@ -282,9 +282,27 @@ pgrep -fl Extension | grep tmp
 
 ### Current Limitations (MVP)
 
-1. **Service-based routing only:** Packets to 1.1.1.1 don't route to echo-service
-2. **No keepalive:** QUIC connection times out after 30s idle
+1. **Service-based routing only:** Packets to 1.1.1.1 don't route to echo-service (MVP routes by registered service ID)
+2. **~~No keepalive~~:** ✅ FIXED (2026-01-25) - macOS Agent now sends keepalive PING every 10 seconds
 3. **SNAT hides real IP:** QAD returns k8s node IP, not macOS real IP (due to externalTrafficPolicy: Cluster)
+
+### macOS Agent Keepalive (Added 2026-01-25)
+
+The macOS Agent now includes keepalive to prevent QUIC idle timeout:
+
+- **Interval:** 10 seconds (well under 30s idle timeout)
+- **Mechanism:** Calls `agent_send_intermediate_keepalive()` which sends QUIC PING frame
+- **Starts:** After successful service registration
+- **Stops:** When tunnel stops or connection lost
+
+**Verify keepalive is working:**
+```bash
+# Connect and wait 45+ seconds (past old 30s timeout)
+networksetup -connectpppoeservice "ZTNA Agent"
+sleep 45
+scutil --nc status "ZTNA Agent" | grep -i status
+# Should show: Connected (not Disconnected)
+```
 
 ---
 
