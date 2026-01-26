@@ -65,15 +65,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cert_path = args.get(2).map(|s| s.as_str()).unwrap_or("certs/cert.pem");
     let key_path = args.get(3).map(|s| s.as_str()).unwrap_or("certs/key.pem");
+    let bind_addr = args.get(4).map(|s| s.as_str()).unwrap_or("0.0.0.0");
+    // External IP for NAT environments (e.g., AWS Elastic IP)
+    // If provided, this IP is used in QUIC path validation instead of the local bind address
+    let external_ip = args.get(5).map(|s| s.as_str());
 
     log::info!("ZTNA Intermediate Server starting...");
     log::info!("  Port: {}", port);
+    log::info!("  Bind: {}", bind_addr);
+    if let Some(ext_ip) = external_ip {
+        log::info!("  External IP: {}", ext_ip);
+    }
     log::info!("  Cert: {}", cert_path);
     log::info!("  Key:  {}", key_path);
     log::info!("  ALPN: {:?}", std::str::from_utf8(ALPN_PROTOCOL));
 
     // Create server and run
-    let mut server = Server::new(port, cert_path, key_path)?;
+    let mut server = Server::new(port, bind_addr, external_ip, cert_path, key_path)?;
     server.run()
 }
 
@@ -102,10 +110,20 @@ struct Server {
     send_buf: Vec<u8>,
     /// Stream read buffer
     stream_buf: Vec<u8>,
+    /// External/public-facing address for QUIC path validation (NAT environments)
+    /// If set, this is used instead of socket.local_addr() in RecvInfo.to
+    external_addr: Option<SocketAddr>,
 }
 
 impl Server {
-    fn new(port: u16, cert_path: &str, key_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(port: u16, bind_addr: &str, external_ip: Option<&str>, cert_path: &str, key_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        // Parse external address if provided (for NAT environments like AWS Elastic IP)
+        let external_addr: Option<SocketAddr> = if let Some(ext_ip) = external_ip {
+            Some(format!("{}:{}", ext_ip, port).parse()?)
+        } else {
+            None
+        };
+
         // Create quiche configuration
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
@@ -134,7 +152,7 @@ impl Server {
 
         // Create mio poll and UDP socket
         let poll = Poll::new()?;
-        let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+        let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
         let mut socket = UdpSocket::bind(addr)?;
 
         // Register socket with poll
@@ -142,6 +160,9 @@ impl Server {
             .register(&mut socket, SOCKET_TOKEN, Interest::READABLE)?;
 
         log::info!("Server listening on {}", addr);
+        if let Some(ext) = external_addr {
+            log::info!("External address for QUIC path validation: {}", ext);
+        }
 
         Ok(Server {
             poll,
@@ -154,6 +175,7 @@ impl Server {
             recv_buf: vec![0u8; 65535],
             send_buf: vec![0u8; MAX_DATAGRAM_SIZE],
             stream_buf: vec![0u8; 65535],
+            external_addr,
         })
     }
 
@@ -248,11 +270,12 @@ impl Server {
             }
 
             // Process packet for existing connection
-            let local_addr = self.socket.local_addr()?;
+            // Use external_addr if set (for NAT environments), otherwise use socket local_addr
+            let quic_local_addr = self.external_addr.unwrap_or(self.socket.local_addr()?);
             let (should_send_qad, should_process_dgrams) = if let Some(client) = self.clients.get_mut(&conn_id) {
                 let recv_info = quiche::RecvInfo {
                     from,
-                    to: local_addr,
+                    to: quic_local_addr,
                 };
 
                 match client.conn.recv(pkt_slice, recv_info) {
@@ -317,8 +340,9 @@ impl Server {
         let scid = quiche::ConnectionId::from_ref(&scid);
 
         // Accept the connection
-        let local_addr = self.socket.local_addr()?;
-        let conn = quiche::accept(&scid, None, local_addr, from, &mut self.config)?;
+        // Use external_addr if set (for NAT environments like AWS Elastic IP)
+        let quic_local_addr = self.external_addr.unwrap_or(self.socket.local_addr()?);
+        let conn = quiche::accept(&scid, None, quic_local_addr, from, &mut self.config)?;
 
         let scid_owned = scid.into_owned();
         log::info!("New connection from {} (scid={:?})", from, scid_owned);
@@ -333,7 +357,7 @@ impl Server {
         if let Some(client) = self.clients.get_mut(&scid_owned) {
             let recv_info = quiche::RecvInfo {
                 from,
-                to: local_addr,
+                to: quic_local_addr,
             };
             client.conn.recv(pkt_buf, recv_info)?;
         }
