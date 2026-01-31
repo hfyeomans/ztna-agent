@@ -354,7 +354,7 @@ Items deferred from MVP implementation that must be addressed for production.
 | **Error Recovery** | 001-Agent, 002-Server, 003-Connector | Automatic reconnection logic | Manual intervention needed |
 | ~~TCP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.4) | Userspace TCP proxy |
 | **Registration Acknowledgment** | 002-Server, 003-Connector | Server doesn't ACK registration | Silent registration failures |
-| **Return-Path DATAGRAM→TUN** | 001-Agent | Agent needs to read DATAGRAMs from QUIC and inject into TUN | No response to ping/curl |
+| ~~Return-Path DATAGRAM→TUN~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.6) | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` |
 
 ### Priority 3: Operations (Nice to Have)
 

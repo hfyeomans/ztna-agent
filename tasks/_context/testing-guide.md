@@ -1,7 +1,7 @@
 # ZTNA Testing & Demo Guide
 
 **Last Updated:** 2026-01-31
-**Status:** Task 006 Tasks 1-5 Complete - Config, Routing, TCP, ICMP all implemented
+**Status:** Task 006 E2E Complete - Config, Routing, TCP, ICMP, Return-Path all implemented
 
 ---
 
@@ -85,11 +85,12 @@ open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app \
 
 **Terminal 5 - Test Traffic:**
 ```bash
-# Test 1: UDP echo through tunnel
-echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
-
-# Test 2: ICMP ping through tunnel (requires return-path implementation)
+# Test 1: ICMP ping through tunnel (full E2E with return-path)
 ping -c 3 10.100.0.1
+# Expected: 3 packets transmitted, 3 received, RTT ~80-150ms
+
+# Test 2: UDP echo through tunnel
+echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
 
 # Test 3: Verify split tunnel - this should NOT go through QUIC
 ping -c 1 8.8.8.8  # Should work via normal routing, not tunnel
@@ -105,17 +106,19 @@ netstat -rn | grep utun
 2. **Terminal 3:** See "QUIC connection established", "Registered for service 'echo-service'"
 3. **Terminal 1:** See "New connection from...", "Registration: Agent for service 'echo-service'"
 4. **Terminal 2:** See "Registered as Connector for 'echo-service'"
-5. **Terminal 5:** Send `echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999`
-6. **Terminal 1:** See "Relayed 38 bytes from..." (both directions)
-7. **Terminal 2:** See "Forward to local: 10 bytes to 127.0.0.1:9999"
+5. **Terminal 5:** Run `ping -c 3 10.100.0.1`
+6. **Terminal 1:** See "Service-routed datagram: 84 bytes" and "Relayed 84 bytes" (both directions)
+7. **Terminal 2:** See Connector processing ICMP Echo Requests
+8. **Terminal 3:** See "Injected 1 return packet(s) into TUN"
+9. **Terminal 5:** See `64 bytes from 10.100.0.1: icmp_seq=1 ttl=64` replies
 
 ### What Currently Works vs What Needs Deployment
 
 | Test | Status | Notes |
 |------|--------|-------|
 | UDP echo (`nc -u 10.100.0.1 9999`) | ✅ Works | Full E2E verified on AWS |
-| ICMP ping (`ping 10.100.0.1`) | 🔲 Needs Agent return-path | Connector generates reply, but Agent doesn't inject to TUN |
-| TCP connect (`curl 10.100.0.2:8080`) | 🔲 Needs Agent return-path + Connector deployment | TCP proxy implemented but untested E2E |
+| ICMP ping (`ping 10.100.0.1`) | ✅ Works | Full E2E: Agent→Intermediate→Connector (Echo Reply)→Agent→TUN |
+| TCP connect (`curl 10.100.0.2:8080`) | 🔲 Needs web-app backend | TCP proxy + return-path implemented, needs backend service deployed |
 | Split tunnel (normal traffic untouched) | ✅ Works | Only 10.100.0.0/24 routes through utun |
 
 ---
@@ -397,8 +400,8 @@ pgrep -fl Extension | grep tmp
 
 ### Current Limitations
 
-1. **Return-path not implemented:** Agent receives relayed DATAGRAMs at QUIC level but does not yet extract and inject them into the TUN interface (`packetFlow.writePackets()`)
-2. **~~No keepalive~~:** ✅ FIXED (2026-01-25) - macOS Agent sends keepalive PING every 10 seconds
+1. ~~**Return-path not implemented:**~~ ✅ FIXED (2026-01-31) - Agent reads DATAGRAMs from QUIC via `agent_recv_datagram()` FFI and injects into TUN via `packetFlow.writePackets()`
+2. ~~**No keepalive:**~~ ✅ FIXED (2026-01-25) - macOS Agent sends keepalive PING every 10 seconds
 3. **SNAT hides real IP:** QAD returns k8s node IP, not macOS real IP (due to externalTrafficPolicy: Cluster)
 4. **Config via UI only:** macOS Agent config set in SwiftUI, not config file (acceptable for client app)
 
@@ -1217,13 +1220,13 @@ tail tests/e2e/artifacts/logs/app-connector.log
 
 | Component | Tests | Status | Notes |
 |-----------|-------|--------|-------|
-| **packet_processor** | 81 | ✅ Pass | 23 agent/core + 58 P2P module |
-| ├─ agent/core | 23 | ✅ | Agent FFI, registration, packet processing |
+| **packet_processor** | 82 | ✅ Pass | 24 agent/core + 58 P2P module |
+| ├─ agent/core | 24 | ✅ | Agent FFI, registration, packet processing, recv_datagram |
 | ├─ p2p/candidate | 11 | ✅ | ICE candidate types, gathering |
 | ├─ p2p/signaling | 13 | ✅ | Message encode/decode |
 | ├─ p2p/connectivity | 17 | ✅ | Binding, pairs, check list |
 | └─ p2p/hole_punch | 17 | ✅ | Coordinator, path selection |
-| **intermediate-server** | 15 | ✅ Pass | 6 signaling + 8 registry + 1 integ |
+| **intermediate-server** | 16 | ✅ Pass | 6 signaling + 9 registry + 1 integ |
 | **app-connector** | 18 | ✅ Pass | 8 unit + 5 TCP + 2 ICMP + 1 config + 2 integ |
 
 **Unit Test Total: 114**
@@ -1232,9 +1235,9 @@ tail tests/e2e/artifacts/logs/app-connector.log
 
 | Category | Count | Status |
 |----------|-------|--------|
-| Unit tests (Rust) | 114 | ✅ All pass |
+| Unit tests (Rust) | 116 | ✅ All pass |
 | E2E tests (Shell) | 61+ | ✅ All pass (except network impairment) |
-| **Grand Total** | **175+** | ✅ |
+| **Grand Total** | **177+** | ✅ |
 
 ---
 
@@ -1443,7 +1446,7 @@ cargo test --workspace
 | Module | Tests | Description |
 |--------|-------|-------------|
 | `signaling.rs` | 6 | Session manager, agent/connector tracking |
-| `registry.rs` | 8 | Client registry, pair matching, multi-service agent, service lookup |
+| `registry.rs` | 9 | Client registry, pair matching, multi-service agent, service lookup, Connector replacement |
 | `main.rs` | 1 | Integration (handshake + QAD) |
 
 **Run Intermediate tests:**
@@ -1472,10 +1475,10 @@ cargo test --workspace
 
 | Component | Tests | Notes |
 |-----------|-------|-------|
-| packet_processor | 81 | 23 agent/core + 11 candidate + 13 signaling + 17 connectivity + 17 hole_punch |
-| intermediate-server | 15 | 6 signaling + 8 registry + 1 integration |
+| packet_processor | 82 | 24 agent/core + 11 candidate + 13 signaling + 17 connectivity + 17 hole_punch |
+| intermediate-server | 16 | 6 signaling + 9 registry + 1 integration |
 | app-connector | 18 | 8 unit + 5 TCP + 2 ICMP + 1 config + 2 integration |
-| **Total** | **114** | All passing, 0 ignored |
+| **Total** | **116** | All passing, 0 ignored |
 
 ---
 
@@ -1660,103 +1663,70 @@ pkill -f udp-echo
 
 ---
 
-## Return-Path Gap: DATAGRAM → TUN (Blocking Ping/TCP E2E)
+## Return-Path: DATAGRAM → TUN ✅ COMPLETE
 
-> **Status:** Not implemented. This is the primary gap preventing `ping 10.100.0.1` and `curl 10.100.0.2:8080` from working end-to-end.
+> **Status:** ✅ Implemented 2026-01-31. Full bidirectional tunnel working. `ping 10.100.0.1` returns replies.
 
-### What Works
-
-The **outgoing** path is fully functional:
-```
-macOS App → TUN (utun6) → PacketTunnelProvider.readPackets()
-  → processPacket() → sendRoutedDatagram() [0x2F wrap]
-  → agent_send_datagram() → QUIC DATAGRAM
-  → Intermediate Server → App Connector → backend service
-```
-
-The **Connector return** path is also complete:
-```
-Backend service response → App Connector
-  → build response IP packet (UDP echo / TCP response / ICMP Echo Reply)
-  → send_ip_packet() → QUIC DATAGRAM
-  → Intermediate Server → Agent QUIC connection
-```
-
-### What's Missing
-
-The **Agent inbound injection** path does not exist:
-```
-Agent receives QUIC DATAGRAM → ??? → packetFlow.writePackets() → TUN → macOS kernel
-```
-
-Specifically:
-
-1. **No `agent_recv_datagram()` FFI** - The Rust core has `agent_send_datagram()` for outgoing, but no corresponding function to extract received DATAGRAMs from the QUIC connection.
-
-2. **No `packetFlow.writePackets()` call** - The Swift `PacketTunnelProvider` reads outgoing packets via `packetFlow.readPackets()` and sends them through QUIC, but never calls `packetFlow.writePackets()` to inject incoming response packets into the TUN interface.
-
-3. **No DATAGRAM receive loop** - There is no loop or callback in the Agent that polls the QUIC connection for incoming DATAGRAMs and processes them.
-
-### Data Flow Diagram (Current Gap)
+### Complete Data Flow
 
 ```
                   OUTGOING (✅ Working)
 ┌──────────┐    ┌──────────────────────┐    ┌──────────────┐    ┌───────────┐
 │ macOS App│───►│ PacketTunnelProvider │───►│ Intermediate │───►│ Connector │
 │ ping ... │    │ readPackets() →      │    │ Server       │    │ → backend │
-│          │    │ agent_send_datagram()│    │              │    │           │
+│          │    │ agent_send_datagram()│    │ 0x2F routing  │    │           │
 └──────────┘    └──────────────────────┘    └──────────────┘    └───────────┘
 
-                  INCOMING (❌ Missing)
+                  INCOMING (✅ Working)
 ┌──────────┐    ┌──────────────────────┐    ┌──────────────┐    ┌───────────┐
-│ macOS App│ ✘  │ PacketTunnelProvider │ ✘  │ Intermediate │◄───│ Connector │
-│ (no      │◄───│ writePackets() NOT   │◄───│ Server       │    │ ← backend │
-│  reply)  │    │ called               │    │ (delivers OK)│    │  response │
+│ macOS App│◄───│ PacketTunnelProvider │◄───│ Intermediate │◄───│ Connector │
+│ gets     │    │ drainIncomingDgrams()│    │ Server       │    │ ← backend │
+│ reply!   │    │ writePackets()→TUN  │    │ implicit rte │    │  response │
 └──────────┘    └──────────────────────┘    └──────────────┘    └───────────┘
 ```
 
-### What Needs to Be Built
+### Implementation Details
 
-**1. Rust FFI: `agent_recv_datagram()`**
-```
-Function: agent_recv_datagram(agent: *mut Agent) -> Option<Vec<u8>>
-Purpose:  Extract next received DATAGRAM from QUIC connection
-Returns:  Raw bytes (0x2F-wrapped or plain IP packet), or None if no data
-```
+**1. Rust FFI: `agent_recv_datagram()`** (`core/packet_processor/src/lib.rs`)
+- `received_datagrams: VecDeque<Vec<u8>>` queue on Agent struct
+- Non-QAD DATAGRAMs queued in `process_incoming_datagrams()`
+- `agent_recv_datagram()` FFI polls queue, returns `AgentResult::Ok` or `AgentResult::NoData`
 
-**2. Swift: DATAGRAM receive + TUN injection loop**
-```swift
-// In PacketTunnelProvider, after QUIC connection established:
-// Poll for incoming DATAGRAMs on a timer or in the main run loop
-// For each received DATAGRAM:
-//   1. Strip 0x2F header if present (extract service_id + ip_packet)
-//   2. Validate it's a valid IP packet (version, length, checksum)
-//   3. Call packetFlow.writePackets([ipPacket], withProtocols: [AF_INET])
-//   4. macOS kernel receives the packet and delivers to originating app
-```
+**2. C Bridging** (`ios-macos/Shared/PacketProcessor-Bridging-Header.h`)
+- `AgentResult agent_recv_datagram(Agent* agent, uint8_t* out_data, size_t* out_len);`
 
-**3. Integration:**
-- The receive loop must run concurrently with the existing `readPackets()` → send loop
-- Use `DispatchQueue` or Swift concurrency to avoid blocking outgoing traffic
-- Handle both 0x2F-wrapped responses and legacy plain DATAGRAM responses
+**3. Swift: `drainIncomingDatagrams()`** (`PacketTunnelProvider.swift`)
+- Called after every `agent_recv()` that processes incoming UDP data
+- Polls `agent_recv_datagram()` in a loop until `AgentResultNoData`
+- Validates IPv4 version nibble
+- Batches packets into single `packetFlow.writePackets()` call
+- macOS kernel delivers replies to originating apps
 
 ### Verification
 
-Once implemented, these tests should pass:
 ```bash
 # ICMP ping through tunnel (Connector generates Echo Reply)
 ping -c 3 10.100.0.1
-# Expected: 3 packets transmitted, 3 received, 0% packet loss
+# Expected: 3 packets transmitted, 3 received, 0% packet loss, RTT ~80-150ms
 
-# TCP curl through tunnel (Connector proxies to backend)
-curl -v http://10.100.0.2:8080/
-# Expected: HTTP response from web-app backend
-
-# UDP echo continues to work
+# UDP echo through tunnel
 echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
-# Expected: echo response (this already works for the QUIC-level E2E)
+
+# Split tunnel (should NOT go through QUIC)
+ping -c 1 8.8.8.8  # Works via normal routing
 ```
 
-### Why UDP Echo "Works" Without This
+### Server-Side Verification
 
-The current UDP echo test (`nc -u -w1 10.100.0.1 9999`) verifies the **outgoing** path and shows relay logs in the Intermediate Server. The echo response IS relayed back to the Agent's QUIC connection, but it is silently discarded because the Agent never reads it. The test "passes" because we verify relay activity in server logs, not actual response delivery to the macOS app.
+```bash
+# SSH to AWS EC2
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
+
+# Check bidirectional relay
+sudo journalctl -u ztna-intermediate --since "1 min ago" | grep "Relayed"
+# Should see: "Relayed 84 bytes for 'echo-service' from [Agent] to [Connector]"
+# And:        "Relayed 84 bytes from [Connector] to [Agent]"
+
+# Check Connector ICMP handling (set RUST_LOG=debug temporarily)
+sudo journalctl -u ztna-connector --since "1 min ago" | grep "ICMP"
+```

@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-31 (Task 006 Tasks 1-5 complete: config, routing, TCP, ICMP)
+**Last Updated:** 2026-01-31 (Task 006 E2E complete: config, routing, TCP, ICMP, return-path)
 
 ---
 
@@ -20,8 +20,10 @@
 - Creates QUIC connections via quiche
 - Sends/receives QUIC DATAGRAMs
 - Parses QAD OBSERVED_ADDRESS messages
-- **Registers for target service (0x10 protocol)** ← NEW
-- Tunnels intercepted IP packets
+- Registers for target service (0x10 protocol)
+- Tunnels intercepted IP packets (outgoing via `agent_send_datagram()`)
+- **Receives return packets via `agent_recv_datagram()` FFI** ← NEW (2026-01-31)
+- **Queues received DATAGRAMs in `VecDeque<Vec<u8>>`** ← NEW
 - Thread-safe state management
 
 **Waiting on:** Intermediate Server (002) for testing
@@ -238,9 +240,9 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 7: PR & Merge | ✅ Complete | PR #6 merged 2026-01-23 |
 
 **Key Files:**
-- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set + `agent_register` + `agent_send_intermediate_keepalive`)
-- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration and keepalive
-- `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set + `agent_register` + `agent_send_intermediate_keepalive` + `agent_recv_datagram`)
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration, keepalive, and return-path TUN injection
+- `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager + configuration UI
 
 **Service Registration:**
 - Calls `agent_register(agent, "echo-service")` after connection established
@@ -250,6 +252,12 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - 10-second keepalive timer prevents 30s QUIC idle timeout
 - Calls `agent_send_intermediate_keepalive()` which sends QUIC PING frame
 - Timer starts after successful registration, stops on disconnect
+
+**Return-Path TUN Injection (Added 2026-01-31):**
+- `drainIncomingDatagrams()` polls `agent_recv_datagram()` after each `agent_recv()`
+- Validates IPv4 version nibble, batches packets
+- Injects via `packetFlow.writePackets()` into TUN for kernel delivery
+- Enables `ping 10.100.0.1` to receive Echo Replies
 
 **Test Automation Features:**
 - `--auto-start` - Automatically start VPN on app launch
@@ -289,6 +297,8 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 4.3: IP→Service Routing | ✅ Done | 0x2F service-routed datagrams, multi-service registration |
 | Phase 4.4: TCP Support | ✅ Done | Userspace TCP proxy with session tracking |
 | Phase 4.5: ICMP Support | ✅ Done | Connector-local Echo Reply |
+| Phase 4.6: Return-Path (DATAGRAM→TUN) | ✅ Done | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` + `writePackets()` |
+| Phase 4.7: Registry Connector Replacement Fix | ✅ Done | `unregister()` guard prevents clobbering new registrations |
 | Phase 3: TLS & Security | 🔲 Pending | Self-signed → Let's Encrypt |
 | **Phase 6: P2P NAT Testing** | 🔲 **NOT DONE** | Requires Agent behind real NAT, Connector on different network |
 
@@ -486,7 +496,8 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 **Path to production deployment:**
 - 🔄 All of above + **006: Cloud Deployment** (IN PROGRESS)
   - ✅ Config files, multi-service routing, TCP/ICMP support
-  - 🔲 Return-path DATAGRAM→TUN injection (Agent side)
+  - ✅ Return-path DATAGRAM→TUN injection (Agent side) - ICMP ping works E2E
+  - ✅ Registry Connector replacement bug fix
   - 🔲 P2P NAT testing, TLS, production readiness
 
 ---
@@ -615,6 +626,7 @@ const REG_TYPE_AGENT: u8 = 0x10;
 
 pub unsafe extern "C" fn agent_register(agent: *mut Agent, service_id: *const c_char) -> AgentResult;
 pub unsafe extern "C" fn agent_send_datagram(agent: *mut Agent, buf: *const u8, len: usize) -> AgentResult;
+pub unsafe extern "C" fn agent_recv_datagram(agent: *mut Agent, out_data: *mut u8, out_len: *mut usize) -> AgentResult;
 ```
 
 **Swift (`PacketTunnelProvider.swift`):**
