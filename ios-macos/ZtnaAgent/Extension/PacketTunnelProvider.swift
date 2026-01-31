@@ -3,6 +3,11 @@ import Network
 import os
 import Darwin
 
+private struct ServiceConfig {
+    let id: String
+    let virtualIp: String
+}
+
 final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private let logger = Logger(subsystem: "com.hankyeomans.ztna-agent", category: "Tunnel")
@@ -37,14 +42,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Keepalive interval in seconds (should be less than half of 30s idle timeout)
     private let keepaliveIntervalSeconds: Int = 10
 
-    /// Server configuration (hardcoded for MVP)
-    /// Use k8s LoadBalancer IP for E2E testing: 10.0.150.205
-    /// Use 127.0.0.1 for local testing
-    private let serverHost = "10.0.150.205"
-    private let serverPort: UInt16 = 4433
+    /// Server configuration (loaded from providerConfiguration at tunnel start)
+    private var serverHost: String = "3.128.36.92"
+    private var serverPort: UInt16 = 4433
+    private var targetServiceId: String = "echo-service"
 
-    /// Target service ID for registration (must match app-connector's --service flag)
-    private let targetServiceId = "echo-service"
+    /// IPv4 bytes derived from serverHost (single source of truth)
+    private var serverIPBytes: [UInt8] = [3, 128, 36, 92]
+
+    /// Service definitions for IP→service routing
+    private var services: [ServiceConfig] = []
+
+    /// Route table: destination IPv4 (as UInt32 in network byte order) → service ID
+    private var routeTable: [UInt32: String] = [:]
 
     /// Track if we've already registered to avoid duplicate registrations
     private var hasRegistered = false
@@ -59,6 +69,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]? = nil) async throws {
         logger.info("Starting tunnel...")
+
+        loadConfiguration()
 
         // Apply tunnel network settings
         let settings = buildTunnelSettings()
@@ -107,14 +119,80 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         nil
     }
 
+    // MARK: - Configuration Loading
+
+    private func loadConfiguration() {
+        guard let tunnelProtocol = protocolConfiguration as? NETunnelProviderProtocol,
+              let config = tunnelProtocol.providerConfiguration else {
+            logger.warning("No provider configuration found, using defaults")
+            serverIPBytes = parseIPv4(serverHost)
+            return
+        }
+
+        if let host = config["serverHost"] as? String, !host.isEmpty {
+            serverHost = host
+        }
+        if let port = config["serverPort"] as? Int, port > 0 {
+            serverPort = UInt16(port)
+        }
+        if let service = config["serviceId"] as? String, !service.isEmpty {
+            targetServiceId = service
+        }
+
+        // Parse services array for IP→service routing
+        if let servicesArray = config["services"] as? [[String: Any]] {
+            for entry in servicesArray {
+                guard let id = entry["id"] as? String,
+                      let virtualIp = entry["virtualIp"] as? String else {
+                    continue
+                }
+                let svc = ServiceConfig(id: id, virtualIp: virtualIp)
+                services.append(svc)
+
+                // Build route table: IP → service_id
+                if let ipKey = ipv4ToUInt32(virtualIp) {
+                    routeTable[ipKey] = id
+                    logger.info("Route: \(virtualIp) -> '\(id)'")
+                }
+            }
+            logger.info("Loaded \(self.services.count) service routes")
+        }
+
+        serverIPBytes = parseIPv4(serverHost)
+        logger.info("Configuration loaded: \(self.serverHost):\(self.serverPort), service=\(self.targetServiceId), routes=\(self.routeTable.count)")
+    }
+
+    private func parseIPv4(_ host: String) -> [UInt8] {
+        let components = host.split(separator: ".").compactMap { UInt8($0) }
+        guard components.count == 4 else {
+            logger.error("Invalid IPv4 address format: \(host)")
+            return [0, 0, 0, 0]
+        }
+        return components
+    }
+
+    private func ipv4ToUInt32(_ host: String) -> UInt32? {
+        let bytes = parseIPv4(host)
+        guard bytes != [0, 0, 0, 0] || host == "0.0.0.0" else { return nil }
+        return UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16 | UInt32(bytes[2]) << 8 | UInt32(bytes[3])
+    }
+
+    private func extractDestIPv4(_ packet: Data) -> UInt32? {
+        guard packet.count >= 20 else { return nil }
+        // Destination IP is at bytes 16-19 in IPv4 header
+        return UInt32(packet[16]) << 24 | UInt32(packet[17]) << 16 | UInt32(packet[18]) << 8 | UInt32(packet[19])
+    }
+
     // MARK: - Tunnel Configuration
 
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "192.0.2.1")
 
         let ipv4 = NEIPv4Settings(addresses: ["100.64.0.1"], subnetMasks: ["255.255.255.255"])
+        // Route ZTNA service IPs through tunnel (10.100.0.0/24 = virtual service range)
+        // 10.100.0.1 = echo-service (UDP 9999)
         ipv4.includedRoutes = [
-            NEIPv4Route(destinationAddress: "1.1.1.1", subnetMask: "255.255.255.255")
+            NEIPv4Route(destinationAddress: "10.100.0.0", subnetMask: "255.255.255.0")
         ]
         settings.ipv4Settings = ipv4
         settings.dnsSettings = NEDNSSettings(servers: ["8.8.8.8"])
@@ -131,6 +209,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let params = NWParameters.udp
         params.allowLocalEndpointReuse = true
+
+        // Force IPv4 to avoid IPv6 preference on dual-stack networks
+        if let ipOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+            ipOptions.version = .v4
+        }
 
         let connection = NWConnection(host: host, port: port, using: params)
 
@@ -237,10 +320,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func handleReceivedPacket(_ data: Data) {
         guard let agent else { return }
 
-        // Parse server address into IP bytes
-        // For k8s E2E testing: 10.0.150.205
-        // For local testing: 127.0.0.1
-        var ipBytes: [UInt8] = [10, 0, 150, 205]
+        var ipBytes = serverIPBytes
 
         let result = data.withUnsafeBytes { buffer -> AgentResult in
             guard let baseAddress = buffer.baseAddress else { return AgentResultInvalidPointer }
@@ -254,10 +334,48 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         if result == AgentResultOk {
+            // Drain any received IP packets from tunnel and inject into TUN
+            drainIncomingDatagrams()
             // Process any outbound packets generated by QUIC
             pumpOutbound()
         } else {
             logger.warning("agent_recv error: \(result.rawValue)")
+        }
+    }
+
+    /// Drain received IP packets from the QUIC tunnel and inject into TUN.
+    ///
+    /// Called after agent_recv() processes incoming UDP data. The Rust agent
+    /// queues any received QUIC DATAGRAMs (IP packets from Connector responses).
+    /// We poll until empty and write each packet to packetFlow for kernel delivery.
+    private func drainIncomingDatagrams() {
+        guard let agent, isRunning else { return }
+
+        var packets: [Data] = []
+        var protocols: [NSNumber] = []
+
+        while true {
+            var len = recvBuffer.count
+            let result = agent_recv_datagram(agent, &recvBuffer, &len)
+
+            if result == AgentResultNoData {
+                break
+            }
+
+            if result == AgentResultOk, len > 0 {
+                // Validate: must be IPv4 (version nibble == 4)
+                if recvBuffer[0] >> 4 == 4 {
+                    packets.append(Data(recvBuffer.prefix(len)))
+                    protocols.append(NSNumber(value: AF_INET))
+                }
+            } else {
+                break
+            }
+        }
+
+        if !packets.isEmpty {
+            packetFlow.writePackets(packets, withProtocols: protocols)
+            logger.debug("Injected \(packets.count) return packet(s) into TUN")
         }
     }
 
@@ -378,24 +496,36 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        let serviceId = targetServiceId
-        logger.info("Calling agent_register for '\(serviceId)'")
-        let result = serviceId.withCString { servicePtr in
-            agent_register(agent, servicePtr)
+        // Collect service IDs to register: use services array if configured, else single targetServiceId
+        var serviceIds: [String] = services.map(\.id)
+        if serviceIds.isEmpty {
+            serviceIds = [targetServiceId]
         }
-        logger.info("agent_register returned: \(result.rawValue)")
 
-        if result == AgentResultOk {
+        var anySuccess = false
+        for serviceId in serviceIds {
+            logger.info("Calling agent_register for '\(serviceId)'")
+            let result = serviceId.withCString { servicePtr in
+                agent_register(agent, servicePtr)
+            }
+            logger.info("agent_register returned: \(result.rawValue)")
+
+            if result == AgentResultOk {
+                anySuccess = true
+                logger.info("Registered for service '\(serviceId)'")
+            } else {
+                logger.warning("Failed to register for service '\(serviceId)': result=\(result.rawValue)")
+            }
+        }
+
+        if anySuccess {
             hasRegistered = true
-            logger.info("Registered for service '\(serviceId)'")
-            // Pump outbound to send registration DATAGRAM
+            // Pump outbound to send registration DATAGRAMs
             networkQueue.async { [weak self] in
                 self?.pumpOutbound()
             }
             // Start keepalive timer to prevent 30s idle timeout
             startKeepaliveTimer()
-        } else {
-            logger.warning("Failed to register for service '\(serviceId)': result=\(result.rawValue)")
         }
     }
 
@@ -440,19 +570,55 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        // Send packet through QUIC tunnel as DATAGRAM
-        let result = data.withUnsafeBytes { buffer -> AgentResult in
+        // If route table is populated, wrap packet with 0x2F service header
+        if !routeTable.isEmpty, let destIp = extractDestIPv4(data), let serviceId = routeTable[destIp] {
+            sendRoutedDatagram(agent: agent, serviceId: serviceId, packet: data)
+        } else {
+            // Legacy path: send raw IP packet (implicit single-service routing)
+            sendRawDatagram(agent: agent, packet: data)
+        }
+    }
+
+    private func sendRoutedDatagram(agent: OpaquePointer, serviceId: String, packet: Data) {
+        // Build wrapped datagram: [0x2F, id_len, service_id_bytes..., ip_packet...]
+        let idBytes = Array(serviceId.utf8)
+        var wrapped = Data(capacity: 2 + idBytes.count + packet.count)
+        wrapped.append(0x2F)
+        wrapped.append(UInt8(idBytes.count))
+        wrapped.append(contentsOf: idBytes)
+        wrapped.append(packet)
+
+        let result = wrapped.withUnsafeBytes { buffer -> AgentResult in
             guard let baseAddress = buffer.baseAddress else { return AgentResultInvalidPointer }
             return agent_send_datagram(
                 agent,
                 baseAddress.assumingMemoryBound(to: UInt8.self),
-                data.count
+                wrapped.count
             )
         }
 
         if result == AgentResultOk {
-            logger.debug("Tunneled packet (\(data.count) bytes)")
-            // Pump outbound to send the DATAGRAM
+            logger.debug("Tunneled routed packet (\(packet.count) bytes) -> '\(serviceId)'")
+            networkQueue.async { [weak self] in
+                self?.pumpOutbound()
+            }
+        } else {
+            logger.warning("Failed to tunnel routed packet: \(result.rawValue)")
+        }
+    }
+
+    private func sendRawDatagram(agent: OpaquePointer, packet: Data) {
+        let result = packet.withUnsafeBytes { buffer -> AgentResult in
+            guard let baseAddress = buffer.baseAddress else { return AgentResultInvalidPointer }
+            return agent_send_datagram(
+                agent,
+                baseAddress.assumingMemoryBound(to: UInt8.self),
+                packet.count
+            )
+        }
+
+        if result == AgentResultOk {
+            logger.debug("Tunneled packet (\(packet.count) bytes)")
             networkQueue.async { [weak self] in
                 self?.pumpOutbound()
             }

@@ -68,14 +68,20 @@ Critical issues identified and tasks added:
 ### 1.3 Address Hardcoding Technical Debt (Added 2026-01-25)
 
 **Problem**: Multiple places have hardcoded IPs that must stay in sync:
-- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift`: `serverHost = "10.0.150.205"`
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift`: `serverHost` (now configurable per deploy)
 - `deploy/k8s/overlays/pi-home/kustomization.yaml`: `io.cilium/lb-ipam-ips: "10.0.150.205"`
-- Test commands use `1.1.1.1` which has no semantic meaning
 
-**Required Changes for Cloud Deployment:**
-- [ ] macOS Agent: Read server address from configuration (UserDefaults, plist, or MDM profile)
+**Progress (2026-01-26):**
+- [x] Test scripts: Now use `10.100.0.0/24` as ZTNA virtual service range
+  - `10.100.0.1` = echo-service (UDP 9999)
+  - Removed all `1.1.1.1` references from documentation
+- [x] macOS Agent VPN routing: Updated to route `10.100.0.0/24` through tunnel
+- [x] AWS deployment: serverHost = "3.128.36.92"
+- [x] Pi k8s deployment: serverHost = "10.0.150.205"
+
+**Remaining Work:**
+- [x] macOS Agent: Read server address from configuration (UserDefaults + providerConfiguration) ✅ (Task #2)
 - [ ] K8s overlays: Use environment-specific kustomization files (`pi-home/`, `do-nyc1/`, `aws-us-east-2/`)
-- [ ] Test scripts: Use a service-specific virtual IP (e.g., `100.64.0.100` for echo-service) instead of `1.1.1.1`
 - [ ] Document IP allocation scheme for different environments
 
 **Why This Matters:**
@@ -157,59 +163,63 @@ Critical issues identified and tasks added:
 
 ---
 
-## Phase 4: AWS VPC Deployment (Production-like)
+## Phase 4: AWS Deployment ✅ COMPLETE (Simplified EC2)
 
-### 4.1 VPC Infrastructure
-- [ ] Create VPC (10.0.0.0/16) in us-east-2
-- [ ] Create public subnet (10.0.1.0/24)
-- [ ] Create private subnet (10.0.2.0/24)
-- [ ] Create Internet Gateway
-- [ ] Create NAT Gateway
-- [ ] Configure route tables
+> **Status (2026-01-25):** Deployed simplified AWS setup (EC2 only, no ECS/Fargate).
+> All components running on single EC2 instance for initial testing.
 
-### 4.2 Security Groups
-- [ ] Create `ztna-intermediate-sg`
-  - [ ] UDP 4433 from 0.0.0.0/0
-  - [ ] TCP 22 from admin IP
-- [ ] Create `ztna-connector-sg`
-  - [ ] UDP 4434 from 0.0.0.0/0
-  - [ ] All outbound allowed
-- [ ] Create `ztna-backend-sg`
-  - [ ] TCP 8080 from connector SG
-  - [ ] TCP 27960 from connector SG (Quake)
+### 4.1 AWS Resources Created ✅
+- [x] Using existing VPC: `vpc-0b18aa8ab8f451328` (masque_proxy-vpc, us-east-2)
+- [x] Public subnet: `subnet-0876a3d9e3624de7f` (10.0.2.0/24)
+- [x] Internet Gateway attached
+- [x] Route table configured (0.0.0.0/0 → IGW)
 
-### 4.3 EC2 for Intermediate Server
-- [ ] Launch t3.micro with Ubuntu 24.04
-- [ ] Assign Elastic IP
-- [ ] Install and configure Intermediate Server
-- [ ] Verify listening on UDP 4433
+### 4.2 Security Group ✅
+- [x] Created `ztna-intermediate` (sg-0d15ab7f7b196d540)
+  - [x] UDP 4433 from 0.0.0.0/0 (QUIC)
+  - [x] UDP 4434 from 0.0.0.0/0 (P2P)
+  - [x] TCP 22 from 0.0.0.0/0 (SSH)
 
-### 4.4 ECR Repositories
-- [ ] Create `ztna/app-connector` repository
-- [ ] Create `ztna/http-app` repository
-- [ ] Create `ztna/quakekube` repository
+### 4.3 EC2 Instance ✅
+- [x] Instance: `i-021d9b1765cb49ca7` (ztna-intermediate-server)
+- [x] Type: t3.micro, Ubuntu 22.04
+- [x] Elastic IP: `3.128.36.92` (eipalloc-018675ba117990c48)
+- [x] Private IP: `10.0.2.126`
+- [x] SSH Key: `~/.ssh/hfymba.aws.pem`
+- [x] Tailscale VPC access configured for SSH
 
-### 4.5 Container Images
-- [ ] Build app-connector for linux/amd64
-- [ ] Push to ECR
-- [ ] Build/tag httpbin image
-- [ ] Push to ECR
+### 4.4 Software Deployment ✅
+- [x] Rust toolchain installed (1.93.0)
+- [x] cmake and build dependencies installed
+- [x] Repository cloned and binaries built (release)
+- [x] systemd services created and enabled:
+  - [x] `ztna-intermediate.service` (UDP 4433)
+  - [x] `ztna-connector.service` (echo-service → 127.0.0.1:8080)
+  - [x] `echo-server.service` (Python echo on TCP 8080)
 
-### 4.6 ECS Cluster and Services
-- [ ] Create ECS Fargate cluster
-- [ ] Create task definition for App Connector
-  - [ ] UDP port 4434
-  - [ ] TCP health check
-- [ ] Create task definition for HTTP App
-- [ ] Create NLB with UDP listeners
-- [ ] Create target groups
-- [ ] Deploy services
+### 4.5 Service Configuration
+```bash
+# SSH via Tailscale (recommended)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
 
-### 4.7 AWS Validation
-- [ ] Verify Intermediate accessible from internet
-- [ ] Verify NLB routes to Fargate tasks
-- [ ] Test relay through AWS infrastructure
-- [ ] Compare latency with DigitalOcean
+# Service management
+sudo systemctl status ztna-intermediate ztna-connector echo-server
+sudo journalctl -u ztna-intermediate -f  # View logs
+```
+
+### 4.6 macOS Agent Configuration ✅
+- [x] Updated `PacketTunnelProvider.swift` to use AWS IP: `3.128.36.92`
+- [x] Rebuilt and deployed to /Applications/ZtnaAgent.app
+
+### 4.7 Testing
+- [ ] Verify macOS Agent connects to AWS Intermediate
+- [ ] Verify full E2E relay path works
+- [ ] Measure latency vs Pi k8s deployment
+
+### 4.8 Future: ECS/Fargate (Deferred)
+- [ ] ECR repositories for container images
+- [ ] ECS cluster for scalable deployment
+- [ ] NLB for UDP load balancing
 
 ---
 
@@ -253,7 +263,7 @@ Critical issues identified and tasks added:
 - [x] Verify packet tunneling (DATAGRAM)
 - [x] **Full E2E routing to echo-server** ✅ (2026-01-25)
   - UDP traffic relayed: Agent → Intermediate → Connector → echo-server → response back
-  - Test: `echo "ZTNA-TEST" | nc -u -w1 1.1.1.1 9999` (routed via VPN tunnel)
+  - Test: `echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999` (routed via VPN tunnel)
 
 ### 5.7 Documentation
 - [x] Create comprehensive skill guide (`deploy/k8s/k8s-deploy-skill.md`)
@@ -465,6 +475,193 @@ Agent → Intermediate → Connector → Echo Server → Response
 - [ ] CI/CD pipeline for cloud deployment
 - [ ] Terraform infrastructure-as-code
 - [ ] Different NAT environments (mobile hotspot, coffee shop WiFi)
+
+---
+
+---
+
+## 🎯 CURRENT PHASE: Post-Cloud Deployment Tasks
+
+> **Status (2026-01-26):** AWS E2E test pending VPN connection. Once verified,
+> proceeding with configuration mechanism, then protocol expansion.
+
+### Recommended Task Sequence (Option 2 - Config First)
+
+| Order | Task | Status | Why |
+|-------|------|--------|-----|
+| 1 | **AWS E2E Test** | ✅ Complete | Validated AWS deployment (2026-01-26) |
+| 2 | **Config File Mechanism** | ✅ Complete | All 3 components configurable (2026-01-31) |
+| 3 | **IP→Service Routing** | ✅ Complete | Multi-service routing with 0x2F protocol (2026-01-31) |
+| 4 | **TCP Support in App Connector** | ✅ Complete | Userspace TCP proxy (2026-01-31) |
+| 5 | **ICMP Support** | ✅ Complete | Echo Reply at Connector (2026-01-31) |
+| 6 | **Admin Dashboard** | ⬜ Future | UI layer on config mechanism |
+
+### Task Details
+
+#### Task 1: AWS E2E Test ⬜ PENDING VPN
+- [ ] Connect macOS VPN to AWS intermediate (3.128.36.92:4433)
+- [ ] Verify route 10.100.0.0/24 through tunnel
+- [ ] Test: `echo "ZTNA-TEST-AWS" | nc -u -w1 10.100.0.1 9999`
+- [ ] Verify response from echo-server
+- [ ] Document latency compared to Pi k8s
+
+#### Task 2: Config File Mechanism ✅ COMPLETE (2026-01-31)
+**Purpose:** Eliminate hardcoded IPs, enable dynamic service definitions
+
+**Deliverables:**
+- [x] Define config file format (JSON chosen for cross-platform simplicity)
+- [x] macOS Agent: Config via `NETunnelProviderProtocol.providerConfiguration` + UserDefaults UI
+- [x] App Connector: Read `/etc/ztna/connector.json` (or `--config` flag)
+- [x] Intermediate Server: Read `/etc/ztna/intermediate.json` (or `--config` flag)
+- [x] Example configs: `deploy/config/{connector,intermediate,agent}.json`
+
+**Config Schema (Draft):**
+```yaml
+# Agent config
+intermediate_server:
+  host: "3.128.36.92"
+  port: 4433
+
+services:
+  - id: echo-service
+    virtual_ip: 10.100.0.1
+    port: 9999
+    protocol: udp
+  - id: web-app
+    virtual_ip: 10.100.0.2
+    port: 443
+    protocol: tcp
+```
+
+#### Task 3: IP→Service Routing ✅ COMPLETE (2026-01-31)
+**Purpose:** Route packets based on destination IP, not just service ID
+
+**Implementation:**
+- [x] Agent: Build route table from config (IP → service_id) via `services` array in providerConfiguration
+- [x] Agent: Wrap packets with `[0x2F, id_len, service_id, ip_packet]` when route table populated
+- [x] Intermediate: Parse 0x2F service-routed datagrams and route to correct Connector
+- [x] Registry: Support multiple services per Agent connection (HashSet)
+- [x] Backward compatible: non-0x2F datagrams use implicit routing
+- [ ] Test with 2+ services (echo + web) - requires deploying second Connector
+
+#### Task 4: TCP Support in App Connector ✅ COMPLETE (2026-01-31)
+**Purpose:** Support web apps, databases, APIs (most enterprise traffic)
+
+**Implementation:** Userspace TCP proxy with session tracking in `app-connector/src/main.rs`
+
+**Deliverables:**
+- [x] Parse IP header for protocol type (dispatches protocol 6 to `handle_tcp_packet()`)
+- [x] Handle TCP packets: SYN→connect, data→forward, FIN→close, RST→reset
+- [x] Manage TCP state/sessions over QUIC (`TcpSession` struct, `tcp_sessions` HashMap)
+- [x] Build TCP/IP response packets with proper checksums (`build_tcp_packet()`, `tcp_checksum()`)
+- [x] Poll backend TcpStreams for return data (`process_tcp_sessions()`)
+- [x] Session cleanup on idle timeout (120s)
+- [ ] Test with HTTP backend (curl through tunnel) - requires deployment
+- [x] Document TCP over QUIC design (state.md Phase 4.4)
+
+#### Task 5: ICMP Support ✅ COMPLETE (2026-01-31)
+**Purpose:** Enable ping/traceroute through tunnel for diagnostics
+
+**Implementation:** Connector generates Echo Reply directly (no backend forwarding needed)
+
+**Deliverables:**
+- [x] Handle ICMP packets (protocol 1) in `forward_to_local()` dispatch
+- [x] Parse Echo Request (type 8), generate Echo Reply (type 0) with `build_icmp_reply()`
+- [x] Preserve identifier, sequence number, and payload data
+- [x] Proper ICMP checksum calculation via `icmp_checksum()`
+- [ ] Test: `ping 10.100.0.1` through tunnel - requires deployment
+- [x] Document ICMP handling (state.md Phase 4.5)
+
+---
+
+## Future: Dynamic Service Configuration (Post-Cloud Deployment)
+
+> **Critical Requirement:** After successful cloud deployment validation, eliminate all hardcoded IPs
+> and move to a dynamic, configurable system.
+
+### Problem Statement
+
+Currently hardcoded values that must be eliminated:
+- **macOS Agent:** `serverHost = "3.128.36.92"` (intermediate server address)
+- **macOS Agent:** `10.100.0.0/24` (routed service range)
+- **macOS Agent:** `targetServiceId = "echo-service"`
+- **App Connector:** `--server`, `--service`, `--forward` CLI args
+- **Intermediate Server:** Port 4433 (less critical but still hardcoded)
+
+### Required Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      ZTNA Control Plane (Future)                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌─────────────────────┐         ┌─────────────────────────────────────────┐   │
+│  │   Policy Service    │         │         Service Registry                 │   │
+│  │   (defines what     │◄───────►│   - echo-service → 10.100.0.1:9999      │   │
+│  │    agents can       │         │   - web-app → 10.100.0.2:443            │   │
+│  │    access)          │         │   - quake-server → 10.100.0.3:27960     │   │
+│  └─────────────────────┘         └─────────────────────────────────────────┘   │
+│            │                                    │                               │
+│            │ Policy Push                        │ Service Discovery             │
+│            ▼                                    ▼                               │
+│  ┌─────────────────────┐         ┌─────────────────────────────────────────┐   │
+│  │   macOS Agent       │         │         App Connector                    │   │
+│  │   - Receives policy │         │   - Registers services dynamically       │   │
+│  │   - Updates routes  │         │   - Reports health/status                │   │
+│  │   - Knows services  │         │   - Receives backend config              │   │
+│  └─────────────────────┘         └─────────────────────────────────────────┘   │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation Phases
+
+#### Phase A: Configuration Files
+- [ ] macOS Agent: Read config from `~/Library/Application Support/ZtnaAgent/config.json`
+  ```json
+  {
+    "intermediate": { "host": "3.128.36.92", "port": 4433 },
+    "services": [
+      { "id": "echo-service", "virtualIp": "10.100.0.1", "port": 9999 }
+    ]
+  }
+  ```
+- [ ] App Connector: Read config from `/etc/ztna/connector.yaml`
+- [ ] Intermediate Server: Read config from `/etc/ztna/intermediate.yaml`
+
+#### Phase B: MDM/Provisioning Support (macOS)
+- [ ] Support MDM configuration profiles for enterprise deployment
+- [ ] Support UserDefaults for manual configuration via UI
+- [ ] Support environment-based config (dev/staging/prod)
+
+#### Phase C: Dynamic Service Discovery
+- [ ] Control plane API for service registration
+- [ ] Agent polls for policy updates
+- [ ] Connector announces services on startup
+- [ ] Intermediate routes based on live registry
+
+#### Phase D: Virtual IP Allocation
+- [ ] Automatic virtual IP assignment for new services
+- [ ] DNS-based service discovery (e.g., `echo-service.ztna.local` → `10.100.0.1`)
+- [ ] Conflict detection and resolution
+
+### Key Design Decisions (To Be Made)
+
+| Decision | Options | Notes |
+|----------|---------|-------|
+| Config format | JSON, YAML, plist, protobuf | JSON likely easiest cross-platform |
+| Config delivery | File, API, MDM, DNS | May need multiple for different scenarios |
+| Service discovery | Static, mDNS, custom API | Custom API most flexible |
+| Virtual IP range | 10.100.0.0/24, 100.64.0.0/10 | Must not conflict with real networks |
+
+### Why This Matters
+
+Without dynamic configuration:
+- Every deployment requires code changes and rebuilds
+- Cannot add new services without Agent updates
+- Cannot scale to multiple environments (dev/staging/prod)
+- Cannot support enterprise multi-tenant deployments
+- P2P hole punching config is static
 
 ---
 

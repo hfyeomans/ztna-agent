@@ -1,11 +1,126 @@
 # ZTNA Testing & Demo Guide
 
-**Last Updated:** 2026-01-25
-**Status:** Task 006 Phase 5a Complete - Full E2E Relay + macOS Agent Keepalive Working
+**Last Updated:** 2026-01-31
+**Status:** Task 006 Tasks 1-5 Complete - Config, Routing, TCP, ICMP all implemented
 
 ---
 
-## Pi k8s Cluster Demo (Task 006 Phase 1) - NEW
+## AWS Cloud Comprehensive Demo (Task 006 Current) - RECOMMENDED
+
+This is the primary demo showing the complete ZTNA stack with all current capabilities.
+
+### Network Topology
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                  AWS Cloud Deployment (Comprehensive Demo)                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────────┐                    ┌──────────────────────────────────┐│
+│  │  macOS Agent    │                    │  AWS EC2 (3.128.36.92)          ││
+│  │  (Home NAT)    │                    │                                  ││
+│  │                 │     QUIC/UDP       │  ┌────────────────────────────┐ ││
+│  │  Config:        │◄──── :4433 ───────►│  │ Intermediate Server       │ ││
+│  │  echo-service   │  0x2F routed       │  │ (systemd: ztna-           │ ││
+│  │  → 10.100.0.1  │                    │  │  intermediate.service)    │ ││
+│  │  web-app        │                    │  └────────────────────────────┘ ││
+│  │  → 10.100.0.2  │                    │               │                  ││
+│  │                 │                    │               ▼                  ││
+│  │  Split tunnel:  │                    │  ┌────────────────────────────┐ ││
+│  │  10.100.0.0/24  │                    │  │ App Connector              │ ││
+│  │    → utun       │                    │  │ (systemd: ztna-            │ ││
+│  │  everything     │                    │  │  connector.service)        │ ││
+│  │  else: normal   │                    │  │ UDP + TCP + ICMP           │ ││
+│  └─────────────────┘                    │  └───────────┬────────────────┘ ││
+│                                          │              │                  ││
+│                                          │              ▼                  ││
+│                                          │  ┌────────────────────────────┐ ││
+│                                          │  │ Echo Server (UDP :9999)    │ ││
+│                                          │  │ (systemd: echo-            │ ││
+│                                          │  │  server.service)           │ ││
+│                                          │  └────────────────────────────┘ ││
+│                                          └──────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Multi-Terminal Demo Setup (5 Terminals)
+
+Open 5 terminal windows to run the complete demo:
+
+**Terminal 1 - AWS Server Logs (Intermediate):**
+```bash
+# SSH to AWS instance and watch intermediate-server logs
+ssh ubuntu@3.128.36.92  # or via Tailscale: ssh ubuntu@10.0.2.126
+sudo journalctl -u ztna-intermediate -f
+```
+*Watch for: "New connection", "Registration", "Relayed X bytes", "0x2F service datagram"*
+
+**Terminal 2 - AWS Server Logs (Connector):**
+```bash
+ssh ubuntu@3.128.36.92
+sudo journalctl -u ztna-connector -f
+```
+*Watch for: "Registered as Connector", "Forward to local", "TCP session", "ICMP Echo Reply"*
+
+**Terminal 3 - macOS Agent Logs:**
+```bash
+log stream --predicate 'subsystem CONTAINS "ztna"' --info
+```
+*Watch for: "QUIC connection established", "Registered for service", "Tunneled routed packet"*
+
+**Terminal 4 - Launch macOS Agent App:**
+```bash
+# Build if needed
+xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
+    -scheme ZtnaAgent -configuration Debug \
+    -derivedDataPath /tmp/ZtnaAgent-build build
+
+# Launch (configure UI: Host=3.128.36.92, Port=4433, Service=echo-service)
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
+
+# Or with auto-start for testing
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app \
+    --args --auto-start --auto-stop 120 --exit-after-stop
+```
+
+**Terminal 5 - Test Traffic:**
+```bash
+# Test 1: UDP echo through tunnel
+echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
+
+# Test 2: ICMP ping through tunnel (requires return-path implementation)
+ping -c 3 10.100.0.1
+
+# Test 3: Verify split tunnel - this should NOT go through QUIC
+ping -c 1 8.8.8.8  # Should work via normal routing, not tunnel
+
+# Verify VPN interface and routes
+ifconfig utun6
+netstat -rn | grep utun
+```
+
+### Expected Demo Flow
+
+1. **Terminal 4:** Launch app → Click "Start" (or use `--auto-start`)
+2. **Terminal 3:** See "QUIC connection established", "Registered for service 'echo-service'"
+3. **Terminal 1:** See "New connection from...", "Registration: Agent for service 'echo-service'"
+4. **Terminal 2:** See "Registered as Connector for 'echo-service'"
+5. **Terminal 5:** Send `echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999`
+6. **Terminal 1:** See "Relayed 38 bytes from..." (both directions)
+7. **Terminal 2:** See "Forward to local: 10 bytes to 127.0.0.1:9999"
+
+### What Currently Works vs What Needs Deployment
+
+| Test | Status | Notes |
+|------|--------|-------|
+| UDP echo (`nc -u 10.100.0.1 9999`) | ✅ Works | Full E2E verified on AWS |
+| ICMP ping (`ping 10.100.0.1`) | 🔲 Needs Agent return-path | Connector generates reply, but Agent doesn't inject to TUN |
+| TCP connect (`curl 10.100.0.2:8080`) | 🔲 Needs Agent return-path + Connector deployment | TCP proxy implemented but untested E2E |
+| Split tunnel (normal traffic untouched) | ✅ Works | Only 10.100.0.0/24 routes through utun |
+
+---
+
+## Pi k8s Cluster Demo (Task 006 Phase 1)
 
 This section demonstrates ZTNA deployed to a **real Kubernetes cluster** with Cilium L2 LoadBalancer.
 
@@ -189,7 +304,7 @@ This section demonstrates the **full E2E tunnel path** from macOS VPN app throug
 └─────────────────┘          │       │ DATAGRAM  │          │  Echo Server    │
        │                     │       ▼ Relay     │          │  UDP :9999      │
        │ IP Packets          └───────────────────┘          └─────────────────┘
-       ▼ (1.1.1.1/32 routed)
+       ▼ (10.100.0.0/24 routed via VPN)
 ```
 
 ### Prerequisites
@@ -246,8 +361,8 @@ log stream --predicate 'subsystem CONTAINS "ztna"' --info
 
 3. **Traffic tunneled successfully:**
    ```bash
-   # Send traffic through tunnel
-   ping -c 1 1.1.1.1
+   # Send UDP traffic through tunnel to echo-service (10.100.0.1 = virtual IP)
+   echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
 
    # K8s logs should show:
    # [INFO] Received 84 bytes to relay from ...
@@ -280,11 +395,12 @@ pgrep -fl Extension | grep tmp
 | Extension from wrong path | macOS caches old Extension | `rm -rf ~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*` |
 | 30s connection timeout | No traffic to keep alive | Expected - QUIC idle timeout |
 
-### Current Limitations (MVP)
+### Current Limitations
 
-1. **Service-based routing only:** Packets to 1.1.1.1 don't route to echo-service (MVP routes by registered service ID)
-2. **~~No keepalive~~:** ✅ FIXED (2026-01-25) - macOS Agent now sends keepalive PING every 10 seconds
+1. **Return-path not implemented:** Agent receives relayed DATAGRAMs at QUIC level but does not yet extract and inject them into the TUN interface (`packetFlow.writePackets()`)
+2. **~~No keepalive~~:** ✅ FIXED (2026-01-25) - macOS Agent sends keepalive PING every 10 seconds
 3. **SNAT hides real IP:** QAD returns k8s node IP, not macOS real IP (due to externalTrafficPolicy: Cluster)
+4. **Config via UI only:** macOS Agent config set in SwiftUI, not config file (acceptable for client app)
 
 ### macOS Agent Keepalive (Added 2026-01-25)
 
@@ -954,6 +1070,7 @@ CERT_DIR="$PROJECT_ROOT/certs"
 | `IDLE_TIMEOUT_MS` | 30000 | 30 seconds |
 | `Agent Registration` | `0x10` | `[0x10][len][service_id]` |
 | `Connector Registration` | `0x11` | `[0x11][len][service_id]` |
+| `Service-Routed Datagram` | `0x2F` | `[0x2F][len][service_id][ip_packet]` |
 | `QAD Observed Address` | `0x01` | `[0x01][4 bytes IP][2 bytes port]` |
 
 ---
@@ -1100,24 +1217,24 @@ tail tests/e2e/artifacts/logs/app-connector.log
 
 | Component | Tests | Status | Notes |
 |-----------|-------|--------|-------|
-| **packet_processor** | 63 | ✅ Pass | 5 agent + 58 P2P module |
-| ├─ agent | 5 | ✅ | Multi-connection support |
+| **packet_processor** | 81 | ✅ Pass | 23 agent/core + 58 P2P module |
+| ├─ agent/core | 23 | ✅ | Agent FFI, registration, packet processing |
 | ├─ p2p/candidate | 11 | ✅ | ICE candidate types, gathering |
 | ├─ p2p/signaling | 13 | ✅ | Message encode/decode |
 | ├─ p2p/connectivity | 17 | ✅ | Binding, pairs, check list |
 | └─ p2p/hole_punch | 17 | ✅ | Coordinator, path selection |
-| **intermediate-server** | 13 | ✅ Pass | 6 signaling + 6 registry + 1 integ |
-| **app-connector** | 10 | ✅ Pass | 8 unit + 2 integration |
+| **intermediate-server** | 15 | ✅ Pass | 6 signaling + 8 registry + 1 integ |
+| **app-connector** | 18 | ✅ Pass | 8 unit + 5 TCP + 2 ICMP + 1 config + 2 integ |
 
-**Unit Test Total: 86**
+**Unit Test Total: 114**
 
 ### Combined Test Count
 
 | Category | Count | Status |
 |----------|-------|--------|
-| Unit tests (Rust) | 86 | ✅ All pass |
+| Unit tests (Rust) | 114 | ✅ All pass |
 | E2E tests (Shell) | 61+ | ✅ All pass (except network impairment) |
-| **Grand Total** | **147+** | ✅ |
+| **Grand Total** | **175+** | ✅ |
 
 ---
 
@@ -1326,7 +1443,7 @@ cargo test --workspace
 | Module | Tests | Description |
 |--------|-------|-------------|
 | `signaling.rs` | 6 | Session manager, agent/connector tracking |
-| `registry.rs` | 6 | Client registry, pair matching |
+| `registry.rs` | 8 | Client registry, pair matching, multi-service agent, service lookup |
 | `main.rs` | 1 | Integration (handshake + QAD) |
 
 **Run Intermediate tests:**
@@ -1340,7 +1457,10 @@ cargo test --workspace
 
 | Module | Tests | Description |
 |--------|-------|-------------|
-| Unit tests | 8 | Packet parsing, IP/UDP construction |
+| Packet parsing | 8 | IP/UDP construction, header parsing |
+| TCP proxy | 5 | `test_tcp_flags`, `test_build_tcp_packet_syn_ack`, `test_build_tcp_packet_with_data`, `test_tcp_checksum_validity`, `test_max_tcp_payload_fits_datagram` |
+| ICMP handling | 2 | `test_build_icmp_reply`, `test_icmp_checksum_validity` |
+| Config | 1 | JSON config loading |
 | Integration | 2 | QUIC handshake, registration |
 
 **Run App Connector tests:**
@@ -1352,10 +1472,10 @@ cargo test --workspace
 
 | Component | Tests | Notes |
 |-----------|-------|-------|
-| packet_processor | 63 | 5 agent + 11 candidate + 13 signaling + 17 connectivity + 17 hole_punch |
-| intermediate-server | 13 | 6 signaling + 6 registry + 1 integration |
-| app-connector | 10 | 8 unit + 2 integration |
-| **Total** | **86** | All passing, 0 ignored |
+| packet_processor | 81 | 23 agent/core + 11 candidate + 13 signaling + 17 connectivity + 17 hole_punch |
+| intermediate-server | 15 | 6 signaling + 8 registry + 1 integration |
+| app-connector | 18 | 8 unit + 5 TCP + 2 ICMP + 1 config + 2 integration |
+| **Total** | **114** | All passing, 0 ignored |
 
 ---
 
@@ -1385,7 +1505,7 @@ cd /Users/hank/dev/src/agent-driver/ztna-agent
 (cd tests/e2e/fixtures/echo-server && cargo build --release)
 (cd tests/e2e/fixtures/quic-client && cargo build --release)
 
-# Run all unit tests (86 tests)
+# Run all unit tests (114 tests)
 cargo test --workspace
 ```
 
@@ -1402,25 +1522,31 @@ tests/e2e/scenarios/reliability-tests.sh      # Phase 5 (11 tests)
 tests/e2e/scenarios/performance-metrics.sh    # Phase 6 (6 tests)
 ```
 
-### 3. Interactive Demo (Manual)
+### 3. Interactive Demo with Config Files (Manual)
+
+Components now support JSON config files for dynamic configuration.
 
 **Terminal 1: Echo Server**
 ```bash
 tests/e2e/fixtures/echo-server/target/release/udp-echo --port 9999
 ```
 
-**Terminal 2: Intermediate Server**
+**Terminal 2: Intermediate Server (with config)**
 ```bash
-RUST_LOG=info intermediate-server/target/release/intermediate-server 4433 \
-  certs/cert.pem certs/key.pem
+RUST_LOG=info intermediate-server/target/release/intermediate-server \
+  --config deploy/config/intermediate.json
+# Or legacy positional args:
+# RUST_LOG=info intermediate-server/target/release/intermediate-server 4433 \
+#   certs/cert.pem certs/key.pem
 ```
 
-**Terminal 3: App Connector**
+**Terminal 3: App Connector (with config)**
 ```bash
 RUST_LOG=info app-connector/target/release/app-connector \
-  --server 127.0.0.1:4433 \
-  --service test-service \
-  --forward 127.0.0.1:9999
+  --config deploy/config/connector.json
+# Or legacy CLI args:
+# RUST_LOG=info app-connector/target/release/app-connector \
+#   --server 127.0.0.1:4433 --service test-service --forward 127.0.0.1:9999
 ```
 
 **Terminal 4: Send Data Through Relay**
@@ -1442,6 +1568,14 @@ tests/e2e/fixtures/quic-client/target/release/quic-test-client \
   --dst 127.0.0.1:9999 \
   --verify-echo
 ```
+
+### Config File Reference
+
+| Component | Config Path | Default Search Paths |
+|-----------|------------|---------------------|
+| Intermediate | `deploy/config/intermediate.json` | `/etc/ztna/intermediate.json`, `intermediate.json` |
+| Connector | `deploy/config/connector.json` | `/etc/ztna/connector.json`, `connector.json` |
+| Agent | `deploy/config/agent.json` | N/A (configured via macOS app UI) |
 
 ### 4. View Logs
 
@@ -1509,7 +1643,120 @@ pkill -f udp-echo
 | Signaling protocol | `core/packet_processor/src/p2p/signaling.rs` |
 | Connectivity checks | `core/packet_processor/src/p2p/connectivity.rs` |
 | Hole punch coordinator | `core/packet_processor/src/p2p/hole_punch.rs` |
+| **Configuration (Task 006)** | |
+| Agent config example | `deploy/config/agent.json` |
+| Connector config example | `deploy/config/connector.json` |
+| Intermediate config example | `deploy/config/intermediate.json` |
+| **AWS Deployment (Task 006)** | |
+| AWS deploy skill guide | `deploy/aws/aws-deploy-skill.md` |
+| **macOS Agent Source** | |
+| PacketTunnelProvider | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` |
+| ContentView (VPN UI) | `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` |
 | **Documentation** | |
+| Task 006 state | `tasks/006-cloud-deployment/state.md` |
 | Task 005 state | `tasks/005-p2p-hole-punching/state.md` |
 | Task 005 plan | `tasks/005-p2p-hole-punching/plan.md` |
 | Task 005 todo | `tasks/005-p2p-hole-punching/todo.md` |
+
+---
+
+## Return-Path Gap: DATAGRAM → TUN (Blocking Ping/TCP E2E)
+
+> **Status:** Not implemented. This is the primary gap preventing `ping 10.100.0.1` and `curl 10.100.0.2:8080` from working end-to-end.
+
+### What Works
+
+The **outgoing** path is fully functional:
+```
+macOS App → TUN (utun6) → PacketTunnelProvider.readPackets()
+  → processPacket() → sendRoutedDatagram() [0x2F wrap]
+  → agent_send_datagram() → QUIC DATAGRAM
+  → Intermediate Server → App Connector → backend service
+```
+
+The **Connector return** path is also complete:
+```
+Backend service response → App Connector
+  → build response IP packet (UDP echo / TCP response / ICMP Echo Reply)
+  → send_ip_packet() → QUIC DATAGRAM
+  → Intermediate Server → Agent QUIC connection
+```
+
+### What's Missing
+
+The **Agent inbound injection** path does not exist:
+```
+Agent receives QUIC DATAGRAM → ??? → packetFlow.writePackets() → TUN → macOS kernel
+```
+
+Specifically:
+
+1. **No `agent_recv_datagram()` FFI** - The Rust core has `agent_send_datagram()` for outgoing, but no corresponding function to extract received DATAGRAMs from the QUIC connection.
+
+2. **No `packetFlow.writePackets()` call** - The Swift `PacketTunnelProvider` reads outgoing packets via `packetFlow.readPackets()` and sends them through QUIC, but never calls `packetFlow.writePackets()` to inject incoming response packets into the TUN interface.
+
+3. **No DATAGRAM receive loop** - There is no loop or callback in the Agent that polls the QUIC connection for incoming DATAGRAMs and processes them.
+
+### Data Flow Diagram (Current Gap)
+
+```
+                  OUTGOING (✅ Working)
+┌──────────┐    ┌──────────────────────┐    ┌──────────────┐    ┌───────────┐
+│ macOS App│───►│ PacketTunnelProvider │───►│ Intermediate │───►│ Connector │
+│ ping ... │    │ readPackets() →      │    │ Server       │    │ → backend │
+│          │    │ agent_send_datagram()│    │              │    │           │
+└──────────┘    └──────────────────────┘    └──────────────┘    └───────────┘
+
+                  INCOMING (❌ Missing)
+┌──────────┐    ┌──────────────────────┐    ┌──────────────┐    ┌───────────┐
+│ macOS App│ ✘  │ PacketTunnelProvider │ ✘  │ Intermediate │◄───│ Connector │
+│ (no      │◄───│ writePackets() NOT   │◄───│ Server       │    │ ← backend │
+│  reply)  │    │ called               │    │ (delivers OK)│    │  response │
+└──────────┘    └──────────────────────┘    └──────────────┘    └───────────┘
+```
+
+### What Needs to Be Built
+
+**1. Rust FFI: `agent_recv_datagram()`**
+```
+Function: agent_recv_datagram(agent: *mut Agent) -> Option<Vec<u8>>
+Purpose:  Extract next received DATAGRAM from QUIC connection
+Returns:  Raw bytes (0x2F-wrapped or plain IP packet), or None if no data
+```
+
+**2. Swift: DATAGRAM receive + TUN injection loop**
+```swift
+// In PacketTunnelProvider, after QUIC connection established:
+// Poll for incoming DATAGRAMs on a timer or in the main run loop
+// For each received DATAGRAM:
+//   1. Strip 0x2F header if present (extract service_id + ip_packet)
+//   2. Validate it's a valid IP packet (version, length, checksum)
+//   3. Call packetFlow.writePackets([ipPacket], withProtocols: [AF_INET])
+//   4. macOS kernel receives the packet and delivers to originating app
+```
+
+**3. Integration:**
+- The receive loop must run concurrently with the existing `readPackets()` → send loop
+- Use `DispatchQueue` or Swift concurrency to avoid blocking outgoing traffic
+- Handle both 0x2F-wrapped responses and legacy plain DATAGRAM responses
+
+### Verification
+
+Once implemented, these tests should pass:
+```bash
+# ICMP ping through tunnel (Connector generates Echo Reply)
+ping -c 3 10.100.0.1
+# Expected: 3 packets transmitted, 3 received, 0% packet loss
+
+# TCP curl through tunnel (Connector proxies to backend)
+curl -v http://10.100.0.2:8080/
+# Expected: HTTP response from web-app backend
+
+# UDP echo continues to work
+echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
+# Expected: echo response (this already works for the QUIC-level E2E)
+```
+
+### Why UDP Echo "Works" Without This
+
+The current UDP echo test (`nc -u -w1 10.100.0.1 9999`) verifies the **outgoing** path and shows relay logs in the Intermediate Server. The echo response IS relayed back to the Agent's QUIC connection, but it is silently discarded because the Agent never reads it. The test "passes" because we verify relay activity in server logs, not actual response delivery to the macOS app.

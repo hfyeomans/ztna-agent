@@ -93,12 +93,17 @@ git push -u origin feature/XXX-task-name
 │                     │     │                      │     │                     │
 │  ┌───────────────┐  │     │  - QUIC Server       │     │  - QUIC Client      │
 │  │ SwiftUI App   │  │     │  - QAD (addr discov) │     │  - Decapsulates     │
-│  └───────┬───────┘  │     │  - Relay (fallback)  │     │  - Forwards to App  │
-│          │          │     │  - Signaling (P2P)   │     │                     │
-│  ┌───────▼───────┐  │     └──────────▲───────────┘     └──────────▲──────────┘
-│  │ NEPacketTun.  │  │                │                            │
+│  │ (configurable │  │     │  - 0x2F svc routing  │     │  - UDP/TCP/ICMP     │
+│  │  host/port/   │  │     │  - Relay (fallback)  │     │  - JSON config      │
+│  │  service)     │  │     │  - Signaling (P2P)   │     │  - Keepalive        │
+│  └───────┬───────┘  │     │  - JSON config       │     │                     │
+│          │          │     └──────────▲───────────┘     └──────────▲──────────┘
+│  ┌───────▼───────┐  │                │                            │
+│  │ NEPacketTun.  │  │                │    QUIC Tunnel             │
 │  │ Provider      │──┼────────────────┴────────────────────────────┘
-│  └───────┬───────┘  │           QUIC Tunnel (relay or direct)
+│  │ (route table, │  │      (relay or direct, 0x2F service-routed)
+│  │  0x2F wrap)   │  │
+│  └───────┬───────┘  │
 │          │ FFI      │
 │  ┌───────▼───────┐  │
 │  │ Rust Core     │  │
@@ -128,6 +133,7 @@ git push -u origin feature/XXX-task-name
 |-----------|------|
 | Architecture Doc | `docs/architecture.md` |
 | Agent Extension | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` |
+| Agent UI + VPN Manager | `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` |
 | Rust QUIC Client | `core/packet_processor/src/lib.rs` |
 | P2P Modules | `core/packet_processor/src/p2p/` |
 | Bridging Header | `ios-macos/Shared/PacketProcessor-Bridging-Header.h` |
@@ -136,6 +142,9 @@ git push -u origin feature/XXX-task-name
 | App Connector | `app-connector/src/main.rs` |
 | E2E Test Framework | `tests/e2e/README.md` |
 | E2E Test Runner | `tests/e2e/run-mvp.sh` |
+| Agent Config (reference) | `deploy/config/agent.json` |
+| Connector Config (reference) | `deploy/config/connector.json` |
+| Intermediate Config (reference) | `deploy/config/intermediate.json` |
 
 ---
 
@@ -174,7 +183,7 @@ xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
     -scheme ZtnaAgent -configuration Debug \
     -derivedDataPath /tmp/ZtnaAgent-build build
 
-# Run all unit tests (79+ tests)
+# Run all unit tests (114+ tests)
 cargo test --workspace
 ```
 
@@ -195,7 +204,7 @@ open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app \
 ### Run E2E Test Suites
 
 ```bash
-# Full E2E suite (61+ tests)
+# Full E2E suite (61+ tests, shell-based)
 tests/e2e/run-mvp.sh
 
 # Individual test suites
@@ -275,9 +284,9 @@ open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app --args --auto-start
 kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
 # Look for: "New connection from 10.0.0.22:XXXXX"
 
-# 5. Send test traffic
-ping -c 1 1.1.1.1
-# K8s logs: "Received 84 bytes to relay" (ICMP packet tunneled)
+# 5. Send UDP test traffic to echo-service (10.100.0.1 = virtual service IP)
+echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
+# K8s logs: "Received XX bytes to relay" (UDP packet tunneled)
 ```
 
 ### View Logs
@@ -305,14 +314,21 @@ tail -f tests/e2e/artifacts/logs/*.log
 | **Intermediate** | Relay server for bootstrap and fallback |
 | **Connector** | Component that decapsulates packets and forwards to apps |
 | **Service Registration** | Protocol for Agents/Connectors to register with Intermediate for routing |
+| **0x2F Datagram** | Service-routed datagram: `[0x2F, id_len, service_id, ip_packet]` |
+| **Split Tunnel** | Only configured virtual IPs (10.100.0.0/24) go through QUIC tunnel |
 
-### Registration Protocol
+### Registration & Routing Protocol
 
 Both Agents and Connectors register with a service ID to enable relay routing:
-- **Agent (0x10)**: "I want to reach service X"
+- **Agent (0x10)**: "I want to reach service X" (can register multiple)
 - **Connector (0x11)**: "I provide service X"
+- **Service-Routed Datagram (0x2F)**: Per-packet routing with embedded service ID
 
-Message format: `[type_byte, service_id_length, service_id_bytes...]`
+Registration format: `[type_byte, service_id_length, service_id_bytes...]`
+Routed datagram: `[0x2F, service_id_length, service_id_bytes..., ip_packet_bytes...]`
+
+The Intermediate strips the 0x2F wrapper before forwarding to the Connector.
+See `tasks/_context/components.md` for full protocol details.
 
 ---
 
@@ -336,20 +352,23 @@ Items deferred from MVP implementation that must be addressed for production.
 | **Graceful Shutdown** | 002-Server | Connection draining on shutdown | Abrupt disconnects |
 | **Connection State Tracking** | 002-Server | Full state machine for connections | Edge case bugs |
 | **Error Recovery** | 001-Agent, 002-Server, 003-Connector | Automatic reconnection logic | Manual intervention needed |
-| **TCP Support** | 003-Connector | Requires TUN/TAP or TCP state tracking | UDP-only forwarding |
+| ~~TCP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.4) | Userspace TCP proxy |
 | **Registration Acknowledgment** | 002-Server, 003-Connector | Server doesn't ACK registration | Silent registration failures |
+| **Return-Path DATAGRAM→TUN** | 001-Agent | Agent needs to read DATAGRAMs from QUIC and inject into TUN | No response to ping/curl |
 
 ### Priority 3: Operations (Nice to Have)
 
 | Item | Component | Description |
 |------|-----------|-------------|
 | **Metrics/Stats Endpoint** | 002-Server, 003-Connector | Connection counts, packet rates, latency |
-| **Configuration File (TOML)** | 002-Server, 003-Connector | Currently CLI args only |
+| ~~Configuration File~~ | ~~002-Server, 003-Connector~~ | ✅ Done (Task 006 Phase 4.2) - JSON configs |
 | **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported |
 | **IPv6 QAD Support** | 001-Agent, 002-Server, 003-Connector | Currently IPv4 only (7-byte format) |
 | **Production Certificates** | All | Currently using self-signed dev certs |
-| **ICMP Support** | 003-Connector | Ping replies for connectivity testing |
-| **Multiple Service Registration** | 003-Connector | Currently single service ID only |
+| ~~ICMP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.5) - Echo Reply |
+| ~~Multiple Service Registration~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.3) - 0x2F routing |
+| **Per-Service Backend Routing** | 003-Connector | Route different services to different backends |
+| **TCP Window Flow Control** | 003-Connector | Currently simple ACK-per-segment |
 
 ### Tracking
 
@@ -373,28 +392,32 @@ After E2E testing validates local relay functionality, components will be deploy
 │                                                                              │
 │  ┌─────────────┐                ┌─────────────────────────────────────────┐ │
 │  │   Agent     │                │           Cloud Infrastructure           │ │
-│  │  (macOS)    │                │                                          │ │
-│  │             │                │  ┌─────────────────────────────────────┐ │ │
-│  │  Behind     │◄──── QUIC ────►│  │    Intermediate Server              │ │ │
-│  │   NAT       │                │  │    (Public IP: x.x.x.x:4433)        │ │ │
-│  │             │                │  │    - QAD (address discovery)        │ │ │
-│  └─────────────┘                │  │    - DATAGRAM relay                 │ │ │
-│                                  │  └─────────────────────────────────────┘ │ │
-│                                  │                    │                      │ │
-│                                  │                    │ QUIC                 │ │
-│                                  │                    ▼                      │ │
-│                                  │  ┌─────────────────────────────────────┐ │ │
-│                                  │  │    App Connector                    │ │ │
-│                                  │  │    (Cloud VM or Edge)               │ │ │
-│                                  │  │    - UDP forwarding                 │ │ │
-│                                  │  │    - Local service access           │ │ │
-│                                  │  └───────────────┬─────────────────────┘ │ │
+│  │  (macOS)    │                │           (AWS EC2: 3.128.36.92)        │ │
+│  │             │                │                                          │ │
+│  │  Config:    │                │  ┌─────────────────────────────────────┐ │ │
+│  │  services:  │                │  │    Intermediate Server              │ │ │
+│  │  - echo-svc │◄──── QUIC ────►│  │    :4433 (intermediate.json)       │ │ │
+│  │    10.100.  │  0x2F routed   │  │    - QAD + DATAGRAM relay          │ │ │
+│  │    0.1      │                │  │    - 0x2F service routing           │ │ │
+│  │  - web-app  │                │  │    - Multi-service registry         │ │ │
+│  │    10.100.  │                │  └─────────────────────────────────────┘ │ │
+│  │    0.2      │                │                    │                      │ │
+│  │             │                │                    │ QUIC                 │ │
+│  │  Routes:    │                │                    ▼                      │ │
+│  │  10.100.0.  │                │  ┌─────────────────────────────────────┐ │ │
+│  │  0/24→utun  │                │  │    App Connector                    │ │ │
+│  │             │                │  │    (connector.json)                 │ │ │
+│  │  All other  │                │  │    - UDP/TCP/ICMP forwarding        │ │ │
+│  │  traffic:   │                │  │    - TCP session proxy              │ │ │
+│  │  normal     │                │  │    - ICMP Echo Reply                │ │ │
+│  └─────────────┘                │  └───────────────┬─────────────────────┘ │ │
 │                                  │                   │                       │ │
-│                                  │                   │ Local UDP             │ │
+│                                  │                   │ Local UDP/TCP         │ │
 │                                  │                   ▼                       │ │
 │                                  │  ┌─────────────────────────────────────┐ │ │
 │                                  │  │    Internal Services                │ │ │
-│                                  │  │    (DNS, API, etc.)                 │ │ │
+│                                  │  │    echo-server :9999 (UDP)          │ │ │
+│                                  │  │    web-app :8080 (TCP)              │ │ │
 │                                  │  └─────────────────────────────────────┘ │ │
 │                                  └──────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────┘

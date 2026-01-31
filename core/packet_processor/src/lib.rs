@@ -6,7 +6,7 @@
 //! - Multi-connection support (Intermediate + P2P)
 //! - FFI interface for Swift integration
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::slice;
@@ -122,6 +122,8 @@ pub struct Agent {
     hole_punch: Option<p2p::HolePunchCoordinator>,
     /// Path manager for keepalive and fallback
     path_manager: p2p::PathManager,
+    /// Queue of received IP packets from tunnel (for Swift to read via agent_recv_datagram)
+    received_datagrams: VecDeque<Vec<u8>>,
 }
 
 impl Agent {
@@ -164,6 +166,7 @@ impl Agent {
             signaling_buffer: Vec::new(),
             hole_punch: None,
             path_manager: p2p::PathManager::new(),
+            received_datagrams: VecDeque::new(),
         })
     }
 
@@ -314,6 +317,20 @@ impl Agent {
         Ok(())
     }
 
+    /// Dequeue next received IP packet (from tunnel)
+    ///
+    /// Returns the number of bytes written, or None if queue is empty.
+    fn recv_datagram(&mut self, out: &mut [u8]) -> Option<usize> {
+        let data = self.received_datagrams.pop_front()?;
+        if data.len() > out.len() {
+            // Buffer too small — put it back
+            self.received_datagrams.push_front(data);
+            return None;
+        }
+        out[..data.len()].copy_from_slice(&data);
+        Some(data.len())
+    }
+
     /// Register the Agent for a target service with the Intermediate Server
     ///
     /// This sends a registration DATAGRAM that tells the Intermediate Server
@@ -459,8 +476,10 @@ impl Agent {
                     self.observed_address =
                         Some(SocketAddr::new(std::net::IpAddr::V4(ip), port));
                 }
+            } else if len > 0 {
+                // Tunneled IP packet — queue for Swift to read via agent_recv_datagram()
+                self.received_datagrams.push_back(data.to_vec());
             }
-            // Other DATAGRAMs are tunneled IP packets - would be passed back to Swift
         }
     }
 
@@ -1031,6 +1050,44 @@ pub unsafe extern "C" fn agent_send_datagram(
             Ok(()) => AgentResult::Ok,
             Err(quiche::Error::InvalidState) => AgentResult::NotConnected,
             Err(_) => AgentResult::QuicError,
+        }
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
+/// Poll for received IP packets from the QUIC tunnel.
+///
+/// Call this repeatedly after `agent_recv()` until `AgentResultNoData` is returned.
+/// Each call returns one IP packet that was received via QUIC DATAGRAM from the
+/// Intermediate Server (response packets from the Connector).
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `out_data` - Buffer to write IP packet into
+/// * `out_len` - On input: buffer capacity. On output: actual length written.
+#[no_mangle]
+pub unsafe extern "C" fn agent_recv_datagram(
+    agent: *mut Agent,
+    out_data: *mut u8,
+    out_len: *mut usize,
+) -> AgentResult {
+    if agent.is_null() || out_data.is_null() || out_len.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &mut *agent;
+        let capacity = *out_len;
+
+        let mut buf = vec![0u8; capacity];
+        match agent.recv_datagram(&mut buf) {
+            Some(len) => {
+                std::ptr::copy_nonoverlapping(buf.as_ptr(), out_data, len);
+                *out_len = len;
+                AgentResult::Ok
+            }
+            None => AgentResult::NoData,
         }
     }));
 
@@ -1878,5 +1935,53 @@ mod tests {
         assert_eq!(expected[0], 0x10); // Agent type
         assert_eq!(expected[1], 12);   // "echo-service" length
         assert_eq!(&expected[2..], b"echo-service");
+    }
+
+    #[test]
+    fn test_agent_recv_datagram_queue() {
+        let mut agent = Agent::new().unwrap();
+
+        // Queue should start empty
+        let mut buf = [0u8; 1500];
+        assert!(agent.recv_datagram(&mut buf).is_none());
+
+        // Simulate received IP packets (as if from QUIC tunnel)
+        let pkt1 = vec![0x45, 0x00, 0x00, 0x1C, 1, 2, 3, 4];
+        let pkt2 = vec![0x45, 0x00, 0x00, 0x28, 5, 6, 7, 8, 9, 10];
+        agent.received_datagrams.push_back(pkt1.clone());
+        agent.received_datagrams.push_back(pkt2.clone());
+
+        // Drain first packet
+        let len = agent.recv_datagram(&mut buf).unwrap();
+        assert_eq!(&buf[..len], &pkt1);
+
+        // Drain second packet
+        let len = agent.recv_datagram(&mut buf).unwrap();
+        assert_eq!(&buf[..len], &pkt2);
+
+        // Queue empty again
+        assert!(agent.recv_datagram(&mut buf).is_none());
+    }
+
+    #[test]
+    fn test_agent_recv_datagram_buffer_too_small() {
+        let mut agent = Agent::new().unwrap();
+
+        // Queue a packet larger than the output buffer
+        let pkt = vec![0x45; 100];
+        agent.received_datagrams.push_back(pkt.clone());
+
+        // Tiny buffer should fail and preserve the packet in the queue
+        let mut tiny_buf = [0u8; 10];
+        assert!(agent.recv_datagram(&mut tiny_buf).is_none());
+
+        // Packet should still be in the queue
+        assert_eq!(agent.received_datagrams.len(), 1);
+
+        // With adequate buffer, should succeed
+        let mut buf = [0u8; 1500];
+        let len = agent.recv_datagram(&mut buf).unwrap();
+        assert_eq!(len, 100);
+        assert_eq!(&buf[..len], &pkt);
     }
 }

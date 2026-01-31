@@ -12,9 +12,9 @@ import os.log
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         settings.ipv4Settings = NEIPv4Settings(addresses: ["100.64.0.1"], subnetMasks: ["255.255.255.255"])
         
-        // Split Tunneling: Only route traffic for a specific test IP (e.g. 1.1.1.1)
-        // In a real ZTNA agent, this would be dynamic or a broader range.
-        let route = NEIPv4Route(destinationAddress: "1.1.1.1", subnetMask: "255.255.255.255")
+        // Split Tunneling: Route ZTNA virtual service range (10.100.0.0/24) through tunnel
+        // 10.100.0.1 = echo-service (UDP 9999)
+        let route = NEIPv4Route(destinationAddress: "10.100.0.0", subnetMask: "255.255.255.0")
         settings.ipv4Settings?.includedRoutes = [route]
         
         settings.dnsSettings = NEDNSSettings(servers: ["8.8.8.8"])

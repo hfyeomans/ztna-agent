@@ -915,11 +915,9 @@ kubectl logs -n ztna deployment/intermediate-server --tail=10 | grep Agent
 # Expected: "Registration: Agent for service 'echo-service'"
 
 # 3. Send UDP test traffic (route goes through VPN tunnel)
-# NOTE: 1.1.1.1 is a placeholder - the actual destination IP doesn't matter for MVP
-# because routing is by service_id, not destination IP. The Connector forwards
-# all traffic to its configured forward_addr (echo-server).
-# TODO: Use service-specific virtual IP (e.g., 100.64.0.100) instead of 1.1.1.1
-echo "ZTNA-TEST" | nc -u -w1 1.1.1.1 9999
+# 10.100.0.0/24 is the ZTNA virtual service range (routed through tunnel)
+# 10.100.0.1 = echo-service (UDP 9999)
+echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
 
 # 4. Check relay logs
 kubectl logs -n ztna deployment/intermediate-server --tail=15 | grep -E "relay|destination"
@@ -1057,12 +1055,12 @@ netstat -an | grep "10.0.150.205.4433"
 # Expected: udp connection entry
 
 # === SEND TEST TRAFFIC ===
-# 7. Send UDP through the tunnel (routed via VPN)
-echo "ZTNA-DEMO-$(date +%H%M%S)" | nc -u -w2 1.1.1.1 9999
+# 7. Send UDP through the tunnel (routed via VPN to echo-service)
+echo "ZTNA-DEMO-$(date +%H%M%S)" | nc -u -w2 10.100.0.1 9999
 
 # 8. Send multiple test packets
 for i in 1 2 3; do
-  echo "ZTNA-TEST-$i" | nc -u -w1 1.1.1.1 9999
+  echo "ZTNA-TEST-$i" | nc -u -w1 10.100.0.1 9999
   sleep 1
 done
 

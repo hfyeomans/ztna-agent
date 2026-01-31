@@ -128,6 +128,15 @@ AgentResult agent_poll(Agent* agent, uint8_t* out_data, size_t* out_len, uint16_
 /// @return AgentResultOk on success, AgentResultNotConnected if not connected.
 AgentResult agent_send_datagram(Agent* agent, const uint8_t* data, size_t len);
 
+/// Poll for received IP packets from the QUIC tunnel.
+/// Call this repeatedly after agent_recv() until AgentResultNoData is returned.
+/// Each call returns one IP packet received via QUIC DATAGRAM (response from Connector).
+/// @param agent Agent pointer.
+/// @param out_data Buffer to write IP packet data into.
+/// @param out_len On input: buffer capacity. On output: actual length written.
+/// @return AgentResultOk if packet was written, AgentResultNoData if empty.
+AgentResult agent_recv_datagram(Agent* agent, uint8_t* out_data, size_t* out_len);
+
 // ============================================================================
 // QUIC Agent Timeout Handling
 // ============================================================================

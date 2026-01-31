@@ -1,0 +1,7 @@
+{
+  "port": 4433,
+  "bind_addr": "0.0.0.0",
+  "external_ip": "3.128.36.92",
+  "cert_path": "/etc/ztna/certs/intermediate.crt",
+  "key_path": "/etc/ztna/certs/intermediate.key"
+}

@@ -8,6 +8,9 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::path::Path;
+
+use serde::Deserialize;
 
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token};
@@ -45,6 +48,33 @@ const DEFAULT_PORT: u16 = 4433;
 const SOCKET_TOKEN: Token = Token(0);
 
 // ============================================================================
+// Configuration
+// ============================================================================
+
+#[derive(Deserialize, Default)]
+struct ServerConfig {
+    port: Option<u16>,
+    bind_addr: Option<String>,
+    external_ip: Option<String>,
+    cert_path: Option<String>,
+    key_path: Option<String>,
+}
+
+fn load_config(path: &str) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+    let contents = std::fs::read_to_string(path)?;
+    let config: ServerConfig = serde_json::from_str(&contents)?;
+    log::info!("Loaded config from {}", path);
+    Ok(config)
+}
+
+fn parse_arg(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+// ============================================================================
 // Main Entry Point
 // ============================================================================
 
@@ -55,25 +85,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .init();
 
-    // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
-    let port = if args.len() > 1 {
-        args[1].parse().unwrap_or(DEFAULT_PORT)
+
+    // Load config file: --config <path>, or try default paths
+    let config = if let Some(config_path) = parse_arg(&args, "--config") {
+        load_config(&config_path)?
     } else {
-        DEFAULT_PORT
+        let default_paths = ["/etc/ztna/intermediate.json", "intermediate.json"];
+        let mut loaded = None;
+        for path in &default_paths {
+            if Path::new(path).exists() {
+                match load_config(path) {
+                    Ok(cfg) => {
+                        loaded = Some(cfg);
+                        break;
+                    }
+                    Err(e) => log::warn!("Failed to load {}: {}", path, e),
+                }
+            }
+        }
+        loaded.unwrap_or_default()
     };
 
-    let cert_path = args.get(2).map(|s| s.as_str()).unwrap_or("certs/cert.pem");
-    let key_path = args.get(3).map(|s| s.as_str()).unwrap_or("certs/key.pem");
-    let bind_addr = args.get(4).map(|s| s.as_str()).unwrap_or("0.0.0.0");
-    // External IP for NAT environments (e.g., AWS Elastic IP)
-    // If provided, this IP is used in QUIC path validation instead of the local bind address
-    let external_ip = args.get(5).map(|s| s.as_str());
+    // Build effective config: named flags > positional args > config file > defaults
+    // Named flags (--port, --cert, etc.) take priority over positional args and config file.
+    // Positional args are supported for backwards compatibility with existing systemd services.
+    let port: u16 = parse_arg(&args, "--port")
+        .and_then(|s| s.parse().ok())
+        .or_else(|| {
+            // Positional: first non-flag arg
+            args.get(1).filter(|a| !a.starts_with("--")).and_then(|s| s.parse().ok())
+        })
+        .or(config.port)
+        .unwrap_or(DEFAULT_PORT);
+
+    let cert_path = parse_arg(&args, "--cert")
+        .or_else(|| args.get(2).filter(|a| !a.starts_with("--")).cloned())
+        .or(config.cert_path)
+        .unwrap_or_else(|| "certs/cert.pem".to_string());
+
+    let key_path = parse_arg(&args, "--key")
+        .or_else(|| args.get(3).filter(|a| !a.starts_with("--")).cloned())
+        .or(config.key_path)
+        .unwrap_or_else(|| "certs/key.pem".to_string());
+
+    let bind_addr = parse_arg(&args, "--bind")
+        .or_else(|| args.get(4).filter(|a| !a.starts_with("--")).cloned())
+        .or(config.bind_addr)
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+
+    let external_ip = parse_arg(&args, "--external-ip")
+        .or_else(|| args.get(5).filter(|a| !a.starts_with("--")).cloned())
+        .or(config.external_ip);
 
     log::info!("ZTNA Intermediate Server starting...");
     log::info!("  Port: {}", port);
     log::info!("  Bind: {}", bind_addr);
-    if let Some(ext_ip) = external_ip {
+    if let Some(ref ext_ip) = external_ip {
         log::info!("  External IP: {}", ext_ip);
     }
     log::info!("  Cert: {}", cert_path);
@@ -81,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  ALPN: {:?}", std::str::from_utf8(ALPN_PROTOCOL));
 
     // Create server and run
-    let mut server = Server::new(port, bind_addr, external_ip, cert_path, key_path)?;
+    let mut server = Server::new(port, &bind_addr, external_ip.as_deref(), &cert_path, &key_path)?;
     server.run()
 }
 
@@ -411,8 +479,12 @@ impl Server {
                     // Registration message
                     self.handle_registration(conn_id, &dgram)?;
                 }
+                0x2F => {
+                    // Service-routed IP packet: [0x2F, id_len, service_id..., ip_packet...]
+                    self.relay_service_datagram(conn_id, &dgram)?;
+                }
                 _ => {
-                    // Raw IP packet - relay to paired connection
+                    // Raw IP packet - relay to paired connection (implicit routing)
                     log::info!("Received {} bytes to relay from {:?}", dgram.len(), conn_id);
                     self.relay_datagram(conn_id, &dgram)?;
                 }
@@ -500,6 +572,68 @@ impl Server {
             }
         } else {
             log::warn!("Destination client {:?} not found in clients map", dest_conn_id);
+        }
+
+        Ok(())
+    }
+
+    fn relay_service_datagram(
+        &mut self,
+        from_conn_id: &quiche::ConnectionId<'static>,
+        dgram: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Parse: [0x2F, id_len, service_id..., ip_packet...]
+        if dgram.len() < 3 {
+            log::debug!("Service-routed datagram too short");
+            return Ok(());
+        }
+
+        let id_len = dgram[1] as usize;
+        if dgram.len() < 2 + id_len {
+            log::debug!("Service ID truncated in routed datagram");
+            return Ok(());
+        }
+
+        let service_id = String::from_utf8_lossy(&dgram[2..2 + id_len]).to_string();
+        let ip_packet = &dgram[2 + id_len..];
+
+        log::info!(
+            "Service-routed datagram: {} bytes for '{}' from {:?}",
+            ip_packet.len(),
+            service_id,
+            from_conn_id
+        );
+
+        // Find Connector for this service
+        let dest_conn_id = match self.registry.find_connector_for_service(&service_id) {
+            Some(id) => {
+                log::info!("Routing to Connector {:?} for service '{}'", id, service_id);
+                id
+            }
+            None => {
+                log::warn!("No Connector registered for service '{}'", service_id);
+                return Ok(());
+            }
+        };
+
+        // Forward the unwrapped IP packet (Connector doesn't need the service wrapper)
+        if let Some(dest_client) = self.clients.get_mut(&dest_conn_id) {
+            match dest_client.conn.dgram_send(ip_packet) {
+                Ok(_) => {
+                    log::info!(
+                        "Relayed {} bytes for '{}' from {:?} to {:?}",
+                        ip_packet.len(),
+                        service_id,
+                        from_conn_id,
+                        dest_conn_id
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to relay service datagram: {:?}", e);
+                }
+            }
+        } else {
+            log::warn!("Connector {:?} for '{}' not in clients map", dest_conn_id, service_id);
         }
 
         Ok(())

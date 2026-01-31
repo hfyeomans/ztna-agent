@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-25 (Task 006 Phase 5a complete, macOS Agent keepalive added)
+**Last Updated:** 2026-01-31 (Task 006 Tasks 1-5 complete: config, routing, TCP, ICMP)
 
 ---
 
@@ -59,9 +59,14 @@
 - QUIC client via quiche (mio event loop, not tokio)
 - Registers as Connector (0x11 protocol)
 - Parses QAD OBSERVED_ADDRESS messages
-- Decapsulates IPv4/UDP packets from DATAGRAMs
-- Forwards UDP payload to configurable local service
-- Constructs return IP/UDP packets with proper checksums
+- **Multi-protocol packet handling:** UDP, TCP, and ICMP
+- Decapsulates IPv4 packets from DATAGRAMs (UDP, TCP, ICMP)
+- **UDP forwarding:** Extracts UDP payload, forwards to configurable local service, constructs return IP/UDP packets
+- **TCP proxy:** Userspace TCP session tracking with non-blocking TcpStream (SYN→connect, ACK→forward, FIN→close, RST→reset)
+- **ICMP Echo Reply:** Responds directly to ping requests (no backend forwarding needed)
+- **JSON config file support:** `--config` flag or default paths (`/etc/ztna/connector.json`, `connector.json`)
+- **0x2F Service-Routed Datagram support:** Receives `[0x2F, id_len, service_id..., ip_packet...]` from Intermediate
+- QUIC keepalive (10s interval prevents 30s idle timeout)
 - Integration test (handshake + QAD + registration verified)
 
 **Critical Compatibility:**
@@ -69,17 +74,19 @@
 - MAX_DATAGRAM_SIZE: 1350
 - Registration: `[0x11][len][service_id]`
 - QAD: 7-byte IPv4 format (0x01 + IP + port)
+- 0x2F: Service-routed datagram (Intermediate strips wrapper before forwarding)
 
 **Key Design Decisions:**
 - **mio over tokio**: Matches Intermediate Server's sans-IO model
-- **UDP-only for MVP**: TCP requires TUN/TAP or TCP state tracking (deferred)
+- **Userspace TCP proxy**: Session-based tracking avoids TUN/TAP requirement
+- **Connector-local ICMP**: Echo Reply generated at Connector, not forwarded to backend
 - **No registration ACK**: Server doesn't acknowledge; treat as best-effort
+- **JSON config**: Supports CLI arg override for backwards compatibility
 
 **Deferred to Post-MVP:**
-- TCP support (requires TUN/TAP)
-- ICMP support
 - Automatic reconnection
-- Config file (TOML)
+- Per-service backend routing (currently single --forward address for all services)
+- TCP window flow control (currently simple ACK-per-segment)
 
 ---
 
@@ -143,7 +150,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Task 001 Agent = Production macOS NetworkExtension (intercepts system packets)
 - QUIC Test Client = Test harness CLI (sends arbitrary DATAGRAMs from scripts)
 
-**Total Tests: 61+** (Phases 1-6 complete)
+**E2E Test Total: 61+** (Phases 1-6 complete)
 
 **Capabilities Needed (Remaining):**
 - NAT testing (Intermediate on cloud)
@@ -191,7 +198,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Exponential backoff: 100ms → 1600ms (max 5 retransmits)
 - Keepalive: 15s interval, 3 missed = failed, auto fallback to relay
 
-**Test Count:** 79 tests in packet_processor (Phase 0-5 complete)
+**Test Count:** 81 tests in packet_processor (Phase 0-5 complete, includes agent_register)
 
 ---
 
@@ -276,7 +283,12 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 0: Docker NAT Simulation | ✅ Done | Local NAT testing environment |
 | Phase 1/5: Pi k8s Deployment | ✅ Done | Home cluster with Cilium L2, full E2E relay working |
 | Phase 5a: E2E Relay Routing | ✅ Done | macOS → k8s Intermediate → Connector → Echo |
-| Phase 2: Cloud VM Deployment | 🔲 Pending | AWS/DigitalOcean |
+| Phase 4: AWS EC2 Deployment | ✅ Done | EC2 t3.micro, Elastic IP 3.128.36.92, systemd services |
+| Phase 4.1: AWS E2E Validation | ✅ Done | macOS behind NAT → AWS relay → echo-service |
+| Phase 4.2: Config File Mechanism | ✅ Done | JSON configs for all components |
+| Phase 4.3: IP→Service Routing | ✅ Done | 0x2F service-routed datagrams, multi-service registration |
+| Phase 4.4: TCP Support | ✅ Done | Userspace TCP proxy with session tracking |
+| Phase 4.5: ICMP Support | ✅ Done | Connector-local Echo Reply |
 | Phase 3: TLS & Security | 🔲 Pending | Self-signed → Let's Encrypt |
 | **Phase 6: P2P NAT Testing** | 🔲 **NOT DONE** | Requires Agent behind real NAT, Connector on different network |
 
@@ -332,6 +344,28 @@ macOS (10.0.150.x) --QUIC--> LoadBalancer (10.0.150.205:4433)
 - ✅ QUIC registration + QAD working across network
 - ✅ externalTrafficPolicy: Cluster required for L2 (lesson learned)
 
+**Phase 4 Completed (AWS EC2 Deployment):**
+
+AWS EC2 deployment for cloud testing:
+```
+macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
+                                        │
+                                        └─► EC2 Instance (t3.micro, us-east-2)
+                                                │
+                                                ├─► Intermediate Server (systemd)
+                                                ├─► App Connector → :8080 (localhost)
+                                                └─► Echo Server (Python)
+```
+
+**AWS Components:**
+- ✅ EC2: i-021d9b1765cb49ca7 (ztna-intermediate-server)
+- ✅ Elastic IP: 3.128.36.92
+- ✅ Security Group: sg-0d15ab7f7b196d540 (UDP 4433, 4434, TCP 22)
+- ✅ SSH via Tailscale: 10.0.2.126 (VPC private IP)
+
+**Key Files Created (Phase 4):**
+- `deploy/aws/aws-deploy-skill.md` - Comprehensive AWS deployment guide
+
 **Deployment Targets:**
 | Component | Target |
 |-----------|--------|
@@ -349,12 +383,13 @@ macOS (10.0.150.x) --QUIC--> LoadBalancer (10.0.150.205:4433)
 **Key Decisions:**
 | Decision | Options | Status |
 |----------|---------|--------|
-| AWS VPC | New vs Existing | ✅ NEW VPC "ztna-test" |
+| AWS VPC | New vs Existing | ✅ Using existing masque_proxy-vpc |
 | P2P Port | Ephemeral vs Fixed | ✅ Fixed port 4434 |
-| Cloud Provider | Vultr, DigitalOcean | ✅ Decided (either) |
-| Deployment | Single VM vs Separate VMs | Single VM (MVP) |
-| Certificates | Self-signed vs Let's Encrypt | Self-signed (MVP) |
+| Cloud Provider | AWS, Vultr, DigitalOcean | ✅ AWS (EC2 deployed) |
+| Deployment | Single VM vs Separate VMs | ✅ Single EC2 (MVP) |
+| Certificates | Self-signed vs Let's Encrypt | ✅ Self-signed (from repo) |
 | Home k8s | Pi cluster | ✅ 10.0.150.101-108 available |
+| SSH Access | Public IP vs Tailscale | ✅ Tailscale (more reliable) |
 
 **⚠️ Critical Testing Insight:**
 > Cloud VMs have **direct public IPs** - they are NOT behind NAT.
@@ -440,16 +475,19 @@ macOS (10.0.150.x) --QUIC--> LoadBalancer (10.0.150.205:4433)
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. ✅ 004: E2E Testing (done - 61+ tests)
+4. ✅ 004: E2E Testing (done - 61+ E2E tests)
 
 **Path to P2P (primary goal):**
-- ✅ All of above + 005: P2P Hole Punching (done - 79 tests)
+- ✅ All of above + 005: P2P Hole Punching (done - 81 unit tests)
 
 **Path to real macOS Agent E2E testing:**
 - ✅ All of above + 005a: Swift Agent Integration (done - macOS Agent + QUIC working)
 
 **Path to production deployment:**
-- 🔄 All of above + **006: Cloud Deployment** (IN PROGRESS - NAT testing, production readiness)
+- 🔄 All of above + **006: Cloud Deployment** (IN PROGRESS)
+  - ✅ Config files, multi-service routing, TCP/ICMP support
+  - 🔲 Return-path DATAGRAM→TUN injection (Agent side)
+  - 🔲 P2P NAT testing, TLS, production readiness
 
 ---
 
@@ -464,9 +502,75 @@ macOS (10.0.150.x) --QUIC--> LoadBalancer (10.0.150.205:4433)
 
 ---
 
-## Service Registration Protocol
+## Service Registration & Routing Protocol
 
-The Intermediate Server routes traffic between Agents and Connectors using a **service-based routing model**. Both Agents and Connectors must register with a service ID to enable relay routing.
+The system uses a **configuration-driven, split-tunnel architecture** where only traffic to configured virtual IPs flows through the QUIC tunnel. All other traffic flows normally through the default gateway.
+
+### Split-Tunnel Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       SPLIT-TUNNEL ROUTING MODEL                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  macOS Agent (NetworkExtension TUN)                                         │
+│  ───────────────────────────────────                                        │
+│  Routes: 10.100.0.0/24 → utun (ZTNA tunnel)                               │
+│          0.0.0.0/0     → default gateway (untouched)                       │
+│                                                                              │
+│  Traffic to 10.100.0.1 (echo-service) → Captured → QUIC Tunnel             │
+│  Traffic to 10.100.0.2 (web-app)      → Captured → QUIC Tunnel             │
+│  Traffic to 8.8.8.8 (DNS)             → Normal routing (NOT tunneled)      │
+│  Traffic to 93.184.216.34 (web)       → Normal routing (NOT tunneled)      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration → Registration → Routing Flow
+
+**Step 1: Configuration defines what gets tunneled**
+
+Each component loads a JSON config that defines the services it handles:
+
+```
+Agent Config (agent.json):              Connector Config (connector.json):
+┌──────────────────────────────┐       ┌──────────────────────────────┐
+│ services:                     │       │ services:                     │
+│   - id: "echo-service"       │       │   - id: "echo-service"       │
+│     virtualIp: "10.100.0.1"  │       │     backend: "127.0.0.1:9999"│
+│   - id: "web-app"            │       │     protocol: "udp"          │
+│     virtualIp: "10.100.0.2"  │       │   - id: "web-app"            │
+└──────────────────────────────┘       │     backend: "127.0.0.1:8080"│
+                                        │     protocol: "tcp"          │
+                                        └──────────────────────────────┘
+```
+
+**Step 2: Registration tells the Intermediate who provides/consumes what**
+
+```
+Agent connects → registers 0x10 for "echo-service" AND "web-app"
+Connector connects → registers 0x11 for "echo-service"
+
+Intermediate registry:
+  agent_targets: { agent_conn → {"echo-service", "web-app"} }
+  connectors:    { "echo-service" → connector_conn }
+```
+
+**Step 3: 0x2F Service-Routed Datagrams carry per-packet routing**
+
+When the Agent intercepts a packet to 10.100.0.1, it looks up the route table (virtualIp → serviceId) and wraps the packet with a 0x2F header:
+
+```
+┌────────────┬──────────────────┬─────────────────────┬─────────────────┐
+│ 0x2F       │ ID Length (1B)   │ Service ID (N bytes)│ IP Packet       │
+│ (1 byte)   │                  │                     │ (remaining)     │
+└────────────┴──────────────────┴─────────────────────┴─────────────────┘
+
+Example: ping 10.100.0.1
+[0x2F] [0x0c] [echo-service] [45 00 00 54 ... ICMP Echo Request ...]
+```
+
+The Intermediate reads the 0x2F header, finds the Connector for "echo-service", strips the wrapper, and forwards the raw IP packet to the Connector.
 
 ### Registration Message Format
 
@@ -479,6 +583,7 @@ The Intermediate Server routes traffic between Agents and Connectors using a **s
 **Type Byte Values:**
 - `0x10` = Agent registration (targeting a service)
 - `0x11` = Connector registration (providing a service)
+- `0x2F` = Service-routed datagram (per-packet routing)
 
 **Example:**
 ```
@@ -487,55 +592,41 @@ Register as Agent for "echo-service":
 
 Register as Connector for "echo-service":
   [0x11] [0x0c] [echo-service]
+
+Send routed datagram to "echo-service":
+  [0x2F] [0x0c] [echo-service] [ip_packet_bytes...]
 ```
 
-### Registration Flow
+### Protocol Support at Connector
 
-```
-1. Agent connects to Intermediate (QUIC handshake)
-2. Agent receives QAD observed address (0x01 message)
-3. Agent sends registration DATAGRAM: [0x10, len, service_id]
-   - "I want to reach service 'echo-service'"
+The App Connector handles three IP protocols from tunneled packets:
 
-4. Connector connects to Intermediate (QUIC handshake)
-5. Connector receives QAD observed address
-6. Connector sends registration DATAGRAM: [0x11, len, service_id]
-   - "I provide service 'echo-service'"
-
-7. Intermediate Server registry maps:
-   - connectors: service_id → connector_conn_id
-   - agent_targets: agent_conn_id → target_service_id
-
-8. When Agent sends data DATAGRAM:
-   - Intermediate looks up Agent's target service
-   - Finds Connector for that service
-   - Relays to Connector
-
-9. When Connector sends response DATAGRAM:
-   - Intermediate looks up Connector's service
-   - Finds Agent(s) targeting that service
-   - Relays back to Agent
-```
+| Protocol | IP Proto | Handling | Backend Required |
+|----------|----------|----------|-----------------|
+| **UDP** | 17 | Extract payload → forward to backend → encapsulate response | Yes |
+| **TCP** | 6 | Userspace proxy: SYN→connect, data→stream, FIN→close | Yes |
+| **ICMP** | 1 | Echo Reply generated at Connector (swap src/dst, type 0) | No |
 
 ### FFI Functions
 
 **Rust (`core/packet_processor/src/lib.rs`):**
 ```rust
-// Agent registration constant
 const REG_TYPE_AGENT: u8 = 0x10;
 
-// FFI function
-pub unsafe extern "C" fn agent_register(
-    agent: *mut Agent,
-    service_id: *const libc::c_char,
-) -> AgentResult;
+pub unsafe extern "C" fn agent_register(agent: *mut Agent, service_id: *const c_char) -> AgentResult;
+pub unsafe extern "C" fn agent_send_datagram(agent: *mut Agent, buf: *const u8, len: usize) -> AgentResult;
 ```
 
 **Swift (`PacketTunnelProvider.swift`):**
 ```swift
-// Call after connection established
-let result = targetServiceId.withCString { servicePtr in
-    agent_register(agent, servicePtr)
+// Register for all configured services after connection established
+for serviceId in serviceIds {
+    serviceId.withCString { servicePtr in agent_register(agent, servicePtr) }
+}
+
+// Route table lookup + 0x2F wrapper for outgoing packets
+if let serviceId = routeTable[destIp] {
+    sendRoutedDatagram(agent: agent, serviceId: serviceId, packet: data)
 }
 ```
 
@@ -544,46 +635,8 @@ let result = targetServiceId.withCString { servicePtr in
 1. **Service ID must match**: Agent's target service ID must exactly match a registered Connector's service ID
 2. **No ACK**: Registration is fire-and-forget; server doesn't acknowledge
 3. **Re-register on reconnect**: Registration is connection-scoped; lost on disconnect
-4. **MVP limitation**: Agent can only target one service per connection
-
-### Routing Architecture Decision
-
-**MVP (Current): Single-Service-Per-Connection (Implicit Routing)**
-
-The Intermediate Server uses **implicit routing** based on connection registration. When an Agent sends a DATAGRAM (raw IP packet), the server looks up the Agent's registered service and routes to the corresponding Connector. No per-packet service ID is required.
-
-```
-Agent connects → registers for "echo-service" → all DATAGRAMs route to echo-service Connector
-```
-
-**Why this approach for MVP:**
-- Already implemented (registry maps conn_id → service_id)
-- Zero per-packet overhead
-- Simple to understand and debug
-- Sufficient for single-service use cases
-
-**Future: Session ID Header or QUIC Streams (Multi-Tenant)**
-
-When scaling to multi-tenant with multiple services per Agent:
-
-| Approach | Overhead | Migration Path | Recommendation |
-|----------|----------|----------------|----------------|
-| **Session ID Header** | 1 byte/packet | Direct (ID ≅ StreamID) | ✅ Recommended |
-| **Full Service ID** | 12+ bytes/packet | Same as above | ❌ Too much overhead |
-| **Connection-per-service** | N connections | Architectural rewrite | ❌ Doesn't scale |
-
-**Recommended future approach:** Prepend 1-byte session ID to DATAGRAMs:
-```
-Format: [session_id(1 byte), ip_packet(remaining)]
-Mapping: Control message establishes session_id ↔ service_id
-```
-
-This aligns with eventual migration to **QUIC Streams per service**, where Stream ID naturally replaces the session ID header.
-
-**Migration steps:**
-1. Add control message: `ESTABLISH_SESSION(service_id) → session_id`
-2. Prepend session_id to DATAGRAMs
-3. Later: Replace DATAGRAM + session_id with QUIC Stream frames
+4. **Multi-service**: Agent can register for multiple services per connection (0x2F routing)
+5. **Backward compatible**: Non-0x2F datagrams still use implicit single-service routing
 
 ---
 

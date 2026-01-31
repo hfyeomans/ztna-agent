@@ -9,9 +9,12 @@
 //! - Handles return traffic back through the tunnel
 
 use std::collections::HashMap;
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::io::{self, Read as _, Write as _};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream as StdTcpStream};
+use std::path::Path;
 use std::time::{Duration, Instant};
+
+use serde::Deserialize;
 
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token};
@@ -56,6 +59,23 @@ const REG_TYPE_CONNECTOR: u8 = 0x11;
 /// QAD message type (OBSERVED_ADDRESS)
 const QAD_OBSERVED_ADDRESS: u8 = 0x01;
 
+/// TCP flag: FIN (connection teardown)
+const TCP_FIN: u8 = 0x01;
+/// TCP flag: SYN (connection establishment)
+const TCP_SYN: u8 = 0x02;
+/// TCP flag: RST (connection reset)
+const TCP_RST: u8 = 0x04;
+/// TCP flag: PSH (push buffered data)
+const TCP_PSH: u8 = 0x08;
+/// TCP flag: ACK (acknowledgment)
+const TCP_ACK: u8 = 0x10;
+
+/// Maximum TCP payload per QUIC DATAGRAM: 1350 - 20 (IP) - 20 (TCP)
+const MAX_TCP_PAYLOAD: usize = MAX_DATAGRAM_SIZE - 40;
+
+/// TCP session idle timeout in seconds
+const TCP_SESSION_TIMEOUT_SECS: u64 = 120;
+
 /// mio token for QUIC socket
 const QUIC_SOCKET_TOKEN: Token = Token(0);
 
@@ -86,6 +106,67 @@ impl P2PClient {
     }
 }
 
+/// Represents a proxied TCP connection through the ZTNA tunnel
+struct TcpSession {
+    /// Non-blocking TCP connection to the backend service
+    stream: StdTcpStream,
+    /// Our (Connector-side) next sequence number
+    our_seq: u32,
+    /// Agent's next expected sequence number
+    their_seq: u32,
+    /// Agent's source IP (for constructing return packets)
+    agent_ip: Ipv4Addr,
+    /// Agent's source port
+    agent_port: u16,
+    /// Virtual service IP (destination in original packet)
+    service_ip: Ipv4Addr,
+    /// Virtual service port
+    service_port: u16,
+    /// Last activity time for session cleanup
+    last_active: Instant,
+    /// Whether the TCP 3-way handshake is complete
+    established: bool,
+}
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+#[derive(Deserialize, Default)]
+struct ConnectorConfig {
+    intermediate_server: Option<IntermediateServerConfig>,
+    services: Option<Vec<ServiceConfig>>,
+    p2p: Option<P2PConfig>,
+}
+
+#[derive(Deserialize)]
+struct IntermediateServerConfig {
+    host: Option<String>,
+    port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+struct ServiceConfig {
+    id: String,
+    backend: Option<String>,
+    #[allow(dead_code)]
+    protocol: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct P2PConfig {
+    cert: Option<String>,
+    key: Option<String>,
+    port: Option<u16>,
+}
+
+fn load_config(path: &str) -> Result<ConnectorConfig, Box<dyn std::error::Error>> {
+    let contents = std::fs::read_to_string(path)?;
+    let config: ConnectorConfig = serde_json::from_str(&contents)?;
+    log::info!("Loaded config from {}", path);
+    Ok(config)
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -100,23 +181,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
 
-    // --server <addr:port>       Intermediate Server address
-    // --service <id>             Service ID to register
-    // --forward <addr:port>      Local address to forward traffic to
-    // --p2p-cert <path>          TLS certificate for P2P server mode (optional)
-    // --p2p-key <path>           TLS private key for P2P server mode (optional)
-    // --p2p-listen-port <port>   Port for P2P connections (default: 4434)
+    // --config <path>            Load config from JSON file
+    // --server <addr:port>       Intermediate Server address (overrides config)
+    // --service <id>             Service ID to register (overrides config)
+    // --forward <addr:port>      Local address to forward traffic to (overrides config)
+    // --p2p-cert <path>          TLS certificate for P2P server mode (overrides config)
+    // --p2p-key <path>           TLS private key for P2P server mode (overrides config)
+    // --p2p-listen-port <port>   Port for P2P connections (overrides config)
+
+    // Load config file if provided (or from default paths)
+    let config = if let Some(config_path) = parse_arg(&args, "--config") {
+        load_config(&config_path)?
+    } else {
+        // Try default config paths
+        let default_paths = ["/etc/ztna/connector.json", "connector.json"];
+        let mut loaded = None;
+        for path in &default_paths {
+            if Path::new(path).exists() {
+                match load_config(path) {
+                    Ok(cfg) => {
+                        loaded = Some(cfg);
+                        break;
+                    }
+                    Err(e) => log::warn!("Failed to load {}: {}", path, e),
+                }
+            }
+        }
+        loaded.unwrap_or_default()
+    };
+
+    // Build effective config: CLI args override config file values
+    let config_server = config.intermediate_server.as_ref();
+    let config_host = config_server.and_then(|s| s.host.as_deref()).unwrap_or("127.0.0.1");
+    let config_port = config_server.and_then(|s| s.port).unwrap_or(DEFAULT_SERVER_PORT);
+    let config_server_addr = format!("{}:{}", config_host, config_port);
+
+    let first_service = config.services.as_ref().and_then(|s| s.first());
 
     let server_addr = parse_arg(&args, "--server")
-        .unwrap_or_else(|| format!("127.0.0.1:{}", DEFAULT_SERVER_PORT));
+        .unwrap_or(config_server_addr);
     let service_id = parse_arg(&args, "--service")
+        .or_else(|| first_service.map(|s| s.id.clone()))
         .unwrap_or_else(|| "default".to_string());
     let forward_addr = parse_arg(&args, "--forward")
+        .or_else(|| first_service.and_then(|s| s.backend.clone()))
         .unwrap_or_else(|| format!("127.0.0.1:{}", DEFAULT_FORWARD_PORT));
-    let p2p_cert = parse_arg(&args, "--p2p-cert");
-    let p2p_key = parse_arg(&args, "--p2p-key");
+
+    let p2p_config = config.p2p.as_ref();
+    let p2p_cert = parse_arg(&args, "--p2p-cert")
+        .or_else(|| p2p_config.and_then(|p| p.cert.clone()));
+    let p2p_key = parse_arg(&args, "--p2p-key")
+        .or_else(|| p2p_config.and_then(|p| p.key.clone()));
     let p2p_port: u16 = parse_arg(&args, "--p2p-listen-port")
         .and_then(|s| s.parse().ok())
+        .or_else(|| p2p_config.and_then(|p| p.port))
         .unwrap_or(DEFAULT_P2P_PORT);
 
     let server_addr: SocketAddr = server_addr.parse()
@@ -192,6 +310,8 @@ struct Connector {
     /// Key: (src_ip, src_port, dst_port) from encapsulated packet
     /// Value: timestamp for cleanup
     flow_map: HashMap<(Ipv4Addr, u16, u16), Instant>,
+    /// Active TCP proxy sessions, keyed by (src_ip, src_port, dst_ip, dst_port)
+    tcp_sessions: HashMap<(Ipv4Addr, u16, Ipv4Addr, u16), TcpSession>,
     /// Buffer for accumulating signaling stream data
     signaling_buffer: Vec<u8>,
     /// P2P session manager
@@ -297,6 +417,7 @@ impl Connector {
             registered: false,
             observed_addr: None,
             flow_map: HashMap::new(),
+            tcp_sessions: HashMap::new(),
             signaling_buffer: Vec::new(),
             session_manager: P2PSessionManager::new(),
             last_keepalive: Instant::now(),
@@ -336,6 +457,9 @@ impl Connector {
 
             // Also check local socket even without events (for edge cases)
             self.process_local_socket()?;
+
+            // Poll TCP backend connections for return traffic
+            self.process_tcp_sessions()?;
 
             // Process timeouts for all connections
             self.process_timeouts();
@@ -451,7 +575,7 @@ impl Connector {
             };
 
             match conn.recv(pkt_buf, recv_info) {
-                Ok(_) => {
+                Ok(_read) => {
                     // Check for established connection
                     if conn.is_established() {
                         // Process incoming DATAGRAMs
@@ -568,8 +692,20 @@ impl Connector {
         // Collect DATAGRAMs from Intermediate connection
         if let Some(ref mut conn) = self.intermediate_conn {
             let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
-            while let Ok(len) = conn.dgram_recv(&mut buf) {
-                dgrams.push(buf[..len].to_vec());
+            loop {
+                match conn.dgram_recv(&mut buf) {
+                    Ok(len) => {
+                        dgrams.push(buf[..len].to_vec());
+                    }
+                    Err(e) => {
+                        if dgrams.is_empty() {
+                            log::trace!("dgram_recv: {:?} (no datagrams)", e);
+                        } else {
+                            log::debug!("dgram_recv: {:?} (collected {} datagrams)", e, dgrams.len());
+                        }
+                        break;
+                    }
+                }
             }
         }
 
@@ -687,11 +823,21 @@ impl Connector {
 
         let protocol = dgram[9];
         let src_ip = Ipv4Addr::new(dgram[12], dgram[13], dgram[14], dgram[15]);
-        let _dst_ip = Ipv4Addr::new(dgram[16], dgram[17], dgram[18], dgram[19]);
+        let dst_ip = Ipv4Addr::new(dgram[16], dgram[17], dgram[18], dgram[19]);
 
-        // For MVP, only handle UDP (protocol 17)
+        // Handle TCP (protocol 6)
+        if protocol == 6 {
+            return self.handle_tcp_packet(dgram, ip_header_len, src_ip, dst_ip);
+        }
+
+        // Handle ICMP (protocol 1)
+        if protocol == 1 {
+            return self.handle_icmp_packet(dgram, ip_header_len, src_ip, dst_ip);
+        }
+
+        // Handle UDP (protocol 17) - other protocols dropped
         if protocol != 17 {
-            log::trace!("Non-UDP packet (protocol={}), dropping", protocol);
+            log::trace!("Unsupported protocol ({}), dropping", protocol);
             return Ok(());
         }
 
@@ -732,6 +878,286 @@ impl Connector {
             Err(e) => {
                 log::debug!("Failed to forward to local service: {:?}", e);
             }
+        }
+
+        Ok(())
+    }
+
+    fn handle_tcp_packet(
+        &mut self,
+        dgram: &[u8],
+        ip_header_len: usize,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if dgram.len() < ip_header_len + 20 {
+            log::debug!("TCP header truncated");
+            return Ok(());
+        }
+
+        let tcp_start = ip_header_len;
+        let src_port = u16::from_be_bytes([dgram[tcp_start], dgram[tcp_start + 1]]);
+        let dst_port = u16::from_be_bytes([dgram[tcp_start + 2], dgram[tcp_start + 3]]);
+        let seq_num = u32::from_be_bytes([
+            dgram[tcp_start + 4], dgram[tcp_start + 5],
+            dgram[tcp_start + 6], dgram[tcp_start + 7],
+        ]);
+        let _ack_num = u32::from_be_bytes([
+            dgram[tcp_start + 8], dgram[tcp_start + 9],
+            dgram[tcp_start + 10], dgram[tcp_start + 11],
+        ]);
+        let data_offset = ((dgram[tcp_start + 12] >> 4) & 0x0F) as usize * 4;
+        let flags = dgram[tcp_start + 13];
+
+        let payload_start = ip_header_len + data_offset;
+        let payload = if dgram.len() > payload_start {
+            &dgram[payload_start..]
+        } else {
+            &[]
+        };
+
+        let flow_key = (src_ip, src_port, dst_ip, dst_port);
+        let mut packets_to_send: Vec<Vec<u8>> = Vec::new();
+
+        if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 {
+            // SYN - new connection request
+            log::debug!(
+                "TCP SYN: {}:{} -> {}:{} (seq={})",
+                src_ip, src_port, dst_ip, dst_port, seq_num
+            );
+
+            match StdTcpStream::connect_timeout(
+                &self.forward_addr,
+                Duration::from_secs(2),
+            ) {
+                Ok(stream) => {
+                    stream.set_nonblocking(true)?;
+                    stream.set_nodelay(true)?;
+
+                    let our_isn: u32 = {
+                        let mut buf = [0u8; 4];
+                        let _ = self.rng.fill(&mut buf);
+                        u32::from_be_bytes(buf)
+                    };
+
+                    let session = TcpSession {
+                        stream,
+                        our_seq: our_isn.wrapping_add(1),
+                        their_seq: seq_num.wrapping_add(1),
+                        agent_ip: src_ip,
+                        agent_port: src_port,
+                        service_ip: dst_ip,
+                        service_port: dst_port,
+                        last_active: Instant::now(),
+                        established: false,
+                    };
+
+                    packets_to_send.push(build_tcp_packet(
+                        dst_ip, dst_port, src_ip, src_port,
+                        our_isn, seq_num.wrapping_add(1),
+                        TCP_SYN | TCP_ACK, 65535, &[],
+                    ));
+
+                    self.tcp_sessions.insert(flow_key, session);
+                    log::debug!("TCP session created, SYN-ACK sent");
+                }
+                Err(e) => {
+                    log::warn!("TCP connect to {} failed: {}", self.forward_addr, e);
+                    packets_to_send.push(build_tcp_packet(
+                        dst_ip, dst_port, src_ip, src_port,
+                        0, seq_num.wrapping_add(1),
+                        TCP_RST | TCP_ACK, 0, &[],
+                    ));
+                }
+            }
+        } else if flags & TCP_RST != 0 {
+            if self.tcp_sessions.remove(&flow_key).is_some() {
+                log::debug!("TCP session reset: {}:{}", src_ip, src_port);
+            }
+        } else if flags & TCP_FIN != 0 {
+            if let Some(session) = self.tcp_sessions.remove(&flow_key) {
+                packets_to_send.push(build_tcp_packet(
+                    dst_ip, dst_port, src_ip, src_port,
+                    session.our_seq,
+                    seq_num.wrapping_add(1 + payload.len() as u32),
+                    TCP_FIN | TCP_ACK, 65535, &[],
+                ));
+                drop(session.stream);
+                log::debug!("TCP session closed by FIN: {}:{}", src_ip, src_port);
+            }
+        } else if flags & TCP_ACK != 0 {
+            let mut remove_session = false;
+
+            if let Some(session) = self.tcp_sessions.get_mut(&flow_key) {
+                session.last_active = Instant::now();
+
+                if !session.established {
+                    session.established = true;
+                    log::debug!("TCP session established: {}:{}", src_ip, src_port);
+                }
+
+                if !payload.is_empty() {
+                    match session.stream.write(payload) {
+                        Ok(n) => {
+                            session.their_seq = seq_num.wrapping_add(n as u32);
+                            packets_to_send.push(build_tcp_packet(
+                                dst_ip, dst_port, src_ip, src_port,
+                                session.our_seq, session.their_seq,
+                                TCP_ACK, 65535, &[],
+                            ));
+                            log::trace!(
+                                "TCP forwarded {} bytes to backend for {}:{}",
+                                n, src_ip, src_port
+                            );
+                        }
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            // Backend buffer full - don't ACK, agent retransmits
+                            log::trace!("TCP write WouldBlock for {}:{}", src_ip, src_port);
+                        }
+                        Err(e) => {
+                            log::debug!("TCP write to backend failed: {}", e);
+                            packets_to_send.push(build_tcp_packet(
+                                dst_ip, dst_port, src_ip, src_port,
+                                session.our_seq,
+                                seq_num.wrapping_add(payload.len() as u32),
+                                TCP_RST | TCP_ACK, 0, &[],
+                            ));
+                            remove_session = true;
+                        }
+                    }
+                }
+            }
+
+            if remove_session {
+                self.tcp_sessions.remove(&flow_key);
+            }
+        }
+
+        for packet in packets_to_send {
+            self.send_ip_packet(&packet)?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_icmp_packet(
+        &mut self,
+        dgram: &[u8],
+        ip_header_len: usize,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // ICMP header is at least 8 bytes
+        if dgram.len() < ip_header_len + 8 {
+            log::debug!("ICMP header truncated");
+            return Ok(());
+        }
+
+        let icmp_start = ip_header_len;
+        let icmp_type = dgram[icmp_start];
+        let icmp_code = dgram[icmp_start + 1];
+
+        // Only handle Echo Request (type 8, code 0)
+        if icmp_type != 8 || icmp_code != 0 {
+            log::trace!("ICMP type={} code={}, ignoring (only Echo Request handled)", icmp_type, icmp_code);
+            return Ok(());
+        }
+
+        let icmp_data = &dgram[icmp_start..];
+
+        log::debug!(
+            "ICMP Echo Request: {} -> {} ({} bytes)",
+            src_ip, dst_ip, icmp_data.len()
+        );
+
+        // Build Echo Reply: swap src/dst IP, change type 8→0, recalculate checksum
+        let reply = build_icmp_reply(dst_ip, src_ip, icmp_data);
+        self.send_ip_packet(&reply)?;
+
+        log::trace!("ICMP Echo Reply sent: {} -> {}", dst_ip, src_ip);
+        Ok(())
+    }
+
+    fn send_ip_packet(&mut self, packet: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(ref mut conn) = self.intermediate_conn {
+            match conn.dgram_send(packet) {
+                Ok(_) => {
+                    log::trace!("Sent {} byte IP packet via QUIC", packet.len());
+                }
+                Err(e) => {
+                    log::debug!("Failed to send IP packet via QUIC: {:?}", e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn process_tcp_sessions(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut read_buf = [0u8; MAX_TCP_PAYLOAD];
+        let mut to_remove = Vec::new();
+        let mut packets_to_send: Vec<Vec<u8>> = Vec::new();
+
+        for (flow_key, session) in &mut self.tcp_sessions {
+            if !session.established {
+                continue;
+            }
+
+            loop {
+                match session.stream.read(&mut read_buf) {
+                    Ok(0) => {
+                        // Backend closed connection
+                        packets_to_send.push(build_tcp_packet(
+                            session.service_ip, session.service_port,
+                            session.agent_ip, session.agent_port,
+                            session.our_seq, session.their_seq,
+                            TCP_FIN | TCP_ACK, 65535, &[],
+                        ));
+                        to_remove.push(*flow_key);
+                        log::debug!(
+                            "TCP backend closed for {}:{}",
+                            session.agent_ip, session.agent_port
+                        );
+                        break;
+                    }
+                    Ok(n) => {
+                        packets_to_send.push(build_tcp_packet(
+                            session.service_ip, session.service_port,
+                            session.agent_ip, session.agent_port,
+                            session.our_seq, session.their_seq,
+                            TCP_PSH | TCP_ACK, 65535, &read_buf[..n],
+                        ));
+                        session.our_seq = session.our_seq.wrapping_add(n as u32);
+                        session.last_active = Instant::now();
+                        log::trace!(
+                            "TCP backend -> agent: {} bytes for {}:{}",
+                            n, session.agent_ip, session.agent_port
+                        );
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) => {
+                        log::debug!(
+                            "TCP backend read error for {}:{}: {}",
+                            session.agent_ip, session.agent_port, e
+                        );
+                        packets_to_send.push(build_tcp_packet(
+                            session.service_ip, session.service_port,
+                            session.agent_ip, session.agent_port,
+                            session.our_seq, session.their_seq,
+                            TCP_RST | TCP_ACK, 0, &[],
+                        ));
+                        to_remove.push(*flow_key);
+                        break;
+                    }
+                }
+            }
+        }
+
+        for key in to_remove {
+            self.tcp_sessions.remove(&key);
+        }
+
+        for packet in packets_to_send {
+            self.send_ip_packet(&packet)?;
         }
 
         Ok(())
@@ -821,6 +1247,8 @@ impl Connector {
             msg.push(id_bytes.len() as u8);
             msg.extend_from_slice(id_bytes);
 
+            log::debug!("DATAGRAM max_writable_len={:?}", conn.dgram_max_writable_len());
+
             match conn.dgram_send(&msg) {
                 Ok(_) => {
                     log::info!("Registered as Connector for service '{}'", self.service_id);
@@ -849,6 +1277,12 @@ impl Connector {
         // Clean up old flow mappings (older than 60 seconds)
         let now = Instant::now();
         self.flow_map.retain(|_, ts| now.duration_since(*ts).as_secs() < 60);
+
+        // Clean up idle TCP sessions
+        let tcp_timeout = TCP_SESSION_TIMEOUT_SECS;
+        self.tcp_sessions.retain(|_, session| {
+            now.duration_since(session.last_active).as_secs() < tcp_timeout
+        });
     }
 
     /// Send a QUIC PING to keep the Intermediate connection alive
@@ -1206,6 +1640,135 @@ fn ip_checksum(header: &[u8]) -> u16 {
     !sum as u16
 }
 
+fn build_tcp_packet(
+    src_ip: Ipv4Addr,
+    src_port: u16,
+    dst_ip: Ipv4Addr,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let tcp_header_len = 20;
+    let tcp_len = tcp_header_len + payload.len();
+    let total_len = 20 + tcp_len;
+
+    let mut packet = vec![0u8; total_len];
+
+    // IP Header (20 bytes)
+    packet[0] = 0x45; // Version 4, IHL 5
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[6..8].copy_from_slice(&[0x40, 0x00]); // Don't Fragment
+    packet[8] = 64; // TTL
+    packet[9] = 6; // Protocol: TCP
+    packet[12..16].copy_from_slice(&src_ip.octets());
+    packet[16..20].copy_from_slice(&dst_ip.octets());
+
+    let ip_cksum = ip_checksum(&packet[0..20]);
+    packet[10..12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+    // TCP Header (20 bytes)
+    let t = 20; // tcp_start
+    packet[t..t + 2].copy_from_slice(&src_port.to_be_bytes());
+    packet[t + 2..t + 4].copy_from_slice(&dst_port.to_be_bytes());
+    packet[t + 4..t + 8].copy_from_slice(&seq.to_be_bytes());
+    packet[t + 8..t + 12].copy_from_slice(&ack.to_be_bytes());
+    packet[t + 12] = 0x50; // Data offset: 5 words (20 bytes)
+    packet[t + 13] = flags;
+    packet[t + 14..t + 16].copy_from_slice(&window.to_be_bytes());
+
+    // TCP Payload
+    if !payload.is_empty() {
+        packet[t + 20..].copy_from_slice(payload);
+    }
+
+    // TCP Checksum (includes pseudo-header)
+    let tcp_cksum = tcp_checksum(src_ip, dst_ip, &packet[t..]);
+    packet[t + 16..t + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
+
+    packet
+}
+
+fn tcp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header
+    let src = src_ip.octets();
+    let dst = dst_ip.octets();
+    sum = sum.wrapping_add(((src[0] as u32) << 8) | src[1] as u32);
+    sum = sum.wrapping_add(((src[2] as u32) << 8) | src[3] as u32);
+    sum = sum.wrapping_add(((dst[0] as u32) << 8) | dst[1] as u32);
+    sum = sum.wrapping_add(((dst[2] as u32) << 8) | dst[3] as u32);
+    sum = sum.wrapping_add(6); // Protocol: TCP
+    sum = sum.wrapping_add(tcp_segment.len() as u32);
+
+    // TCP segment (header + data)
+    for i in (0..tcp_segment.len()).step_by(2) {
+        let word = if i + 1 < tcp_segment.len() {
+            ((tcp_segment[i] as u32) << 8) | (tcp_segment[i + 1] as u32)
+        } else {
+            (tcp_segment[i] as u32) << 8
+        };
+        sum = sum.wrapping_add(word);
+    }
+
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    !sum as u16
+}
+
+fn build_icmp_reply(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, echo_request: &[u8]) -> Vec<u8> {
+    let total_len = 20 + echo_request.len();
+    let mut packet = vec![0u8; total_len];
+
+    // IP Header (20 bytes)
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[6..8].copy_from_slice(&[0x40, 0x00]); // Don't Fragment
+    packet[8] = 64; // TTL
+    packet[9] = 1; // Protocol: ICMP
+    packet[12..16].copy_from_slice(&src_ip.octets());
+    packet[16..20].copy_from_slice(&dst_ip.octets());
+
+    let ip_cksum = ip_checksum(&packet[0..20]);
+    packet[10..12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+    // Copy ICMP data from request, then change type to Echo Reply (0)
+    packet[20..].copy_from_slice(echo_request);
+    packet[20] = 0; // Type: Echo Reply
+
+    // Zero out ICMP checksum and recalculate
+    packet[22] = 0;
+    packet[23] = 0;
+    let icmp_cksum = icmp_checksum(&packet[20..]);
+    packet[22..24].copy_from_slice(&icmp_cksum.to_be_bytes());
+
+    packet
+}
+
+fn icmp_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    for i in (0..data.len()).step_by(2) {
+        let word = if i + 1 < data.len() {
+            ((data[i] as u32) << 8) | (data[i + 1] as u32)
+        } else {
+            (data[i] as u32) << 8
+        };
+        sum = sum.wrapping_add(word);
+    }
+
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    !sum as u16
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1270,5 +1833,171 @@ mod tests {
         assert_eq!(DEFAULT_P2P_PORT, 4434);
         assert_eq!(DEFAULT_SERVER_PORT, 4433);
         assert_eq!(DEFAULT_P2P_PORT, DEFAULT_SERVER_PORT + 1);
+    }
+
+    #[test]
+    fn test_tcp_flags() {
+        assert_eq!(TCP_FIN, 0x01);
+        assert_eq!(TCP_SYN, 0x02);
+        assert_eq!(TCP_RST, 0x04);
+        assert_eq!(TCP_PSH, 0x08);
+        assert_eq!(TCP_ACK, 0x10);
+        // SYN-ACK
+        assert_eq!(TCP_SYN | TCP_ACK, 0x12);
+        // FIN-ACK
+        assert_eq!(TCP_FIN | TCP_ACK, 0x11);
+        // PSH-ACK (data)
+        assert_eq!(TCP_PSH | TCP_ACK, 0x18);
+    }
+
+    #[test]
+    fn test_build_tcp_packet_syn_ack() {
+        let packet = build_tcp_packet(
+            Ipv4Addr::new(10, 100, 0, 1),
+            80,
+            Ipv4Addr::new(192, 168, 1, 100),
+            54321,
+            1000, // seq
+            500,  // ack
+            TCP_SYN | TCP_ACK,
+            65535,
+            &[],
+        );
+
+        // IP header checks
+        assert_eq!(packet[0], 0x45); // IPv4, IHL=5
+        assert_eq!(packet[9], 6);    // TCP protocol
+        assert_eq!(packet.len(), 40); // 20 IP + 20 TCP, no payload
+
+        // TCP header checks
+        let src_port = u16::from_be_bytes([packet[20], packet[21]]);
+        let dst_port = u16::from_be_bytes([packet[22], packet[23]]);
+        assert_eq!(src_port, 80);
+        assert_eq!(dst_port, 54321);
+
+        let seq = u32::from_be_bytes([packet[24], packet[25], packet[26], packet[27]]);
+        let ack = u32::from_be_bytes([packet[28], packet[29], packet[30], packet[31]]);
+        assert_eq!(seq, 1000);
+        assert_eq!(ack, 500);
+
+        assert_eq!(packet[32], 0x50); // Data offset: 5 words
+        assert_eq!(packet[33], TCP_SYN | TCP_ACK); // Flags
+    }
+
+    #[test]
+    fn test_build_tcp_packet_with_data() {
+        let payload = b"HTTP/1.1 200 OK\r\n";
+        let packet = build_tcp_packet(
+            Ipv4Addr::new(10, 0, 0, 1),
+            8080,
+            Ipv4Addr::new(172, 16, 0, 1),
+            12345,
+            2000,
+            1500,
+            TCP_PSH | TCP_ACK,
+            65535,
+            payload,
+        );
+
+        assert_eq!(packet.len(), 40 + payload.len());
+        assert_eq!(packet[33], TCP_PSH | TCP_ACK);
+        assert_eq!(&packet[40..], payload);
+    }
+
+    #[test]
+    fn test_tcp_checksum_validity() {
+        let packet = build_tcp_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            80,
+            Ipv4Addr::new(192, 168, 1, 2),
+            54321,
+            100,
+            200,
+            TCP_ACK,
+            65535,
+            b"test",
+        );
+
+        // Verify TCP checksum: recomputing over the TCP segment
+        // (with checksum field included) using the pseudo-header should yield 0
+        let tcp_segment = &packet[20..];
+        let result = tcp_checksum(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(192, 168, 1, 2),
+            tcp_segment,
+        );
+        assert_eq!(result, 0, "TCP checksum should verify to 0");
+    }
+
+    #[test]
+    fn test_max_tcp_payload_fits_datagram() {
+        // MAX_TCP_PAYLOAD + IP header + TCP header must fit in MAX_DATAGRAM_SIZE
+        assert_eq!(MAX_TCP_PAYLOAD + 40, MAX_DATAGRAM_SIZE);
+        assert!(MAX_TCP_PAYLOAD > 0);
+    }
+
+    #[test]
+    fn test_build_icmp_reply() {
+        // Build a mock Echo Request ICMP payload:
+        // Type=8, Code=0, Checksum=XX, Identifier=0x1234, Sequence=0x0001, Data="ping"
+        let mut echo_request = vec![
+            8,    // Type: Echo Request
+            0,    // Code
+            0, 0, // Checksum (placeholder)
+            0x12, 0x34, // Identifier
+            0x00, 0x01, // Sequence
+        ];
+        echo_request.extend_from_slice(b"ping");
+
+        // Calculate request checksum
+        let cksum = icmp_checksum(&echo_request);
+        echo_request[2..4].copy_from_slice(&cksum.to_be_bytes());
+
+        let reply = build_icmp_reply(
+            Ipv4Addr::new(10, 100, 0, 1),
+            Ipv4Addr::new(192, 168, 1, 100),
+            &echo_request,
+        );
+
+        // IP header checks
+        assert_eq!(reply[0], 0x45);
+        assert_eq!(reply[9], 1); // ICMP protocol
+        assert_eq!(reply.len(), 20 + echo_request.len());
+
+        // Source IP should be the service IP
+        assert_eq!(&reply[12..16], &[10, 100, 0, 1]);
+        // Dest IP should be the agent IP
+        assert_eq!(&reply[16..20], &[192, 168, 1, 100]);
+
+        // ICMP type should be Echo Reply (0)
+        assert_eq!(reply[20], 0);
+        assert_eq!(reply[21], 0); // Code unchanged
+
+        // Identifier and sequence should be preserved
+        assert_eq!(&reply[24..26], &[0x12, 0x34]);
+        assert_eq!(&reply[26..28], &[0x00, 0x01]);
+
+        // Data should be preserved
+        assert_eq!(&reply[28..], b"ping");
+
+        // ICMP checksum should verify
+        assert_eq!(icmp_checksum(&reply[20..]), 0);
+    }
+
+    #[test]
+    fn test_icmp_checksum_validity() {
+        let data = [
+            0u8, 0,    // Type: Echo Reply, Code: 0
+            0, 0,      // Checksum (will be computed)
+            0x12, 0x34, // Identifier
+            0x00, 0x01, // Sequence
+            b't', b'e', b's', b't', // Data
+        ];
+        let cksum = icmp_checksum(&data);
+
+        let mut with_cksum = data.to_vec();
+        with_cksum[2..4].copy_from_slice(&cksum.to_be_bytes());
+
+        assert_eq!(icmp_checksum(&with_cksum), 0, "ICMP checksum should verify to 0");
     }
 }

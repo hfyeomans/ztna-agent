@@ -20,4 +20,5 @@ env_logger = "0.11"
 
 # Serialization for P2P signaling
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 bincode = "1.3"

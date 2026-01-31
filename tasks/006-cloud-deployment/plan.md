@@ -668,6 +668,282 @@ CERT_DIR=/etc/ztna/certs
 
 ---
 
+## Dynamic Service Configuration (Future Requirement)
+
+> **Post-Deployment Note:** After successful cloud deployment, we must revisit all hard-coding
+> and move to dynamic, variable-based configuration. This is critical for production readiness.
+
+### Problem Statement
+
+The current MVP has many hard-coded values that work for testing but won't scale:
+
+| Component | Hard-Coded Issue | Production Requirement |
+|-----------|------------------|------------------------|
+| macOS Agent | `serverHost = "3.128.36.92"` | User-configurable intermediate server |
+| macOS Agent | VPN routes `10.100.0.0/24` | Dynamic route table from service catalog |
+| App Connector | `--server 127.0.0.1:4433` | Environment-based config |
+| App Connector | `--service echo-service` | Service registration from config |
+| Intermediate | Port 4433 hard-coded | Configurable port |
+| All | Service ID "echo-service" | Dynamic service discovery |
+
+### Target Architecture: Service Catalog
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SERVICE CATALOG (Future)                              │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  services.yaml / services.json                                          ││
+│  │                                                                          ││
+│  │  services:                                                               ││
+│  │    - id: "echo-service"                                                 ││
+│  │      display_name: "Echo Test Service"                                  ││
+│  │      virtual_ip: "10.100.0.1"                                           ││
+│  │      port: 9999                                                         ││
+│  │      protocol: udp                                                      ││
+│  │      backend: "127.0.0.1:9999"                                          ││
+│  │                                                                          ││
+│  │    - id: "web-app"                                                      ││
+│  │      display_name: "Internal Web App"                                   ││
+│  │      virtual_ip: "10.100.0.2"                                           ││
+│  │      port: 443                                                          ││
+│  │      protocol: tcp                                                      ││
+│  │      backend: "internal-app.corp.local:443"                             ││
+│  │                                                                          ││
+│  │  intermediate_server:                                                    ││
+│  │    host: "ztna.example.com"                                             ││
+│  │    port: 4433                                                           ││
+│  │    cert_fingerprint: "sha256:abc123..."                                 ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration Flow (Target State)
+
+```
+                    ┌──────────────────┐
+                    │  Admin Portal    │
+                    │  (Web/API)       │
+                    └────────┬─────────┘
+                             │ Configure services,
+                             │ assign permissions
+                             ▼
+                    ┌──────────────────┐
+                    │  Control Plane   │
+                    │  (Config Store)  │
+                    └────────┬─────────┘
+                             │
+          ┌──────────────────┼──────────────────┐
+          ▼                  ▼                  ▼
+┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
+│   macOS Agent    │ │  Intermediate    │ │  App Connector   │
+│                  │ │  Server          │ │                  │
+│  Receives:       │ │                  │ │  Receives:       │
+│  - Server addr   │ │  Receives:       │ │  - Server addr   │
+│  - Service list  │ │  - Service map   │ │  - Service IDs   │
+│  - Route table   │ │  - Auth config   │ │  - Backend maps  │
+└──────────────────┘ └──────────────────┘ └──────────────────┘
+```
+
+### Phase 1: Environment Variables (Immediate)
+
+Minimum viable improvement - externalize hard-coded values:
+
+**macOS Agent (Swift):**
+```swift
+// Instead of: private let serverHost = "3.128.36.92"
+// Read from app configuration or environment:
+private var serverHost: String {
+    ProcessInfo.processInfo.environment["ZTNA_SERVER_HOST"]
+        ?? UserDefaults.standard.string(forKey: "serverHost")
+        ?? "localhost"
+}
+```
+
+**App Connector (Rust):**
+```rust
+// Already uses CLI args, but add environment fallbacks:
+let server = args.server.unwrap_or_else(|| {
+    std::env::var("ZTNA_INTERMEDIATE_SERVER")
+        .unwrap_or_else(|_| "127.0.0.1:4433".to_string())
+});
+```
+
+### Phase 2: Configuration File (Short-term)
+
+**Config file format:** YAML or JSON for human readability
+
+```yaml
+# ~/.ztna/config.yaml (macOS Agent)
+intermediate_server:
+  host: "ztna.example.com"
+  port: 4433
+
+services:
+  - id: "echo-service"
+    virtual_ip: "10.100.0.1"
+    routes: ["10.100.0.0/24"]
+
+# /etc/ztna/connector.yaml (App Connector)
+intermediate_server:
+  host: "ztna.example.com"
+  port: 4433
+
+services:
+  - id: "echo-service"
+    backend: "127.0.0.1:9999"
+    protocol: "udp"
+```
+
+### Phase 3: Dynamic Configuration API (Medium-term)
+
+**Flow:**
+1. Agent/Connector authenticate to Intermediate
+2. Intermediate returns authorized service list
+3. Clients configure routes/backends dynamically
+
+**Protocol addition:**
+```rust
+// New DATAGRAM type for config sync
+const CONFIG_SYNC: u8 = 0x20;
+
+// Config sync request (Agent → Intermediate)
+// [0x20, 0x01]  // Type=CONFIG_SYNC, Subtype=REQUEST
+
+// Config sync response (Intermediate → Agent)
+// [0x20, 0x02, len, json_config...]
+```
+
+### Phase 4: Full Service Discovery (Long-term)
+
+- Integration with identity provider (OIDC, SAML)
+- Role-based service access
+- Real-time service health/availability
+- Automatic failover and load balancing
+
+### Implementation Priority
+
+| Priority | Item | Effort | Impact |
+|----------|------|--------|--------|
+| P0 | Remove 1.1.1.1 from all code | Done ✅ | Critical |
+| P1 | Externalize server host to env/config | Low | High |
+| P1 | Externalize service IDs | Low | High |
+| P2 | VPN route configuration from file | Medium | High |
+| P2 | Config file parser for Agent/Connector | Medium | Medium |
+| P3 | Dynamic config API via DATAGRAM | High | High |
+| P4 | Full service discovery | High | Future |
+
+### Files Requiring Updates
+
+| File | Current Hard-Code | Required Change |
+|------|-------------------|-----------------|
+| `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` | `serverHost = "3.128.36.92"` | Config-driven |
+| `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` | `10.100.0.0/24` route | Dynamic route table |
+| `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` | `echo-service` | Config-driven service ID |
+| `app-connector/src/main.rs` | CLI args only | Add config file support |
+| `intermediate-server/src/main.rs` | CLI args only | Add config file support |
+| `deploy/aws/aws-deploy-skill.md` | Example IPs | Document config requirements |
+| `deploy/k8s/k8s-deploy-skill.md` | Example IPs | Document config requirements |
+
+---
+
+## Post-Cloud Deployment: Next Steps (2026-01-26)
+
+> **Decision:** Config-first approach (Option 2) - establish configuration mechanism before
+> expanding protocol support. This enables visible progress toward multi-service demos.
+
+### Task Sequence
+
+| Order | Task | Effort | Outcome |
+|-------|------|--------|---------|
+| 1 | **Validate AWS E2E** | Low | Proves cloud deployment works |
+| 2 | **Config File Mechanism** | Medium | Foundation for all dynamic config |
+| 3 | **IP→Service Routing** | Medium | Multiple services per connection |
+| 4 | **TCP Support** | Medium-High | Enables web apps, databases |
+| 5 | **ICMP Support** | Low | Enables ping diagnostics |
+| 6 | **Admin Dashboard** | High | UI for policy management |
+
+### Task 2: Config File Mechanism (Details)
+
+**Goal:** Single source of truth for service definitions, readable by all components.
+
+**Config Locations:**
+- macOS Agent: `~/Library/Application Support/ZtnaAgent/config.yaml`
+- App Connector: `/etc/ztna/connector.yaml` or `~/.ztna/connector.yaml`
+- Intermediate: `/etc/ztna/intermediate.yaml`
+
+**Shared Schema (services.yaml):**
+```yaml
+version: 1
+intermediate_server:
+  host: "ztna.example.com"
+  port: 4433
+
+services:
+  - id: echo-service
+    display_name: "Echo Test Service"
+    virtual_ip: 10.100.0.1
+    port: 9999
+    protocol: udp
+    backend: "127.0.0.1:9999"  # Connector-side only
+
+  - id: web-app
+    display_name: "Internal Web App"
+    virtual_ip: 10.100.0.2
+    port: 443
+    protocol: tcp
+    backend: "internal.corp.local:443"
+```
+
+**Implementation Order:**
+1. Define YAML schema (shared across components)
+2. Add config parser to App Connector (Rust - serde_yaml)
+3. Add config parser to macOS Agent (Swift - Yams or Foundation)
+4. Add config parser to Intermediate Server (Rust)
+5. Test with multi-service config
+
+### Task 3: IP→Service Routing (Details)
+
+**Current limitation:** Routing is implicit (single service per connection).
+
+**Problem:**
+```
+Agent sends packet to 10.100.0.1:9999  → routed to echo-service (implicit)
+Agent sends packet to 10.100.0.2:443  → ??? (no service context)
+```
+
+**Solution: Include service_id in relay DATAGRAM:**
+```
+Current:  [RELAY_TYPE, payload...]
+Proposed: [RELAY_TYPE, service_id_len, service_id, payload...]
+```
+
+OR: Agent maintains IP→service mapping from config, intermediate routes based on
+registered service associations.
+
+### Task 4: TCP Support (Details)
+
+**Current app-connector code:**
+```rust
+// Only UDP supported currently
+if ip_header.protocol != 17 {
+    debug!("Dropping non-UDP packet (protocol {})", ip_header.protocol);
+    return;
+}
+```
+
+**Required changes:**
+1. Accept protocol 6 (TCP) in addition to 17 (UDP)
+2. Handle TCP differently - may need QUIC streams instead of DATAGRAMs for reliability
+3. Manage NAT state for TCP connections (source port mapping)
+4. Handle TCP flags (SYN, ACK, FIN, RST) appropriately
+
+**Design consideration:** TCP over QUIC DATAGRAM vs TCP over QUIC Stream
+- DATAGRAM: Lower latency, but unreliable (may need app-layer retransmit)
+- Stream: Reliable, but adds latency (double-ordering problem)
+
+---
+
 ## Success Criteria (Updated)
 
 ### Relay Validation (AWS/DigitalOcean)
