@@ -402,8 +402,65 @@ pgrep -fl Extension | grep tmp
 
 1. ~~**Return-path not implemented:**~~ ✅ FIXED (2026-01-31) - Agent reads DATAGRAMs from QUIC via `agent_recv_datagram()` FFI and injects into TUN via `packetFlow.writePackets()`
 2. ~~**No keepalive:**~~ ✅ FIXED (2026-01-25) - macOS Agent sends keepalive PING every 10 seconds
-3. **SNAT hides real IP:** QAD returns k8s node IP, not macOS real IP (due to externalTrafficPolicy: Cluster)
-4. **Config via UI only:** macOS Agent config set in SwiftUI, not config file (acceptable for client app)
+3. ~~**No auto-recovery:**~~ ✅ FIXED (2026-01-31) - Connection resilience with exponential backoff + NWPathMonitor
+4. **SNAT hides real IP:** QAD returns k8s node IP, not macOS real IP (due to externalTrafficPolicy: Cluster)
+5. **Config via UI only:** macOS Agent config set in SwiftUI, not config file (acceptable for client app)
+
+### Connection Resilience Testing (Added 2026-01-31)
+
+The macOS Agent now auto-recovers when the QUIC connection drops.
+
+**Test 1: Server Restart Recovery**
+```bash
+# Terminal 1: Start VPN, verify connected
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
+ping -c 3 10.100.0.1  # Should work
+
+# Terminal 2: Restart intermediate server on AWS
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'sudo systemctl restart ztna-intermediate'
+
+# Terminal 3: Watch macOS logs
+log stream --predicate 'subsystem CONTAINS "ztna"' --info
+# Expect: "Scheduling reconnect in 1.0s (reason: ...)"
+# Then:   "Attempting reconnect to 3.128.36.92:4433"
+# Then:   "QUIC connection established"
+
+# Terminal 1: Verify recovery
+ping -c 3 10.100.0.1  # Should work again
+```
+
+**Test 2: WiFi Toggle Recovery**
+```bash
+# Disconnect WiFi in macOS System Settings, wait 5s, reconnect
+# Watch logs for: "Network path unsatisfied" → "Network path changed (satisfied), scheduling reconnect"
+# Verify: ping 10.100.0.1 works after reconnection
+```
+
+**Test 3: Backoff Verification**
+```bash
+# Stop intermediate server entirely (don't restart)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'sudo systemctl stop ztna-intermediate'
+
+# Watch logs — should see increasing backoff:
+# "Scheduling reconnect in 1.0s"
+# "Scheduling reconnect in 2.0s"
+# "Scheduling reconnect in 4.0s"
+# ... up to 30.0s cap
+
+# Restart server — next successful connect resets backoff to 1s
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'sudo systemctl start ztna-intermediate'
+```
+
+**Expected behavior summary:**
+| Trigger | Detection Path | Recovery |
+|---------|---------------|----------|
+| Server restart | `updateAgentState()` Closed/Error | Auto-reconnect with backoff |
+| WiFi toggle | `NWPathMonitor` satisfied + Agent disconnected | Auto-reconnect |
+| UDP connection failure | `NWConnection .failed` | Auto-reconnect with backoff |
+| Keepalive timeout | `sendKeepalive()` NotConnected | Auto-reconnect with backoff |
 
 ### macOS Agent Keepalive (Added 2026-01-25)
 

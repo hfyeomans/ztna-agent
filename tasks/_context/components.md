@@ -224,7 +224,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | SwiftUI App | ✅ Works | Start/Stop + auto-start/stop for testing |
 | VPNManager | ✅ Works | Retry logic for first-time config |
 | PacketTunnelProvider | ✅ Rewritten | Full QUIC integration via FFI |
-| Bridging Header | ✅ Basic done | P2P/resilience FFI deferred (post-MVP) |
+| Bridging Header | ✅ Basic done | P2P FFI deferred (post-MVP), resilience = Swift-only |
 | AgentWrapper.swift | ⏭️ Deferred | FFI used directly (acceptable) |
 
 **Status:**
@@ -258,6 +258,19 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Validates IPv4 version nibble, batches packets
 - Injects via `packetFlow.writePackets()` into TUN for kernel delivery
 - Enables `ping 10.100.0.1` to receive Echo Replies
+
+**Connection Resilience (Added 2026-01-31):**
+- Auto-recovery when QUIC connection drops (server restart, network change, timeout)
+- `NWPathMonitor` detects WiFi → Cellular transitions, triggers reconnect
+- Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (cap), reset on success
+- Three detection paths: NWConnection `.failed`, `updateAgentState()` transitions, keepalive `NotConnected`
+- `attemptReconnect()` reuses existing Agent — calls `agent_connect()` again (no destroy/recreate)
+- State transition tracking prevents duplicate reconnect scheduling
+
+**Deferred QUIC Enhancements (Post-MVP):**
+- True QUIC connection migration (quiche doesn't support — full reconnect instead)
+- 0-RTT reconnection (requires session ticket storage in quiche)
+- Multiplexed QUIC streams (DATAGRAMs sufficient for current relay needs)
 
 **Test Automation Features:**
 - `--auto-start` - Automatically start VPN on app launch
@@ -299,6 +312,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 4.5: ICMP Support | ✅ Done | Connector-local Echo Reply |
 | Phase 4.6: Return-Path (DATAGRAM→TUN) | ✅ Done | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` + `writePackets()` |
 | Phase 4.7: Registry Connector Replacement Fix | ✅ Done | `unregister()` guard prevents clobbering new registrations |
+| Phase 4.9: Connection Resilience | ✅ Done | Auto-recovery, NWPathMonitor, exponential backoff |
 | Phase 3: TLS & Security | 🔲 Pending | Self-signed → Let's Encrypt |
 | **Phase 6: P2P NAT Testing** | 🔲 **NOT DONE** | Requires Agent behind real NAT, Connector on different network |
 

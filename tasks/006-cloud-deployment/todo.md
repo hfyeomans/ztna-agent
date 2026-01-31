@@ -221,6 +221,43 @@ sudo journalctl -u ztna-intermediate -f  # View logs
 - [ ] ECS cluster for scalable deployment
 - [ ] NLB for UDP load balancing
 
+### 4.9 Connection Resilience (Auto-Recovery)
+
+> **Problem:** macOS Agent tunnel doesn't recover when the QUIC connection drops (server restart, network change, timeout). User must manually stop/start the VPN.
+>
+> **Key finding:** Rust Agent is reusable — `agent_connect()` replaces the old connection without destroy/recreate.
+> No Rust changes needed. Swift-only implementation.
+
+#### 4.9.1 Reconnection State
+- [x] Add reconnection properties (pathMonitor, reconnectTimer, backoff, previousAgentState)
+
+#### 4.9.2 NWPathMonitor
+- [x] Add `startPathMonitor()` to detect WiFi → Cellular transitions
+- [x] Trigger reconnect when network becomes satisfied and Agent is disconnected
+- [x] Wire into `startTunnel()` and cleanup in `stopTunnel()`
+
+#### 4.9.3 Exponential Backoff
+- [x] Add `scheduleReconnect(reason:)` with 1s → 2s → 4s → 8s → 16s → 30s cap
+- [x] Coalesce multiple reconnect triggers into single timer
+
+#### 4.9.4 Reconnect Logic
+- [x] Add `attemptReconnect()` — cancel old NWConnection, call `setupUdpConnection()`, reset `hasRegistered`
+- [x] On `.ready`: `agent_connect()` → QUIC handshake → re-register → restart keepalive
+
+#### 4.9.5 Detection Points
+- [x] `setupUdpConnection()` `.failed` → `scheduleReconnect()`
+- [x] `updateAgentState()` Closed/Error/Disconnected transitions → `scheduleReconnect()`
+- [x] `sendKeepalive()` NotConnected → `scheduleReconnect()`
+
+#### 4.9.6 State Transition Tracking
+- [x] Add `previousAgentState` to prevent duplicate reconnect scheduling
+- [x] Reset `reconnectBackoff` to 1.0 on successful connection
+
+#### 4.9.7 Testing
+- [x] Test: Restart intermediate server on AWS → Agent auto-recovers (1s backoff + 40ms handshake = ~1s recovery)
+- [x] Test: Toggle WiFi off/on → Agent auto-recovers (LAN→WiFi, NWPathMonitor detected, 1.3s total recovery)
+- [x] Test: Verify backoff logging (1s → 2s → 4s → 8s confirmed, 30s QUIC handshake timeout between attempts, reset on success)
+
 ---
 
 ## Phase 5: Home MVP Deployment (Pi k8s) ✅ MOSTLY COMPLETE
@@ -494,7 +531,10 @@ Agent → Intermediate → Connector → Echo Server → Response
 | 3 | **IP→Service Routing** | ✅ Complete | Multi-service routing with 0x2F protocol (2026-01-31) |
 | 4 | **TCP Support in App Connector** | ✅ Complete | Userspace TCP proxy (2026-01-31) |
 | 5 | **ICMP Support** | ✅ Complete | Echo Reply at Connector (2026-01-31) |
-| 6 | **Admin Dashboard** | ⬜ Future | UI layer on config mechanism |
+| 6 | **Return-Path (DATAGRAM→TUN)** | ✅ Complete | agent_recv_datagram + drainIncomingDatagrams (2026-01-31) |
+| 7 | **Connection Resilience** | ✅ Implemented | Auto-recovery with exponential backoff + NWPathMonitor (2026-01-31) |
+| 8 | **P2P NAT Testing** | ⬜ Next | Phase 6 — hole punching with real NATs |
+| 9 | **Admin Dashboard** | ⬜ Future | UI layer on config mechanism |
 
 ### Task Details
 

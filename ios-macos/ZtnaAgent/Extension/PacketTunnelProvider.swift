@@ -65,6 +65,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Buffer for sending UDP packets
     private var sendBuffer = [UInt8](repeating: 0, count: 1500)
 
+    // MARK: - Reconnection State
+
+    /// Network path monitor for detecting WiFi → Cellular transitions
+    private var pathMonitor: NWPathMonitor?
+
+    /// Reconnection timer (exponential backoff)
+    private var reconnectTimer: DispatchSourceTimer?
+
+    /// Current backoff delay in seconds (doubles each attempt)
+    private var reconnectBackoff: TimeInterval = 1.0
+
+    /// Maximum backoff delay
+    private let maxReconnectBackoff: TimeInterval = 30.0
+
+    /// Whether a reconnection attempt is in progress
+    private var isReconnecting = false
+
+    /// Track the previous QUIC state to detect transitions
+    private var previousAgentState: AgentState = AgentStateDisconnected
+
     // MARK: - Tunnel Lifecycle
 
     override func startTunnel(options: [String: NSObject]? = nil) async throws {
@@ -90,6 +110,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         isRunning = true
         startPacketLoop()
+        startPathMonitor()
     }
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
@@ -102,6 +123,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         timeoutTimer = nil
         keepaliveTimer?.cancel()
         keepaliveTimer = nil
+
+        // Stop reconnect timer
+        reconnectTimer?.cancel()
+        reconnectTimer = nil
+
+        // Stop path monitor
+        pathMonitor?.cancel()
+        pathMonitor = nil
 
         // Cancel UDP connection
         udpConnection?.cancel()
@@ -229,6 +258,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
             case .failed(let error):
                 self.logger.error("UDP connection failed: \(error.localizedDescription)")
+                self.scheduleReconnect(reason: "UDP connection failed")
+
+            case .waiting(let error):
+                self.logger.info("UDP connection waiting: \(error.localizedDescription)")
 
             case .cancelled:
                 self.logger.info("UDP connection cancelled")
@@ -240,6 +273,74 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         connection.start(queue: networkQueue)
         udpConnection = connection
+    }
+
+    // MARK: - Connection Resilience
+
+    /// Start monitoring network path changes (WiFi → Cellular, etc.)
+    private func startPathMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self, self.isRunning else { return }
+
+            if path.status == .satisfied {
+                guard let agent = self.agent else { return }
+                let state = agent_get_state(agent)
+                if state == AgentStateClosed || state == AgentStateError
+                   || state == AgentStateDisconnected {
+                    self.logger.info("Network path changed (satisfied), scheduling reconnect")
+                    self.scheduleReconnect(reason: "network path change")
+                }
+            } else {
+                self.logger.info("Network path unsatisfied — waiting for connectivity")
+            }
+        }
+        monitor.start(queue: networkQueue)
+        pathMonitor = monitor
+    }
+
+    /// Schedule a reconnection attempt with exponential backoff.
+    /// Safe to call multiple times — coalesces into a single timer.
+    private func scheduleReconnect(reason: String) {
+        guard isRunning, !isReconnecting else { return }
+
+        reconnectTimer?.cancel()
+        reconnectTimer = nil
+
+        let delay = reconnectBackoff
+        logger.info("Scheduling reconnect in \(delay)s (reason: \(reason))")
+
+        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
+        timer.schedule(deadline: .now() + delay)
+        timer.setEventHandler { [weak self] in
+            self?.attemptReconnect()
+        }
+        timer.resume()
+        reconnectTimer = timer
+
+        // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (cap)
+        reconnectBackoff = min(reconnectBackoff * 2, maxReconnectBackoff)
+    }
+
+    /// Tear down old connection and establish a new one.
+    /// Reuses the existing Agent — just calls agent_connect() again.
+    private func attemptReconnect() {
+        guard agent != nil, isRunning else { return }
+        isReconnecting = true
+
+        logger.info("Attempting reconnect to \(self.serverHost):\(self.serverPort)")
+
+        keepaliveTimer?.cancel()
+        keepaliveTimer = nil
+
+        udpConnection?.cancel()
+        udpConnection = nil
+
+        hasRegistered = false
+
+        setupUdpConnection()
+
+        isReconnecting = false
     }
 
     // MARK: - QUIC Connection
@@ -436,9 +537,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             pumpOutbound()
         } else if result == AgentResultNotConnected {
             logger.warning("Keepalive failed: not connected")
-            // Stop the timer if we're no longer connected
             keepaliveTimer?.cancel()
             keepaliveTimer = nil
+            scheduleReconnect(reason: "keepalive detected disconnection")
         } else {
             logger.warning("Keepalive failed: \(result.rawValue)")
         }
@@ -451,23 +552,36 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let state = agent_get_state(agent)
 
+        // Only act on state *transitions* (not repeated polls of same state)
+        guard state != previousAgentState else { return }
+        let oldState = previousAgentState
+        previousAgentState = state
+
         switch state {
         case AgentStateConnected:
             logger.info("QUIC connection established")
+            reconnectBackoff = 1.0
             checkObservedAddress()
             registerForService()
 
         case AgentStateDisconnected:
             logger.info("QUIC connection disconnected")
+            if oldState == AgentStateConnected || oldState == AgentStateConnecting {
+                scheduleReconnect(reason: "QUIC disconnected")
+            }
 
         case AgentStateDraining:
             logger.info("QUIC connection draining")
 
         case AgentStateClosed:
             logger.info("QUIC connection closed")
+            if oldState != AgentStateDisconnected {
+                scheduleReconnect(reason: "QUIC connection closed")
+            }
 
         case AgentStateError:
             logger.error("QUIC agent error")
+            scheduleReconnect(reason: "QUIC agent error")
 
         default:
             break

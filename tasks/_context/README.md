@@ -351,7 +351,8 @@ Items deferred from MVP implementation that must be addressed for production.
 |------|-----------|-------------|-------------------|
 | **Graceful Shutdown** | 002-Server | Connection draining on shutdown | Abrupt disconnects |
 | **Connection State Tracking** | 002-Server | Full state machine for connections | Edge case bugs |
-| **Error Recovery** | 001-Agent, 002-Server, 003-Connector | Automatic reconnection logic | Manual intervention needed |
+| ~~Error Recovery (Agent)~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.9) — Auto-reconnect with exponential backoff, NWPathMonitor, 3 detection paths | Agent auto-recovers |
+| **Error Recovery (Server/Connector)** | 002-Server, 003-Connector | Automatic reconnection logic | Manual intervention needed |
 | ~~TCP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.4) | Userspace TCP proxy |
 | **Registration Acknowledgment** | 002-Server, 003-Connector | Server doesn't ACK registration | Silent registration failures |
 | ~~Return-Path DATAGRAM→TUN~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.6) | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` |
@@ -369,6 +370,9 @@ Items deferred from MVP implementation that must be addressed for production.
 | ~~Multiple Service Registration~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.3) - 0x2F routing |
 | **Per-Service Backend Routing** | 003-Connector | Route different services to different backends |
 | **TCP Window Flow Control** | 003-Connector | Currently simple ACK-per-segment |
+| **QUIC Connection Migration** | 001-Agent | quiche doesn't support — full reconnect used instead |
+| **QUIC 0-RTT Reconnection** | 001-Agent | Requires session ticket storage in quiche |
+| **Multiplexed QUIC Streams** | 002-Server | DATAGRAMs sufficient for current relay needs |
 
 ### Tracking
 

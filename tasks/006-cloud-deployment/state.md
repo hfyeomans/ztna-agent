@@ -396,22 +396,115 @@ The Connector acts as the virtual IP endpoint for ICMP. When the Agent sends `pi
 3. **`docs/architecture.md`** - Added 0x2F Service-Routed Datagram Protocol section, Split-Tunnel Routing section, updated Agent/Connector responsibilities, config-driven service definitions
 4. **`tasks/_context/testing-guide.md`** - Added AWS Cloud Comprehensive Demo (5-terminal setup), updated all unit test counts (86→114, grand total 147→175), added config file reference, documented return-path DATAGRAM→TUN gap
 
-### Critical Finding: Return-Path Gap
+### Phase 4.6: Return-Path DATAGRAM → TUN ✅ COMPLETE
 
-**Discovery:** The Agent cannot complete the inbound path for response packets.
+**Date:** 2026-01-31
 
-**Outgoing (working):** macOS App → TUN → PacketTunnelProvider.readPackets() → agent_send_datagram() → QUIC → Intermediate → Connector → backend
+**Implementation:** Added `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` Swift method.
 
-**Incoming (missing):** Connector → Intermediate → Agent QUIC connection → ??? → packetFlow.writePackets() → TUN → macOS kernel
+**Changes:**
+- `core/packet_processor/src/lib.rs`: Added `VecDeque<Vec<u8>>` queue to Agent, `recv_datagram()` method, `agent_recv_datagram()` FFI function
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h`: Declared `agent_recv_datagram()`
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift`: Added `drainIncomingDatagrams()` method, called after `agent_recv()` to inject response packets into TUN via `packetFlow.writePackets()`
 
-**What's needed:**
-1. `agent_recv_datagram()` FFI function in Rust core to extract received DATAGRAMs from QUIC
-2. Swift code in PacketTunnelProvider to poll for incoming DATAGRAMs and call `packetFlow.writePackets()` to inject into TUN
-3. Concurrent receive loop that doesn't block the existing outgoing send loop
+**Verified:** `ping -c 3 10.100.0.1` returns replies through tunnel (~85ms RTT to AWS).
 
-**Impact:** Blocks `ping 10.100.0.1`, `curl 10.100.0.2:8080`, and any application-level response delivery. The Connector and Intermediate sides are complete.
+### Phase 4.7: Registry Connector Replacement Fix ✅ COMPLETE
 
-**Detailed documentation:** See `tasks/_context/testing-guide.md` → "Return-Path Gap" section.
+**Date:** 2026-01-31
+
+Fixed `intermediate-server/src/registry.rs` `unregister()` — was clobbering new Connector registrations when old connection closed. Added guard to check connection ID matches before removing.
+
+### Phase 4.9: Connection Resilience ✅ IMPLEMENTED
+
+**Date:** 2026-01-31
+
+**Problem:** macOS Agent tunnel had zero reconnection logic. Server restarts, network changes (WiFi→Cellular), or transient failures required manual VPN restart.
+
+**Solution:** Added auto-recovery with three detection paths, exponential backoff, and NWPathMonitor.
+
+**Key finding:** Rust Agent IS reusable — `agent_connect()` at `lib.rs:174` replaces the old connection without needing destroy/recreate. No Rust changes needed.
+
+**Architecture:**
+```
+Detection paths → scheduleReconnect() → attemptReconnect()
+
+1. NWPathMonitor (WiFi→Cell) → scheduleReconnect("network path change")
+2. updateAgentState() (Closed/Error/Disconnected) → scheduleReconnect("QUIC ...")
+3. NWConnection .failed → scheduleReconnect("UDP connection failed")
+4. sendKeepalive() NotConnected → scheduleReconnect("keepalive detected disconnection")
+
+attemptReconnect():
+  Cancel old NWConnection → setupUdpConnection() → agent_connect() on same Agent
+  → On Connected: reset backoff, re-register services, restart keepalive
+```
+
+**Exponential backoff:** 1s → 2s → 4s → 8s → 16s → 30s (cap). Reset to 1s on success.
+
+**State transition tracking:** `previousAgentState` prevents duplicate reconnect scheduling from repeated `updateAgentState()` polls.
+
+**Changes:** `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` only (Swift-only, no Rust changes)
+
+**Verified Test Results (2026-01-31):**
+
+All three resilience scenarios tested against live AWS deployment (macOS Agent → 3.128.36.92:4433 Intermediate Server).
+
+| Test | Detection Path | Failure→Recovery Delta | Notes |
+|------|---------------|----------------------|-------|
+| Server restart | `updateAgentState()` → `AgentStateClosed` | **~1.04s** (1s backoff + 40ms handshake) | `systemctl restart ztna-intermediate` on AWS; ping dropped 1 packet then resumed |
+| LAN→WiFi toggle | `NWPathMonitor` (unsatisfied) + `NWConnection.failed` | **~1.3s** (1s backoff + 35ms handshake) | Disconnected Ethernet, WiFi took over; QAD observed address changed (new source port) |
+| Backoff escalation | `updateAgentState()` → repeated `AgentStateClosed` | **~105s total** (4 attempts over 30s QUIC timeouts) | `systemctl stop` for ~2min; backoff 1s→2s→4s→8s confirmed in logs; 30s quiche handshake timeout between each attempt; recovered on 4th attempt when server restarted; backoff reset to 1s on success |
+
+**Log evidence — server restart recovery:**
+```
+18:35:35.350 QUIC connection closed
+18:35:35.350 Scheduling reconnect in 1.000000s (reason: QUIC connection closed)
+18:35:36.355 Attempting reconnect to <host>:4433
+18:35:36.357 UDP connection ready
+18:35:36.394 QUIC connection established ← 1.04s total delta
+18:35:36.394 Registered for service, Keepalive timer started
+```
+
+**Log evidence — LAN→WiFi recovery:**
+```
+18:40:30.300 Network path unsatisfied — waiting for connectivity
+18:40:30.548 UDP connection failed → Scheduling reconnect in 1.000000s
+18:40:31.553 Attempting reconnect
+18:40:31.556 UDP connection ready (now via WiFi)
+18:40:31.591 QUIC connection established ← 1.3s total delta
+18:40:31.591 QAD observed address: <new-ip>:55303 (changed from :61219)
+```
+
+**Log evidence — backoff escalation (server down ~2 min):**
+```
+18:43:15 Scheduling reconnect in 1.000000s  → 18:43:16 QUIC initiated (timeout 30s)
+18:43:46 Scheduling reconnect in 2.000000s  → 18:43:48 QUIC initiated (timeout 30s)
+18:44:18 Scheduling reconnect in 4.000000s  → 18:44:22 QUIC initiated (timeout 30s)
+18:44:52 Scheduling reconnect in 8.000000s  → 18:45:00 QUIC connection established ✅
+```
+
+**Deferred (not needed for MVP):**
+- True QUIC connection migration (quiche doesn't support it — full reconnect instead)
+- 0-RTT reconnection (requires session ticket storage)
+- Multiplexed QUIC streams (DATAGRAMs sufficient for current needs)
+
+### Critical Finding: P2P Swift Integration Gap
+
+**Discovery (2026-01-31):** P2P protocol is fully implemented in Rust (Task 005, 81 tests) but not wired into Swift:
+
+**Rust FFI functions that exist but are NOT in bridging header:**
+- `agent_connect_p2p()`, `agent_is_p2p_connected()`, `agent_poll_p2p()`
+- `agent_send_datagram_p2p()`
+- `agent_start_hole_punch()`, `agent_poll_hole_punch()`
+- `agent_poll_binding_request()`, `agent_process_binding_response()`
+- `agent_get_active_path()`, `agent_is_in_fallback()`, `agent_get_path_stats()`
+
+**What's needed for P2P NAT testing:**
+1. Add 11 P2P FFI declarations to `PacketProcessor-Bridging-Header.h`
+2. Open separate UDP socket for direct P2P traffic in PacketTunnelProvider
+3. Implement binding request send/receive pump loop
+4. Call `agent_start_hole_punch()` after relay established
+5. Monitor path state (direct vs relay) and log transitions
 
 ### What's Next
 1. ~~Test macOS ZtnaAgent app connecting to Pi k8s intermediate-server~~ DONE
@@ -426,8 +519,12 @@ The Connector acts as the virtual IP endpoint for ICMP. When the Agent sends `pi
 10. ~~Add TCP Support to App Connector (Task #4)~~ DONE
 11. ~~Add ICMP Support (Task #5)~~ DONE
 12. ~~Documentation updates~~ DONE (Phase 4.6)
-13. **Implement Agent return-path** (agent_recv_datagram FFI + packetFlow.writePackets)
-14. Test P2P hole punching with home NAT → cloud setup
+13. ~~Implement Agent return-path~~ DONE (Phase 4.6 — agent_recv_datagram FFI + drainIncomingDatagrams)
+14. ~~Registry Connector replacement fix~~ DONE (Phase 4.7)
+15. ~~Clean up debug logging & deploy clean builds~~ DONE
+16. ~~Connection Resilience~~ DONE (Phase 4.9 — NWPathMonitor + exponential backoff + 3 detection paths)
+17. **P2P Swift Integration** — Add 11 FFI declarations to bridging header, wire into PacketTunnelProvider
+18. **P2P NAT Testing** — Phase 6: test hole punching with macOS (home NAT) → AWS (public IP)
 
 ---
 
