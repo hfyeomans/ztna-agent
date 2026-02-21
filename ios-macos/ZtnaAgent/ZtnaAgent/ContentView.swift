@@ -1,6 +1,9 @@
 import SwiftUI
 import NetworkExtension
 import Observation
+import os
+
+private let appLogger = Logger(subsystem: "com.hankyeomans.ztna-agent", category: "App")
 
 @main
 struct ZtnaAgentApp: App {
@@ -44,16 +47,16 @@ struct ZtnaAgentApp: App {
                             }
 
                             if vpnManager.status == .connected {
-                                print("[TEST] Connected. Will auto-stop in \(Int(duration)) seconds...")
+                                appLogger.info("[TEST] Connected. Will auto-stop in \(Int(duration)) seconds...")
                                 try? await Task.sleep(for: .seconds(duration))
-                                print("[TEST] Auto-stopping VPN...")
+                                appLogger.info("[TEST] Auto-stopping VPN...")
                                 vpnManager.stop()
 
                                 // Wait for disconnect
                                 try? await Task.sleep(for: .milliseconds(500))
 
                                 if shouldExitAfterStop {
-                                    print("[TEST] Exiting app...")
+                                    appLogger.info("[TEST] Exiting app...")
                                     try? await Task.sleep(for: .milliseconds(200))
                                     exit(0)
                                 }
@@ -70,8 +73,23 @@ struct ZtnaAgentApp: App {
 final class VPNManager {
     private(set) var status: VPNStatus = .unknown
     private var manager: NETunnelProviderManager?
-    nonisolated(unsafe) private var statusTask: Task<Void, Never>?
-    
+    private var statusTask: Task<Void, Never>?
+    private let logger = Logger(subsystem: "com.hankyeomans.ztna-agent", category: "VPNManager")
+
+    // MARK: - Tunnel Configuration
+
+    var serverHost: String {
+        didSet { UserDefaults.standard.set(serverHost, forKey: "ztnaServerHost") }
+    }
+
+    var serverPort: UInt16 {
+        didSet { UserDefaults.standard.set(Int(serverPort), forKey: "ztnaServerPort") }
+    }
+
+    var serviceId: String {
+        didSet { UserDefaults.standard.set(serviceId, forKey: "ztnaServiceId") }
+    }
+
     enum VPNStatus: String, Sendable {
         case unknown = "Unknown"
         case invalid = "Invalid"
@@ -83,13 +101,13 @@ final class VPNManager {
         case loadError = "Load Error"
         case startError = "Start Error"
     }
-    
+
     init() {
+        serverHost = UserDefaults.standard.string(forKey: "ztnaServerHost") ?? "3.128.36.92"
+        let savedPort = UserDefaults.standard.integer(forKey: "ztnaServerPort")
+        serverPort = savedPort > 0 ? UInt16(savedPort) : 4433
+        serviceId = UserDefaults.standard.string(forKey: "ztnaServiceId") ?? "echo-service"
         startStatusObserver()
-    }
-    
-    deinit {
-        statusTask?.cancel()
     }
     
     private func startStatusObserver() {
@@ -123,7 +141,16 @@ final class VPNManager {
 
             let config = NETunnelProviderProtocol()
             config.providerBundleIdentifier = "com.hankyeomans.ztna-agent.ZtnaAgent.Extension"
-            config.serverAddress = "192.0.2.1"
+            config.serverAddress = serverHost
+            config.providerConfiguration = [
+                "serverHost": serverHost,
+                "serverPort": Int(serverPort),
+                "serviceId": serviceId,
+                "services": [
+                    ["id": serviceId, "virtualIp": "10.100.0.1"],
+                    ["id": "web-app", "virtualIp": "10.100.0.2"]
+                ] as [[String: Any]]
+            ]
 
             mgr.protocolConfiguration = config
             mgr.isEnabled = true
@@ -141,7 +168,7 @@ final class VPNManager {
                     return
                 } catch {
                     lastError = error
-                    print("VPN start attempt \(attempt) failed: \(error)")
+                    logger.warning("VPN start attempt \(attempt) failed: \(error)")
                     if attempt < 3 {
                         // Wait and reload before retrying
                         try? await Task.sleep(for: .milliseconds(500))
@@ -154,7 +181,7 @@ final class VPNManager {
                 throw error
             }
         } catch {
-            print("VPN start error: \(error)")
+            logger.error("VPN start error: \(error)")
             status = .startError
         }
     }
@@ -168,36 +195,73 @@ final class VPNManager {
 }
 
 struct ContentView: View {
-    let vpnManager: VPNManager
-    
+    @Bindable var vpnManager: VPNManager
+    @State private var portText: String = ""
+
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             Image(systemName: vpnManager.isConnected ? "lock.shield.fill" : "lock.shield")
-                .font(.system(size: 56))
+                .font(.system(size: 48))
                 .foregroundStyle(vpnManager.isConnected ? .green : .blue)
                 .symbolEffect(.pulse, isActive: vpnManager.isTransitioning)
-            
+
             Text("ZTNA Agent")
                 .font(.title.bold())
-            
+
             Text(vpnManager.status.rawValue)
                 .font(.headline)
                 .foregroundStyle(.secondary)
-            
+
             HStack(spacing: 16) {
                 Button("Start") {
                     Task { await vpnManager.start() }
                 }
                 .disabled(vpnManager.isConnected || vpnManager.isTransitioning)
-                
+
                 Button("Stop") {
                     vpnManager.stop()
                 }
                 .disabled(!vpnManager.isConnected)
             }
             .buttonStyle(.borderedProminent)
+
+            Divider()
+
+            configSection
         }
-        .padding(40)
-        .frame(width: 400, height: 300)
+        .padding(24)
+        .frame(width: 420, height: 440)
+        .onAppear {
+            portText = String(vpnManager.serverPort)
+        }
+    }
+
+    private var configSection: some View {
+        GroupBox("Server Configuration") {
+            VStack(alignment: .leading, spacing: 8) {
+                LabeledContent("Host") {
+                    TextField("Server host", text: $vpnManager.serverHost)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 200)
+                }
+                LabeledContent("Port") {
+                    TextField("Port", text: $portText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .onChange(of: portText) {
+                            if let port = UInt16(portText), port > 0 {
+                                vpnManager.serverPort = port
+                            }
+                        }
+                }
+                LabeledContent("Service") {
+                    TextField("Service ID", text: $vpnManager.serviceId)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 200)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .disabled(vpnManager.isConnected || vpnManager.isTransitioning)
     }
 }

@@ -46,16 +46,12 @@ const QUIC_SOCKET: Token = Token(0);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args: Vec<String> = std::env::args().collect();
 
     // Parse arguments
-    let server_addr = parse_arg(&args, "--server")
-        .unwrap_or_else(|| "127.0.0.1:4433".to_string());
+    let server_addr = parse_arg(&args, "--server").unwrap_or_else(|| "127.0.0.1:4433".to_string());
     let send_data = parse_arg(&args, "--send");
     let send_hex = parse_arg(&args, "--send-hex");
     let send_udp = parse_arg(&args, "--send-udp");
@@ -98,11 +94,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let server_addr: SocketAddr = server_addr.parse()
-        .map_err(|_| "Invalid server address")?;
+    let server_addr: SocketAddr = server_addr.parse().map_err(|_| "Invalid server address")?;
 
     // Determine ALPN to use
-    let alpn_bytes: Vec<u8> = alpn_override.as_ref()
+    let alpn_bytes: Vec<u8> = alpn_override
+        .as_ref()
         .map(|s| s.as_bytes().to_vec())
         .unwrap_or_else(|| ALPN_PROTOCOL.to_vec());
     let alpn_str = String::from_utf8_lossy(&alpn_bytes);
@@ -131,7 +127,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if measure_handshake {
                 let handshake_us = handshake_elapsed.as_micros();
-                log::info!("Handshake completed in {} µs ({:.3} ms)", handshake_us, handshake_us as f64 / 1000.0);
+                log::info!(
+                    "Handshake completed in {} µs ({:.3} ms)",
+                    handshake_us,
+                    handshake_us as f64 / 1000.0
+                );
                 println!("HANDSHAKE_US:{}", handshake_us);
             }
         }
@@ -152,7 +152,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             log::info!("Max DATAGRAM writable size: {} bytes", max_size);
             // IP header (20) + UDP header (8) = 28 bytes overhead
             let max_udp_payload = max_size.saturating_sub(28);
-            log::info!("Max UDP payload (after IP/UDP headers): {} bytes", max_udp_payload);
+            log::info!(
+                "Max UDP payload (after IP/UDP headers): {} bytes",
+                max_udp_payload
+            );
             if query_max_size {
                 println!("MAX_DGRAM_SIZE:{}", max_size);
                 println!("MAX_UDP_PAYLOAD:{}", max_udp_payload);
@@ -193,7 +196,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rng = SystemRandom::new();
         let pattern_str = payload_pattern.as_deref();
 
-        let dst: SocketAddrV4 = dst_addr.as_ref()
+        let dst: SocketAddrV4 = dst_addr
+            .as_ref()
             .ok_or("RTT measurement requires --dst address")?
             .parse()
             .map_err(|_| "Invalid --dst address")?;
@@ -203,7 +207,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .parse()
             .map_err(|_| "Invalid --src address")?;
 
-        log::info!("RTT measurement: {} samples, {} byte payload", rtt_count, size);
+        log::info!(
+            "RTT measurement: {} samples, {} byte payload",
+            rtt_count,
+            size
+        );
 
         let mut rtts: Vec<u128> = Vec::with_capacity(rtt_count);
         let mut timeouts = 0;
@@ -268,7 +276,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("RTT_P95_US:{}", p95);
             println!("RTT_P99_US:{}", p99);
         } else {
-            log::error!("No successful RTT samples collected ({} timeouts)", timeouts);
+            log::error!(
+                "No successful RTT samples collected ({} timeouts)",
+                timeouts
+            );
             println!("RTT_COUNT:0");
             println!("RTT_TIMEOUTS:{}", timeouts);
         }
@@ -285,10 +296,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rng = SystemRandom::new();
         let pattern_str = payload_pattern.as_deref();
 
-        log::info!("Burst mode: sending {} packets of {} bytes (pattern: {:?})",
-                   burst_count, size, pattern_str.unwrap_or("sequential"));
+        log::info!(
+            "Burst mode: sending {} packets of {} bytes (pattern: {:?})",
+            burst_count,
+            size,
+            pattern_str.unwrap_or("sequential")
+        );
 
-        let dst: SocketAddrV4 = dst_addr.as_ref()
+        let dst: SocketAddrV4 = dst_addr
+            .as_ref()
             .ok_or("Burst mode requires --dst address")?
             .parse()
             .map_err(|_| "Invalid --dst address")?;
@@ -317,25 +333,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             0.0
         };
 
-        log::info!("Burst complete: {} packets in {:?} ({:.1} pps)", sent, elapsed, pps);
+        log::info!(
+            "Burst complete: {} packets in {:?} ({:.1} pps)",
+            sent,
+            elapsed,
+            pps
+        );
         println!("BURST_SENT:{}", sent);
         println!("BURST_PPS:{:.1}", pps);
 
         // Wait for responses
         client.wait_for_responses(Duration::from_millis(wait_ms))?;
-
     } else if let Some(size) = payload_size {
         // Generate payload of specified size (for boundary/pattern testing)
         let rng = SystemRandom::new();
         let pattern_str = payload_pattern.as_deref();
         let effective_repeat = if repeat_count > 0 { repeat_count } else { 1 };
 
-        log::info!("Generated payload: {} bytes, pattern: {:?}, repeat: {}",
-                   size, pattern_str.unwrap_or("sequential"), effective_repeat);
+        log::info!(
+            "Generated payload: {} bytes, pattern: {:?}, repeat: {}",
+            size,
+            pattern_str.unwrap_or("sequential"),
+            effective_repeat
+        );
 
         // If dst specified, wrap in IP/UDP
         if let Some(ref dst_str) = dst_addr {
-            let dst: SocketAddrV4 = dst_str.parse()
+            let dst: SocketAddrV4 = dst_str
+                .parse()
                 .map_err(|_| "Invalid --dst address (expected ip:port)")?;
             let src: SocketAddrV4 = src_addr
                 .unwrap_or_else(|| "10.0.0.100:12345".to_string())
@@ -347,8 +372,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for i in 0..effective_repeat {
                 let payload = generate_payload(size, pattern_str, &rng);
                 let packet = build_ip_udp_packet(src, dst, &payload);
-                log::info!("[{}/{}] Built IP/UDP packet: {} bytes total",
-                           i + 1, effective_repeat, packet.len());
+                log::info!(
+                    "[{}/{}] Built IP/UDP packet: {} bytes total",
+                    i + 1,
+                    effective_repeat,
+                    packet.len()
+                );
 
                 if verify_echo {
                     sent_payloads.push(payload.clone());
@@ -372,8 +401,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Send raw payload (no IP/UDP wrapping)
             for i in 0..effective_repeat {
                 let payload = generate_payload(size, pattern_str, &rng);
-                log::info!("[{}/{}] Sending raw payload: {} bytes",
-                           i + 1, effective_repeat, payload.len());
+                log::info!(
+                    "[{}/{}] Sending raw payload: {} bytes",
+                    i + 1,
+                    effective_repeat,
+                    payload.len()
+                );
                 client.send_datagram(&payload)?;
 
                 if packet_delay_ms > 0 && i < effective_repeat - 1 {
@@ -394,7 +427,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|_| "Invalid --src address (expected ip:port)")?;
 
         let packet = build_ip_udp_packet(src, dst, data.as_bytes());
-        log::info!("Built IP/UDP packet: {} bytes (payload: {} bytes)", packet.len(), data.len());
+        log::info!(
+            "Built IP/UDP packet: {} bytes (payload: {} bytes)",
+            packet.len(),
+            data.len()
+        );
         log::debug!("  Src: {}, Dst: {}", src, dst);
         client.send_datagram(&packet)?;
         client.wait_for_responses(Duration::from_millis(wait_ms))?;
@@ -467,7 +504,9 @@ fn print_usage() {
     eprintln!("  quic-test-client --service test-service --payload-size 1322 --dst 127.0.0.1:9999");
     eprintln!();
     eprintln!("  # Phase 4: Echo integrity with random payload");
-    eprintln!("  quic-test-client --service test-service --payload-size 100 --payload-pattern random \\");
+    eprintln!(
+        "  quic-test-client --service test-service --payload-size 100 --payload-pattern random \\"
+    );
     eprintln!("    --dst 127.0.0.1:9999 --repeat 5 --verify-echo");
     eprintln!();
     eprintln!("  # Phase 4: Burst stress test (50 packets)");
@@ -533,7 +572,11 @@ fn verify_echo_responses(
     _src: SocketAddrV4,
     _dst: SocketAddrV4,
 ) {
-    log::info!("Verifying {} sent vs {} received", sent_payloads.len(), responses.len());
+    log::info!(
+        "Verifying {} sent vs {} received",
+        sent_payloads.len(),
+        responses.len()
+    );
 
     let mut matches = 0;
     let mut mismatches = 0;
@@ -560,12 +603,20 @@ fn verify_echo_responses(
             log::debug!("[{}] Payload verified: {} bytes match", i + 1, sent.len());
         } else {
             mismatches += 1;
-            log::warn!("[{}] Payload mismatch or not found: {} bytes", i + 1, sent.len());
+            log::warn!(
+                "[{}] Payload mismatch or not found: {} bytes",
+                i + 1,
+                sent.len()
+            );
         }
     }
 
-    log::info!("Echo verification: {} matches, {} mismatches out of {} sent",
-               matches, mismatches, sent_payloads.len());
+    log::info!(
+        "Echo verification: {} matches, {} mismatches out of {} sent",
+        matches,
+        mismatches,
+        sent_payloads.len()
+    );
     println!("VERIFY_MATCHES:{}", matches);
     println!("VERIFY_MISMATCHES:{}", mismatches);
     println!("VERIFY_TOTAL:{}", sent_payloads.len());
@@ -726,13 +777,7 @@ impl QuicTestClient {
 
         // Create connection
         let local_addr = self.socket.local_addr()?;
-        let conn = quiche::connect(
-            None,
-            &scid,
-            local_addr,
-            self.server_addr,
-            &mut self.config,
-        )?;
+        let conn = quiche::connect(None, &scid, local_addr, self.server_addr, &mut self.config)?;
 
         log::info!("Connecting to {} ...", self.server_addr);
         self.conn = Some(conn);
@@ -748,7 +793,9 @@ impl QuicTestClient {
         let mut events = Events::with_capacity(64);
 
         while start.elapsed() < timeout {
-            let poll_timeout = self.conn.as_ref()
+            let poll_timeout = self
+                .conn
+                .as_ref()
                 .and_then(|c| c.timeout())
                 .or(Some(Duration::from_millis(100)));
 
@@ -845,7 +892,9 @@ impl QuicTestClient {
 
         while start.elapsed() < timeout {
             let remaining = timeout.saturating_sub(start.elapsed());
-            let poll_timeout = self.conn.as_ref()
+            let poll_timeout = self
+                .conn
+                .as_ref()
                 .and_then(|c| c.timeout())
                 .map(|t| t.min(remaining))
                 .or(Some(remaining.min(Duration::from_millis(100))));
@@ -890,7 +939,10 @@ impl QuicTestClient {
     }
 
     /// Wait for responses and collect them (for verification)
-    fn wait_for_responses_collect(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    fn wait_for_responses_collect(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let mut events = Events::with_capacity(64);
         let mut responses: Vec<Vec<u8>> = Vec::new();
@@ -899,7 +951,9 @@ impl QuicTestClient {
 
         while start.elapsed() < timeout {
             let remaining = timeout.saturating_sub(start.elapsed());
-            let poll_timeout = self.conn.as_ref()
+            let poll_timeout = self
+                .conn
+                .as_ref()
                 .and_then(|c| c.timeout())
                 .map(|t| t.min(remaining))
                 .or(Some(remaining.min(Duration::from_millis(100))));
@@ -940,13 +994,18 @@ impl QuicTestClient {
     /// Wait for first data response (for RTT measurement)
     /// Returns Ok(true) if data response received, Ok(false) if timeout, Err on error
     /// Ignores QAD responses (7 bytes starting with 0x01)
-    fn wait_for_first_response(&mut self, timeout: Duration) -> Result<bool, Box<dyn std::error::Error>> {
+    fn wait_for_first_response(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let mut events = Events::with_capacity(64);
 
         while start.elapsed() < timeout {
             let remaining = timeout.saturating_sub(start.elapsed());
-            let poll_timeout = self.conn.as_ref()
+            let poll_timeout = self
+                .conn
+                .as_ref()
                 .and_then(|c| c.timeout())
                 .map(|t| t.min(remaining))
                 .or(Some(remaining.min(Duration::from_millis(10))));
@@ -982,7 +1041,7 @@ impl QuicTestClient {
             }
         }
 
-        Ok(false)  // Timeout
+        Ok(false) // Timeout
     }
 
     fn run_interactive(&mut self) -> Result<(), Box<dyn std::error::Error>> {

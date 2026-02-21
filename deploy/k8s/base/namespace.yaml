@@ -1,0 +1,8 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ztna
+  labels:
+    app.kubernetes.io/name: ztna
+    app.kubernetes.io/part-of: ztna-system

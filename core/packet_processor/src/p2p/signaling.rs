@@ -225,7 +225,11 @@ impl std::fmt::Display for EncodeError {
         match self {
             EncodeError::Serialization(e) => write!(f, "serialization error: {}", e),
             EncodeError::MessageTooLarge(size) => {
-                write!(f, "message too large: {} bytes (max {})", size, MAX_MESSAGE_SIZE)
+                write!(
+                    f,
+                    "message too large: {} bytes (max {})",
+                    size, MAX_MESSAGE_SIZE
+                )
             }
         }
     }
@@ -247,10 +251,16 @@ pub enum DecodeError {
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DecodeError::Incomplete(needed) => write!(f, "incomplete message, need {} more bytes", needed),
+            DecodeError::Incomplete(needed) => {
+                write!(f, "incomplete message, need {} more bytes", needed)
+            }
             DecodeError::Deserialization(e) => write!(f, "deserialization error: {}", e),
             DecodeError::MessageTooLarge(size) => {
-                write!(f, "message too large: {} bytes (max {})", size, MAX_MESSAGE_SIZE)
+                write!(
+                    f,
+                    "message too large: {} bytes (max {})",
+                    size, MAX_MESSAGE_SIZE
+                )
             }
         }
     }
@@ -335,7 +345,11 @@ impl SignalingMessage {
     }
 
     /// Create an error response for a given session
-    pub fn error(session_id: Option<u64>, code: SignalingError, message: impl Into<String>) -> Self {
+    pub fn error(
+        session_id: Option<u64>,
+        code: SignalingError,
+        message: impl Into<String>,
+    ) -> Self {
         SignalingMessage::Error {
             session_id,
             code,
@@ -559,7 +573,13 @@ mod tests {
 
     #[test]
     fn test_signaling_error_display() {
-        assert_eq!(format!("{}", SignalingError::ServiceNotFound), "service not found");
-        assert_eq!(format!("{}", SignalingError::SessionTimeout), "session timed out");
+        assert_eq!(
+            format!("{}", SignalingError::ServiceNotFound),
+            "service not found"
+        );
+        assert_eq!(
+            format!("{}", SignalingError::SessionTimeout),
+            "session timed out"
+        );
     }
 }

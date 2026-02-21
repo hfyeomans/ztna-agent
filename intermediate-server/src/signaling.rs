@@ -123,19 +123,13 @@ pub enum SignalingError {
 }
 
 impl SignalingMessage {
-    /// Get session ID if present
-    pub fn session_id(&self) -> Option<u64> {
-        match self {
-            SignalingMessage::CandidateOffer { session_id, .. } => Some(*session_id),
-            SignalingMessage::CandidateAnswer { session_id, .. } => Some(*session_id),
-            SignalingMessage::StartPunching { session_id, .. } => Some(*session_id),
-            SignalingMessage::PunchingResult { session_id, .. } => Some(*session_id),
-            SignalingMessage::Error { session_id, .. } => *session_id,
-        }
-    }
-
     /// Create an error message
-    pub fn error(session_id: Option<u64>, code: SignalingError, message: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub fn error(
+        session_id: Option<u64>,
+        code: SignalingError,
+        message: impl Into<String>,
+    ) -> Self {
         SignalingMessage::Error {
             session_id,
             code,
@@ -191,6 +185,7 @@ pub fn decode_message(buf: &[u8]) -> Result<(SignalingMessage, usize), DecodeErr
 #[derive(Debug)]
 pub enum DecodeError {
     /// Need more bytes
+    #[allow(dead_code)]
     Incomplete(usize),
     /// Message too large
     TooLarge(usize),
@@ -211,15 +206,11 @@ pub enum SessionState {
     ReadyToPunch,
     /// Hole punching in progress
     Punching,
-    /// Session complete (success or failure)
-    Complete,
 }
 
 /// A P2P signaling session tracked by the Intermediate
 #[derive(Debug)]
 pub struct SignalingSession {
-    /// Session ID
-    pub session_id: u64,
     /// Service ID being connected to
     pub service_id: String,
     /// Agent's QUIC connection ID
@@ -234,8 +225,6 @@ pub struct SignalingSession {
     pub state: SessionState,
     /// When session was created
     pub created_at: Instant,
-    /// Stream ID used for signaling (Agent side)
-    pub agent_stream_id: u64,
     /// Stream ID used for signaling (Connector side)
     pub connector_stream_id: Option<u64>,
 }
@@ -243,14 +232,11 @@ pub struct SignalingSession {
 impl SignalingSession {
     /// Create a new session from a CandidateOffer
     pub fn new(
-        session_id: u64,
         service_id: String,
         agent_conn_id: quiche::ConnectionId<'static>,
         agent_candidates: Vec<Candidate>,
-        agent_stream_id: u64,
     ) -> Self {
         Self {
-            session_id,
             service_id,
             agent_conn_id,
             connector_conn_id: None,
@@ -258,7 +244,6 @@ impl SignalingSession {
             connector_candidates: None,
             state: SessionState::AwaitingAnswer,
             created_at: Instant::now(),
-            agent_stream_id,
             connector_stream_id: None,
         }
     }
@@ -309,15 +294,8 @@ impl SessionManager {
         service_id: String,
         agent_conn_id: quiche::ConnectionId<'static>,
         candidates: Vec<Candidate>,
-        stream_id: u64,
     ) {
-        let session = SignalingSession::new(
-            session_id,
-            service_id.clone(),
-            agent_conn_id,
-            candidates,
-            stream_id,
-        );
+        let session = SignalingSession::new(service_id.clone(), agent_conn_id, candidates);
         self.sessions.insert(session_id, session);
         self.pending_by_service.insert(service_id, session_id);
     }
@@ -333,6 +311,7 @@ impl SessionManager {
     }
 
     /// Get pending session for a service
+    #[cfg(test)]
     pub fn get_pending_for_service(&self, service_id: &str) -> Option<u64> {
         self.pending_by_service.get(service_id).copied()
     }
@@ -364,6 +343,7 @@ impl SessionManager {
     }
 
     /// Get number of active sessions
+    #[cfg(test)]
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }
@@ -440,7 +420,6 @@ mod tests {
             "my-service".to_string(),
             conn_id.into_owned(),
             vec![sample_candidate()],
-            0,
         );
 
         assert!(manager.get_session(100).is_some());
@@ -453,13 +432,7 @@ mod tests {
         let mut manager = SessionManager::new();
         let conn_id = quiche::ConnectionId::from_ref(&[1, 2, 3, 4]);
 
-        manager.create_session(
-            100,
-            "my-service".to_string(),
-            conn_id.into_owned(),
-            vec![],
-            0,
-        );
+        manager.create_session(100, "my-service".to_string(), conn_id.into_owned(), vec![]);
 
         let removed = manager.remove_session(100);
         assert!(removed.is_some());
@@ -470,13 +443,7 @@ mod tests {
     #[test]
     fn test_session_state_transitions() {
         let conn_id = quiche::ConnectionId::from_ref(&[1, 2, 3, 4]);
-        let mut session = SignalingSession::new(
-            100,
-            "test".to_string(),
-            conn_id.into_owned(),
-            vec![],
-            0,
-        );
+        let mut session = SignalingSession::new("test".to_string(), conn_id.into_owned(), vec![]);
 
         assert_eq!(session.state, SessionState::AwaitingAnswer);
 
@@ -496,7 +463,11 @@ mod tests {
         );
 
         match msg {
-            SignalingMessage::Error { session_id, code, message } => {
+            SignalingMessage::Error {
+                session_id,
+                code,
+                message,
+            } => {
                 assert_eq!(session_id, Some(42));
                 assert_eq!(code, SignalingError::ServiceNotFound);
                 assert_eq!(message, "Service 'foo' not found");

@@ -47,43 +47,45 @@ The Zero Trust Network Access (ZTNA) Agent provides secure, identity-aware acces
 │                                                                              │
 │  PHASE 1: BOOTSTRAP (via Intermediate)                                       │
 │  ─────────────────────────────────────                                       │
-│  1. Agent connects to Intermediate System                                    │
-│  2. App Connector connects to Intermediate System                            │
-│  3. Both learn their public IP:Port via QAD                                  │
-│  4. Intermediate facilitates initial routing (relay mode)                    │
-│  5. Data flows: Agent ↔ Intermediate ↔ Connector                            │
+│  1. Agent connects to Intermediate System (QUIC handshake)                  │
+│  2. Agent receives QAD observed address                                      │
+│  3. Agent registers: DATAGRAM [0x10, len, "echo-service"]                   │
+│  4. App Connector connects and registers: DATAGRAM [0x11, len, "echo-service"]
+│  5. Intermediate routes data: Agent ↔ Intermediate ↔ Connector             │
 │                                                                              │
 │  PHASE 2: HOLE PUNCH ATTEMPT (parallel to data flow)                         │
 │  ───────────────────────────────────────────────────                         │
-│  1. Intermediate shares peer addresses with both sides                       │
-│  2. Agent sends QUIC packets directly to Connector's public IP               │
-│  3. Connector sends QUIC packets directly to Agent's public IP               │
+│  1. Agent initiates hole punch: CandidateOffer message                      │
+│  2. Intermediate relays candidates to Connector                             │
+│  3. Both sides send QUIC packets directly to peer's public IP               │
 │  4. If NAT bindings align → direct path opens                                │
 │                                                                              │
-│  PHASE 3: CONNECTION MIGRATION (on successful hole punch)                    │
-│  ────────────────────────────────────────────────────────                    │
-│  1. QUIC connection migrates from relay path to direct path                  │
-│  2. Intermediate drops out of data path (signaling only)                     │
-│  3. Data flows: Agent ↔ Connector (direct, optimal latency)                  │
+│  PHASE 3: DIRECT PATH (on successful hole punch)                             │
+│  ───────────────────────────────────────────────                             │
+│  1. New QUIC connection established directly Agent ↔ Connector             │
+│  2. Data flows on direct path (lower latency)                               │
+│  3. Intermediate remains for signaling only                                  │
 │                                                                              │
 │  FALLBACK: CONTINUE RELAY (if hole punch fails)                              │
 │  ──────────────────────────────────────────────                              │
 │  • Strict NAT/firewall prevents direct connection                            │
 │  • Continue using relay path indefinitely                                    │
-│  • Periodically retry hole punch on network changes                          │
+│  • Automatic retry after 30 second cooldown                                  │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Implementation Phases
 
-| Phase | Milestone | Connection Mode |
-|-------|-----------|-----------------|
-| **Phase 2** ✅ | Agent UDP integration | N/A (no server yet) |
-| **Phase 3** | Intermediate System relay | Relay only |
-| **Phase 4** | App Connector | Relay only |
-| **Phase 5** | End-to-end testing | Relay only |
-| **Phase 6** | **Hole punching + migration** | **Direct preferred, relay fallback** |
+| Phase | Task | Status | Connection Mode |
+|-------|------|--------|-----------------|
+| **001** | Agent QUIC Client | ✅ Complete | Agent + FFI ready |
+| **002** | Intermediate Server | ✅ Complete | Relay + QAD |
+| **003** | App Connector | ✅ Complete | Relay + Registration |
+| **004** | E2E Relay Testing | ✅ Complete | 61+ E2E tests, relay verified |
+| **005** | P2P Hole Punching | ✅ Complete | 81 unit tests, protocol ready |
+| **005a** | Swift Agent Integration | ✅ Complete | macOS VPN + QUIC |
+| **006** | Cloud Deployment | 🔄 In Progress | Config, TCP/ICMP, 0x2F routing done |
 
 ### Why This Matters
 
@@ -124,10 +126,18 @@ The agent runs on user devices and intercepts network traffic destined for prote
 
 **Responsibilities:**
 - Intercept IP packets via `NEPacketTunnelProvider` (Network Extension)
+- **Split-tunnel routing:** Only route configured virtual IPs (10.100.0.0/24) through tunnel
 - Establish QUIC connection to Intermediate System
-- Encapsulate intercepted packets in QUIC DATAGRAM frames
+- **Service registration:** Register for all configured services via 0x10 DATAGRAM
+- **0x2F service-routed wrapping:** Lookup destination IP → service ID, wrap packet with 0x2F header
 - Learn public IP:Port via QAD (no STUN required)
+- **Keepalive:** 10-second PING interval prevents 30s QUIC idle timeout
 - Handle connection migration on network changes
+
+**Configuration:**
+- Server host, port, service ID configurable via SwiftUI UI + UserDefaults
+- Service definitions with virtual IPs passed to extension via `NETunnelProviderProtocol.providerConfiguration`
+- Route table built from services array: `{virtualIp → serviceId}`
 
 **Technology Stack:**
 - Swift 6.2 / SwiftUI (host app)
@@ -137,10 +147,12 @@ The agent runs on user devices and intercepts network traffic destined for prote
 **Key Files:**
 ```
 ios-macos/ZtnaAgent/
-├── ZtnaAgent/ContentView.swift      # Host app UI
-├── Extension/PacketTunnelProvider.swift  # Packet interception
+├── ZtnaAgent/ContentView.swift      # Host app UI + VPNManager (configurable)
+├── Extension/PacketTunnelProvider.swift  # Packet interception + 0x2F routing
 core/packet_processor/
 └── src/lib.rs                       # Rust FFI for packet processing
+deploy/config/
+└── agent.json                       # Reference config (services + virtualIps)
 ```
 
 ---
@@ -169,9 +181,14 @@ The App Connector runs alongside private applications and provides the "last mil
 
 **Responsibilities:**
 - Establish persistent QUIC connection to Intermediate System
-- Register as endpoint for specific services/applications
+- Register as endpoint for specific services/applications (0x11)
 - Receive encapsulated IP packets via DATAGRAM frames
-- Decapsulate and forward to local application (TCP/UDP)
+- **Multi-protocol support:** UDP forwarding, TCP proxy, ICMP Echo Reply
+- **UDP:** Extract payload → forward to backend → encapsulate return IP/UDP packet
+- **TCP:** Userspace proxy with session tracking (SYN→connect, data→stream, FIN→close)
+- **ICMP:** Generate Echo Reply at Connector (swap src/dst, no backend needed)
+- **JSON config:** `--config` flag for service definitions, backend addresses, P2P certs
+- **Keepalive:** 10-second QUIC PING prevents idle timeout
 - Handle response traffic back through the tunnel
 
 **Deployment Options:**
@@ -325,46 +342,351 @@ func handleQadMessage(_ message: QadMessage) {
 
 ---
 
-## Data Flow
+## Service Registration Protocol
 
-### Outbound Traffic (User → Application)
+The Intermediate Server uses **service-based routing** to relay traffic between Agents and Connectors. Both must register to enable data flow.
+
+### Why Registration is Required
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Outbound Packet Flow                                 │
+│                      WITHOUT REGISTRATION                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  1. User App        2. Network Extension    3. Rust Processor               │
-│  ┌─────────┐        ┌──────────────────┐    ┌─────────────────┐             │
-│  │ Browser │──TCP──►│ NEPacketTunnel   │───►│ process_packet()│             │
-│  │ curl    │        │ Provider         │    │ (FFI)           │             │
-│  └─────────┘        │                  │    └────────┬────────┘             │
-│                     │  packetFlow      │             │                       │
-│                     │  .readPackets()  │             │ Forward/Drop         │
-│                     └──────────────────┘             ▼                       │
+│  Agent sends data ──► Intermediate ──► "No destination for relay" ──► DROP  │
 │                                                                              │
-│  4. QUIC Encapsulation              5. Intermediate System                  │
-│  ┌─────────────────────┐            ┌─────────────────────┐                 │
-│  │ IP Packet           │            │                     │                 │
-│  │ ┌─────────────────┐ │   QUIC     │  Route DATAGRAM     │                 │
-│  │ │ TCP/UDP Payload │ │──DATAGRAM─►│  to App Connector   │                 │
-│  │ └─────────────────┘ │            │                     │                 │
-│  └─────────────────────┘            └──────────┬──────────┘                 │
-│                                                 │                            │
-│  6. App Connector                    7. Private Application                 │
-│  ┌─────────────────────┐            ┌─────────────────────┐                 │
-│  │ Decapsulate         │            │                     │                 │
-│  │ IP Packet           │───TCP/UDP─►│  Web Server         │                 │
-│  │                     │            │  Database           │                 │
-│  │ Forward to local    │            │  API Service        │                 │
-│  └─────────────────────┘            └─────────────────────┘                 │
+│  Problem: Intermediate doesn't know which Connector should receive           │
+│           the Agent's traffic.                                               │
+│                                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                      WITH REGISTRATION                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. Agent registers: "I want to reach 'echo-service'"                       │
+│  2. Connector registers: "I provide 'echo-service'"                         │
+│  3. Agent sends data ──► Intermediate ──► Connector ──► Echo Server         │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Registration Message Format
+
+Registration is sent as a QUIC DATAGRAM immediately after connection establishment:
+
+```
+┌────────────────┬──────────────────┬─────────────────────┐
+│ Type (1 byte)  │ Length (1 byte)  │ Service ID (N bytes)│
+└────────────────┴──────────────────┴─────────────────────┘
+```
+
+| Type Byte | Client Type | Meaning |
+|-----------|-------------|---------|
+| `0x10` | Agent | "I want to reach service X" |
+| `0x11` | Connector | "I provide service X" |
+
+**Example: Register for "echo-service" (12 bytes)**
+```
+Agent:     [0x10] [0x0c] [echo-service]
+Connector: [0x11] [0x0c] [echo-service]
+```
+
+### Registration Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    COMPLETE REGISTRATION FLOW                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  CONNECTOR STARTUP:                                                          │
+│  ─────────────────                                                          │
+│  1. Connector connects to Intermediate (QUIC handshake)                     │
+│  2. Connector receives QAD observed address (0x01 message)                  │
+│  3. Connector sends: DATAGRAM [0x11, 12, "echo-service"]                    │
+│  4. Intermediate logs: "Registered Connector for 'echo-service'"            │
+│                                                                              │
+│  AGENT STARTUP:                                                              │
+│  ─────────────                                                               │
+│  1. Agent connects to Intermediate (QUIC handshake)                         │
+│  2. Agent receives QAD observed address                                      │
+│  3. Agent sends: DATAGRAM [0x10, 12, "echo-service"]                        │
+│  4. Intermediate logs: "Registered Agent targeting 'echo-service'"          │
+│                                                                              │
+│  DATA FLOW (after registration):                                             │
+│  ────────────────────────────────                                            │
+│  5. Agent sends IP packet as DATAGRAM                                        │
+│  6. Intermediate finds: Agent → target "echo-service" → Connector           │
+│  7. Intermediate relays DATAGRAM to Connector                               │
+│  8. Connector decapsulates, forwards to local echo server                   │
+│  9. Echo server responds, Connector encapsulates response                   │
+│  10. Intermediate relays response back to Agent                             │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Intermediate Server Registry
+
+The Intermediate Server maintains two maps for routing:
+
+```rust
+struct Registry {
+    // Connector registration: service_id → connection_id
+    connectors: HashMap<String, ConnectionId>,
+
+    // Agent registration: connection_id → target_service_id
+    agent_targets: HashMap<ConnectionId, String>,
+}
+
+fn find_destination(from: ConnectionId) -> Option<ConnectionId> {
+    // If sender is an Agent, find the Connector for their target service
+    if let Some(service) = agent_targets.get(&from) {
+        return connectors.get(service);
+    }
+    // If sender is a Connector, find Agents targeting their service
+    // (reverse lookup for response traffic)
+    ...
+}
+```
+
+### FFI Implementation
+
+**Rust (`core/packet_processor/src/lib.rs`):**
+```rust
+const REG_TYPE_AGENT: u8 = 0x10;
+
+#[no_mangle]
+pub extern "C" fn agent_register(
+    agent: *mut Agent,
+    service_id: *const c_char,
+) -> AgentResult {
+    // Send registration DATAGRAM: [0x10, len, service_id_bytes]
+}
+```
+
+**Swift (`PacketTunnelProvider.swift`):**
+```swift
+private let targetServiceId = "echo-service"
+
+private func registerForService() {
+    let result = targetServiceId.withCString { servicePtr in
+        agent_register(agent, servicePtr)
+    }
+    if result == AgentResultOk {
+        logger.info("Registered for service '\(targetServiceId)'")
+    }
+}
+```
+
+### 0x2F Service-Routed Datagram Protocol
+
+When an Agent is registered for multiple services, per-packet routing is needed. The Agent wraps each outgoing IP packet with a 0x2F header that identifies the target service:
+
+```
+┌────────────┬──────────────────┬─────────────────────┬─────────────────┐
+│ 0x2F       │ ID Length (1B)   │ Service ID (N bytes)│ IP Packet       │
+│ (1 byte)   │                  │                     │ (remaining)     │
+└────────────┴──────────────────┴─────────────────────┴─────────────────┘
+```
+
+**Flow:**
+1. Agent intercepts packet to 10.100.0.1
+2. Route table lookup: 10.100.0.1 → "echo-service"
+3. Agent wraps: `[0x2F, 12, "echo-service", ip_packet_bytes...]`
+4. Intermediate reads 0x2F, finds Connector for "echo-service"
+5. Intermediate strips 0x2F wrapper, forwards raw IP packet to Connector
+6. Connector processes IP packet (UDP/TCP/ICMP)
+
+**Backward Compatibility:** Non-0x2F datagrams still use implicit single-service routing.
+
+### Registration Notes
+
+1. **Service ID must match exactly** — Agent's target must match Connector's registered service
+2. **No acknowledgment** — Registration is fire-and-forget; success assumed
+3. **Connection-scoped** — Registration lost on disconnect; re-register on reconnect
+4. **Multi-service** — Agent can register for multiple services per connection (0x2F routing)
+
+---
+
+## Data Flow
+
+### Complete End-to-End Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    COMPLETE END-TO-END DATA FLOW                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  macOS Agent                                                         │    │
+│  │                                                                      │    │
+│  │  1. User App (ping, curl, browser)                                   │    │
+│  │         │                                                            │    │
+│  │         ▼                                                            │    │
+│  │  2. NetworkExtension intercepts packet                               │    │
+│  │         │                                                            │    │
+│  │         ▼                                                            │    │
+│  │  3. Rust FFI: agent_send_datagram(ip_packet)                         │    │
+│  │         │                                                            │    │
+│  │         ▼                                                            │    │
+│  │  4. QUIC DATAGRAM → UDP socket                                       │    │
+│  │                                                                      │    │
+│  └──────────────────────────┬──────────────────────────────────────────┘    │
+│                              │                                               │
+│                              │ UDP over Internet/LAN                        │
+│                              ▼                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Intermediate Server (k8s or Cloud)                                  │    │
+│  │                                                                      │    │
+│  │  5. Receive QUIC packet on UDP 4433                                  │    │
+│  │         │                                                            │    │
+│  │         ▼                                                            │    │
+│  │  6. Registry lookup: Agent conn_id → target "echo-service"          │    │
+│  │         │                            → Connector conn_id             │    │
+│  │         ▼                                                            │    │
+│  │  7. Relay DATAGRAM to Connector's QUIC connection                   │    │
+│  │                                                                      │    │
+│  └──────────────────────────┬──────────────────────────────────────────┘    │
+│                              │                                               │
+│                              │ QUIC (internal network)                       │
+│                              ▼                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  App Connector                                                       │    │
+│  │                                                                      │    │
+│  │  8. Receive DATAGRAM with IP packet                                  │    │
+│  │         │                                                            │    │
+│  │         ▼                                                            │    │
+│  │  9. Decapsulate: extract UDP payload from IP packet                  │    │
+│  │         │                                                            │    │
+│  │         ▼                                                            │    │
+│  │  10. Forward to local service (echo-server:9999)                    │    │
+│  │                                                                      │    │
+│  └──────────────────────────┬──────────────────────────────────────────┘    │
+│                              │                                               │
+│                              │ UDP to localhost                              │
+│                              ▼                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Backend Service (Echo Server)                                       │    │
+│  │                                                                      │    │
+│  │  11. Process request, generate response                              │    │
+│  │         │                                                            │    │
+│  │         ▼                                                            │    │
+│  │  12. Send UDP response → Connector                                   │    │
+│  │                                                                      │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  RESPONSE PATH (12 → 1 in reverse):                                         │
+│  Connector encapsulates → Intermediate relays → Agent injects to tun       │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Protocol Messages
+
+| Step | Message Type | Format |
+|------|-------------|--------|
+| Connection | QUIC handshake | TLS 1.3, ALPN "ztna-v1" |
+| QAD | OBSERVED_ADDRESS | `[0x01, ip0, ip1, ip2, ip3, port_hi, port_lo]` |
+| Registration | Agent | `[0x10, len, service_id...]` (can send multiple) |
+| Registration | Connector | `[0x11, len, service_id...]` |
+| Data (routed) | 0x2F service datagram | `[0x2F, len, service_id..., ip_packet...]` |
+| Data (legacy) | Raw IP packet | QUIC DATAGRAM containing full IP packet |
+
+### Supported Protocols at Connector
+
+| IP Protocol | Proto # | Connector Behavior |
+|------------|---------|-------------------|
+| **UDP** | 17 | Extract payload → forward to backend → construct return IP/UDP |
+| **TCP** | 6 | Userspace proxy: SYN→connect, ACK+data→write, FIN→close, RST→reset |
+| **ICMP** | 1 | Echo Reply generated locally (swap src/dst IP, type 8→0) |
+| Other | * | Dropped with trace log |
+
 ### Inbound Traffic (Application → User)
 
-The reverse path follows the same tunnel, with responses encapsulated by the App Connector and delivered back to the Endpoint Agent, which injects them into the local network stack.
+The reverse path follows the same tunnel, with responses encapsulated by the App Connector and delivered back to the Endpoint Agent, which injects them into the local network stack via `packetFlow.writePackets()`.
+
+---
+
+## Split-Tunnel Routing
+
+The ZTNA Agent uses a **split-tunnel** model: only traffic destined for configured virtual service IPs flows through the QUIC tunnel. All other traffic uses the normal default gateway.
+
+### How Split-Tunnel Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       SPLIT-TUNNEL ROUTING                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  macOS Kernel Routing Table (after VPN connect):                            │
+│  ──────────────────────────────────────────────                             │
+│  10.100.0.0/24  →  utun6 (ZTNA tunnel)     ← Only these go through QUIC   │
+│  0.0.0.0/0      →  en0 (default gateway)    ← Everything else: normal      │
+│                                                                              │
+│  What gets tunneled:                    What does NOT get tunneled:          │
+│  • ping 10.100.0.1 (echo-service)      • ping 8.8.8.8 (Google DNS)         │
+│  • curl 10.100.0.2:8080 (web-app)      • curl example.com (web browsing)   │
+│  • ssh 10.100.0.3 (future service)     • DNS queries to 8.8.8.8            │
+│                                          • All other internet traffic        │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration-Driven Service Definition
+
+Services are defined in JSON configuration files. The configuration flows through the system:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                    CONFIGURATION → REGISTRATION → ROUTING                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  1. CONFIGURATION (JSON files define what gets tunneled)                      │
+│                                                                               │
+│  agent.json:                    connector.json:                               │
+│  ┌───────────────────────┐     ┌───────────────────────────┐                 │
+│  │ services:              │     │ services:                  │                 │
+│  │ - id: echo-service     │     │ - id: echo-service         │                 │
+│  │   virtualIp: 10.100.0.1│     │   backend: 127.0.0.1:9999 │                 │
+│  │ - id: web-app          │     │   protocol: udp            │                 │
+│  │   virtualIp: 10.100.0.2│     │ - id: web-app              │                 │
+│  └───────────────────────┘     │   backend: 127.0.0.1:8080  │                 │
+│                                 │   protocol: tcp             │                 │
+│                                 └───────────────────────────┘                 │
+│                                                                               │
+│  2. REGISTRATION (tell Intermediate who provides/consumes what)               │
+│                                                                               │
+│  Agent → Intermediate:   [0x10, 12, "echo-service"]                          │
+│  Agent → Intermediate:   [0x10, 7, "web-app"]                                │
+│  Connector → Intermediate: [0x11, 12, "echo-service"]                        │
+│                                                                               │
+│  Intermediate registry:                                                       │
+│    agent_targets: { agent_conn → {"echo-service", "web-app"} }               │
+│    connectors:    { "echo-service" → connector_conn }                        │
+│                                                                               │
+│  3. ROUTING (per-packet service-routed datagrams)                             │
+│                                                                               │
+│  User runs: ping 10.100.0.1                                                  │
+│    → macOS routes to utun6 (matches 10.100.0.0/24)                           │
+│    → PacketTunnelProvider captures ICMP packet                                │
+│    → Route table lookup: 10.100.0.1 → "echo-service"                        │
+│    → Wrap: [0x2F, 12, "echo-service", ip_packet...]                          │
+│    → QUIC DATAGRAM to Intermediate                                            │
+│    → Intermediate: read 0x2F → find Connector for "echo-service"             │
+│    → Strip wrapper → forward raw IP to Connector                             │
+│    → Connector: parse IP → protocol 1 (ICMP) → build Echo Reply             │
+│    → Send reply back through tunnel                                           │
+│                                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration Files
+
+| Component | Config Path | Key Fields |
+|-----------|------------|------------|
+| Agent (macOS) | UI → providerConfiguration | `serverHost`, `serverPort`, `serviceId`, `services[]` |
+| App Connector | `--config` or `/etc/ztna/connector.json` | `intermediate_server`, `services[]`, `p2p` |
+| Intermediate | `--config` or `/etc/ztna/intermediate.json` | `port`, `bind_addr`, `external_ip`, certs |
+
+Reference configs: `deploy/config/{agent,connector,intermediate}.json`
 
 ---
 
@@ -596,6 +918,80 @@ RUST_LOG=ztna_agent::p2p=debug ./app-connector ...
 
 ## Deployment Architecture
 
+### Current Development Setup (Pi k8s + macOS)
+
+The current working deployment uses a Raspberry Pi Kubernetes cluster with Cilium L2 LoadBalancer:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    CURRENT DEPLOYMENT (Home Lab)                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   macOS Workstation (10.0.150.x)                                            │
+│   ┌─────────────────────────────────────────────────────────────────┐       │
+│   │  ZtnaAgent.app                                                   │       │
+│   │  ├── ContentView.swift (UI)                                      │       │
+│   │  └── Extension/PacketTunnelProvider.swift (VPN)                  │       │
+│   │       └── Rust FFI (libpacket_processor.a)                       │       │
+│   └──────────────────────────┬──────────────────────────────────────┘       │
+│                               │                                              │
+│                               │ QUIC/UDP                                     │
+│                               ▼                                              │
+│   Pi Kubernetes Cluster (10.0.150.101-108)                                  │
+│   ┌─────────────────────────────────────────────────────────────────┐       │
+│   │  Cilium L2 LoadBalancer: 10.0.150.205:4433/UDP                  │       │
+│   │                               │                                  │       │
+│   │  ┌────────────────────────────┼────────────────────────────┐    │       │
+│   │  │ ztna namespace             │                             │    │       │
+│   │  │                            ▼                             │    │       │
+│   │  │  ┌───────────────────────────────────────────────────┐  │    │       │
+│   │  │  │  intermediate-server (Deployment)                  │  │    │       │
+│   │  │  │  - hyeomans/ztna-intermediate-server:latest       │  │    │       │
+│   │  │  │  - QUIC server on 4433                             │  │    │       │
+│   │  │  │  - QAD + DATAGRAM relay                            │  │    │       │
+│   │  │  └───────────────────────────────────────────────────┘  │    │       │
+│   │  │                            │                             │    │       │
+│   │  │                            │ ClusterIP                   │    │       │
+│   │  │                            ▼                             │    │       │
+│   │  │  ┌───────────────────────────────────────────────────┐  │    │       │
+│   │  │  │  app-connector (Deployment)                        │  │    │       │
+│   │  │  │  - hyeomans/ztna-app-connector:latest             │  │    │       │
+│   │  │  │  - --service echo-service                          │  │    │       │
+│   │  │  │  - --forward echo-server:9999                      │  │    │       │
+│   │  │  └───────────────────────────────────────────────────┘  │    │       │
+│   │  │                            │                             │    │       │
+│   │  │                            │ ClusterIP                   │    │       │
+│   │  │                            ▼                             │    │       │
+│   │  │  ┌───────────────────────────────────────────────────┐  │    │       │
+│   │  │  │  echo-server (Deployment)                          │  │    │       │
+│   │  │  │  - hyeomans/ztna-echo-server:latest               │  │    │       │
+│   │  │  │  - UDP echo on port 9999                           │  │    │       │
+│   │  │  └───────────────────────────────────────────────────┘  │    │       │
+│   │  │                                                          │    │       │
+│   │  └──────────────────────────────────────────────────────────┘    │       │
+│   └─────────────────────────────────────────────────────────────────┘       │
+│                                                                              │
+│  Key Configuration:                                                          │
+│  - LoadBalancer: externalTrafficPolicy: Cluster (required for Cilium L2)    │
+│  - TLS: Self-signed certs mounted via k8s Secret                            │
+│  - Images: Multi-arch (arm64) on Docker Hub                                 │
+│  - SNAT: macOS appears as k8s node IP to intermediate (externalTrafficPolicy: Cluster)  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Deployment Commands:**
+```bash
+# Apply manifests
+kubectl --context k8s1 apply -k deploy/k8s/overlays/pi-home
+
+# Check status
+kubectl --context k8s1 get pods -n ztna
+
+# View logs
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
+```
+
 ### Small Scale (Single Region)
 
 ```
@@ -650,9 +1046,10 @@ RUST_LOG=ztna_agent::p2p=debug ./app-connector ...
 | QUIC Library | `quiche` (Cloudflare) | Sans-IO design, Rust, battle-tested |
 | Packet Processing | Rust + `etherparse` | Performance, memory safety, FFI |
 | macOS Agent | Swift 6.2 + NetworkExtension | Native platform integration |
-| Intermediate Server | Rust + `tokio` | Async I/O, performance |
-| App Connector | Rust | Lightweight, containerizable |
+| Intermediate Server | Rust + `mio` | Matches quiche's sans-IO model |
+| App Connector | Rust + `mio` | Lightweight, matches server |
 | Container Runtime | Docker / Kubernetes | Standard deployment |
+| Build System | Cargo + Kustomize | Rust builds, k8s overlays |
 
 ---
 
@@ -667,6 +1064,9 @@ RUST_LOG=ztna_agent::p2p=debug ./app-connector ...
 
 ### Internal Documentation
 
-- `tasks/005-p2p-hole-punching/plan.md` - Detailed P2P implementation plan
-- `tasks/005-p2p-hole-punching/state.md` - P2P task status and progress
-- `tasks/_context/components.md` - Component status overview
+- `tasks/_context/README.md` - Project overview and session resume instructions
+- `tasks/_context/components.md` - Component status overview with Service Registration Protocol
+- `tasks/_context/testing-guide.md` - Testing commands and E2E verification
+- `tasks/006-cloud-deployment/` - Current task: cloud deployment and NAT testing
+- `deploy/k8s/k8s-deploy-skill.md` - Kubernetes deployment guide
+- `tests/e2e/README.md` - E2E test framework architecture

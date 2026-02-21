@@ -1,0 +1,283 @@
+# Docker Compose for ZTNA NAT Simulation Environment
+# Simulates P2P hole punching across NAT boundaries
+#
+# Network Topology:
+# ┌─────────────────────────────────────────────────────────────────┐
+# │                     Docker Host                                  │
+# ├─────────────────────────────────────────────────────────────────┤
+# │                                                                  │
+# │  ztna-public (172.20.0.0/24) - "Internet" (no NAT)              │
+# │  └─ intermediate-server (172.20.0.10:4433)                      │
+# │  └─ nat-agent (172.20.0.2) - Agent's public interface           │
+# │  └─ nat-connector (172.20.0.3) - Connector's public interface   │
+# │                                                                  │
+# │  ztna-agent-lan (172.21.0.0/24) - Agent's private network       │
+# │  └─ quic-client (172.21.0.10) - behind NAT                      │
+# │  └─ nat-agent (172.21.0.2) - NAT gateway                        │
+# │                                                                  │
+# │  ztna-connector-lan (172.22.0.0/24) - Connector's private net   │
+# │  └─ app-connector (172.22.0.10) - behind NAT                    │
+# │  └─ echo-server (172.22.0.20:9999) - local service              │
+# │  └─ nat-connector (172.22.0.2) - NAT gateway                    │
+# │                                                                  │
+# └─────────────────────────────────────────────────────────────────┘
+
+networks:
+  # Public "internet" network - no NAT applied here
+  ztna-public:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+  # Agent's private LAN (behind NAT)
+  # Docker manages .1 gateway; NAT container at .2 acts as user-space router
+  ztna-agent-lan:
+    driver: bridge
+    internal: false  # Allow outbound (NAT gateway handles routing)
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+
+  # Connector's private LAN (behind NAT)
+  # Docker manages .1 gateway; NAT container at .2 acts as user-space router
+  ztna-connector-lan:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 172.22.0.0/24
+
+services:
+  # ==========================================================================
+  # Public Network Services
+  # ==========================================================================
+
+  # Intermediate Server - The rendezvous point on the "internet"
+  intermediate-server:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-nat-sim/Dockerfile.intermediate
+    container_name: ztna-intermediate
+    hostname: intermediate
+    networks:
+      ztna-public:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "4433:4433/udp"
+    volumes:
+      - ../../certs:/etc/ztna/certs:ro
+    environment:
+      - RUST_LOG=info,intermediate_server=debug
+    restart: unless-stopped
+
+  # ==========================================================================
+  # NAT Gateway for Agent Network
+  # ==========================================================================
+
+  # NAT Gateway - Routes traffic from Agent LAN to public network
+  nat-agent:
+    image: alpine:3.19
+    container_name: ztna-nat-agent
+    hostname: nat-agent
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      - net.ipv4.ip_forward=1
+    networks:
+      ztna-public:
+        ipv4_address: 172.20.0.2
+      ztna-agent-lan:
+        ipv4_address: 172.21.0.2
+    command: >
+      sh -c "
+        apk add --no-cache iptables tcpdump &&
+        echo 'Setting up NAT for Agent network...' &&
+
+        # Find interfaces by IP (Docker doesn't guarantee interface order)
+        PUBLIC_IF=$$(ip -4 addr | grep '172.20.0.2' | awk '{print $$NF}') &&
+        PRIVATE_IF=$$(ip -4 addr | grep '172.21.0.2' | awk '{print $$NF}') &&
+        echo \"Public interface: $$PUBLIC_IF, Private interface: $$PRIVATE_IF\" &&
+
+        # NAT all outbound traffic from agent-lan to public
+        iptables -t nat -A POSTROUTING -s 172.21.0.0/24 -o $$PUBLIC_IF -j MASQUERADE &&
+
+        # Allow forwarding
+        iptables -A FORWARD -i $$PRIVATE_IF -o $$PUBLIC_IF -j ACCEPT &&
+        iptables -A FORWARD -i $$PUBLIC_IF -o $$PRIVATE_IF -m state --state RELATED,ESTABLISHED -j ACCEPT &&
+
+        echo 'NAT rules applied:' &&
+        iptables -t nat -L -n -v &&
+
+        # Keep container running and optionally capture traffic
+        echo 'NAT gateway ready. Monitoring...' &&
+        tail -f /dev/null
+      "
+    restart: unless-stopped
+    depends_on:
+      - intermediate-server
+
+  # ==========================================================================
+  # NAT Gateway for Connector Network
+  # ==========================================================================
+
+  # NAT Gateway - Routes traffic from Connector LAN to public network
+  nat-connector:
+    image: alpine:3.19
+    container_name: ztna-nat-connector
+    hostname: nat-connector
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      - net.ipv4.ip_forward=1
+    networks:
+      ztna-public:
+        ipv4_address: 172.20.0.3
+      ztna-connector-lan:
+        ipv4_address: 172.22.0.2
+    command: >
+      sh -c "
+        apk add --no-cache iptables tcpdump &&
+        echo 'Setting up NAT for Connector network...' &&
+
+        # Find interfaces by IP (Docker doesn't guarantee interface order)
+        PUBLIC_IF=$$(ip -4 addr | grep '172.20.0.3' | awk '{print $$NF}') &&
+        PRIVATE_IF=$$(ip -4 addr | grep '172.22.0.2' | awk '{print $$NF}') &&
+        echo \"Public interface: $$PUBLIC_IF, Private interface: $$PRIVATE_IF\" &&
+
+        # NAT all outbound traffic from connector-lan to public
+        iptables -t nat -A POSTROUTING -s 172.22.0.0/24 -o $$PUBLIC_IF -j MASQUERADE &&
+
+        # Allow forwarding
+        iptables -A FORWARD -i $$PRIVATE_IF -o $$PUBLIC_IF -j ACCEPT &&
+        iptables -A FORWARD -i $$PUBLIC_IF -o $$PRIVATE_IF -m state --state RELATED,ESTABLISHED -j ACCEPT &&
+
+        echo 'NAT rules applied:' &&
+        iptables -t nat -L -n -v &&
+
+        # Keep container running
+        echo 'NAT gateway ready. Monitoring...' &&
+        tail -f /dev/null
+      "
+    restart: unless-stopped
+    depends_on:
+      - intermediate-server
+
+  # ==========================================================================
+  # Agent Network Services
+  # ==========================================================================
+
+  # QUIC Test Client - Simulates an Agent behind NAT
+  quic-client:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-nat-sim/Dockerfile.quic-client
+    container_name: ztna-quic-client
+    hostname: quic-client
+    cap_add:
+      - NET_ADMIN
+    networks:
+      ztna-agent-lan:
+        ipv4_address: 172.21.0.10
+    environment:
+      - RUST_LOG=info,quic_test_client=debug
+    # The client routes through nat-agent to reach the public network
+    depends_on:
+      - nat-agent
+      - intermediate-server
+      - app-connector
+    # Don't start automatically - used for manual testing
+    profiles:
+      - test
+
+  # ==========================================================================
+  # Connector Network Services
+  # ==========================================================================
+
+  # App Connector - Behind NAT, connects to Intermediate Server
+  app-connector:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-nat-sim/Dockerfile.connector
+    container_name: ztna-app-connector
+    hostname: app-connector
+    cap_add:
+      - NET_ADMIN
+    networks:
+      ztna-connector-lan:
+        ipv4_address: 172.22.0.10
+    volumes:
+      - ../../certs:/etc/ztna/certs:ro
+    environment:
+      - RUST_LOG=info,app_connector=debug
+    # The connector routes through nat-connector to reach intermediate-server
+    depends_on:
+      - nat-connector
+      - intermediate-server
+      - echo-server
+    restart: unless-stopped
+
+  # Echo Server - Local service that the Connector forwards to
+  echo-server:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-nat-sim/Dockerfile.echo-server
+    container_name: ztna-echo-server
+    hostname: echo-server
+    networks:
+      ztna-connector-lan:
+        ipv4_address: 172.22.0.20
+    environment:
+      - ECHO_PORT=9999
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Debug/Utility Containers
+  # ==========================================================================
+
+  # Network debug container on Agent LAN
+  debug-agent:
+    image: nicolaka/netshoot:latest
+    container_name: ztna-debug-agent
+    hostname: debug-agent
+    networks:
+      ztna-agent-lan:
+        ipv4_address: 172.21.0.100
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    command: ["sleep", "infinity"]
+    profiles:
+      - debug
+
+  # Network debug container on Connector LAN
+  debug-connector:
+    image: nicolaka/netshoot:latest
+    container_name: ztna-debug-connector
+    hostname: debug-connector
+    networks:
+      ztna-connector-lan:
+        ipv4_address: 172.22.0.100
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    command: ["sleep", "infinity"]
+    profiles:
+      - debug
+
+  # Network debug container on Public network
+  debug-public:
+    image: nicolaka/netshoot:latest
+    container_name: ztna-debug-public
+    hostname: debug-public
+    networks:
+      ztna-public:
+        ipv4_address: 172.20.0.100
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    command: ["sleep", "infinity"]
+    profiles:
+      - debug

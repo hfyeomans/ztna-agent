@@ -1,0 +1,23 @@
+{
+  "intermediate_server": {
+    "host": "3.128.36.92",
+    "port": 4433
+  },
+  "services": [
+    {
+      "id": "echo-service",
+      "backend": "127.0.0.1:9999",
+      "protocol": "udp"
+    },
+    {
+      "id": "web-app",
+      "backend": "127.0.0.1:8080",
+      "protocol": "tcp"
+    }
+  ],
+  "p2p": {
+    "cert": "/etc/ztna/certs/connector.crt",
+    "key": "/etc/ztna/certs/connector.key",
+    "port": 4434
+  }
+}

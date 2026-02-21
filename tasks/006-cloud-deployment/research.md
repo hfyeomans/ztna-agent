@@ -419,6 +419,257 @@ key = "/etc/ztna/key.pem"
 
 ---
 
+## Critical Insight: NAT Testing Requirements
+
+> **IMPORTANT:** Cloud VMs have **direct public IPs** - they are NOT behind NAT. Testing hole punching requires at least ONE peer to be behind real NAT.
+
+### What This Means
+
+1. **Deploying to cloud alone doesn't test NAT traversal**
+   - Cloud Intermediate Server: Direct public IP (no NAT)
+   - Cloud App Connector: Direct public IP (no NAT)
+   - Both can communicate directly without hole punching
+
+2. **To test real hole punching, the Agent must be behind NAT**
+   - Home network (most common NAT - Full Cone or Restricted Cone)
+   - Mobile hotspot (Carrier-Grade NAT - more restrictive)
+   - Corporate network (Symmetric NAT - hardest)
+
+3. **Cloud-only testing validates relay, not hole punching**
+   - DATAGRAM relay: ✅ Testable (cloud-to-cloud)
+   - QAD public IP discovery: ✅ Testable
+   - P2P hole punching: ❌ Requires real NAT
+
+### Minimum Viable Test Topology for Hole Punching
+
+```
+┌─────────────────────┐                    ┌─────────────────────────────┐
+│   Home Network      │                    │        Cloud VM             │
+│   (Behind NAT)      │                    │   (Direct Public IP)        │
+│                     │                    │                             │
+│  ┌───────────────┐  │                    │  ┌───────────────────────┐  │
+│  │    Agent      │  │                    │  │  Intermediate Server  │  │
+│  │   (macOS)     │──┼───► Home Router ──►│  │      + App Connector  │  │
+│  │               │  │       NAT          │  └───────────────────────┘  │
+│  └───────────────┘  │                    │                             │
+└─────────────────────┘                    └─────────────────────────────┘
+
+What's being tested:
+- QAD discovers Agent's public IP (home NAT external address)
+- Connector sees Agent behind NAT
+- P2P candidates exchanged, hole punch attempted
+- Fallback to relay if hole punch fails
+```
+
+---
+
+## Same-Network Hole Punching Testing
+
+### Can We Test on the Same LAN?
+
+**Short Answer:** No meaningful NAT hole punching testing on the same LAN.
+
+**Why:**
+- Both peers on the same LAN see each other's private IPs directly
+- No NAT translation involved
+- [Hairpin NAT](https://bford.info/pub/net/p2pnat/) (reaching external IP from inside) requires specific router support (rare)
+- Most home routers don't support hairpin NAT well
+
+### Docker NAT Simulation
+
+**Can Docker containers with separate subnets simulate NAT scenarios?**
+
+**Yes, this works!** The [arXiv paper "Implementing NAT Hole Punching with QUIC"](https://arxiv.org/abs/2408.01791) describes:
+
+```bash
+# Example Docker NAT simulation setup
+# Create two separate networks with NAT
+
+# Network A: 192.168.0.0/24 (ClientA behind NAT-A)
+# Network B: 192.168.1.0/24 (ClientB behind NAT-B)
+# Each network has iptables MASQUERADE rule
+
+# This simulates two different LANs behind different NATs
+```
+
+**Pros:**
+- Validates signaling protocol and timing
+- Tests address exchange flow
+- Reproducible environment
+
+**Cons:**
+- Synthetic NAT behavior (iptables != real router)
+- May not reflect real-world NAT quirks
+- Port mapping behavior may differ
+
+**Recommendation:** Use Docker simulation for protocol validation, but test with real NATs for production validation.
+
+---
+
+## Cloudflare Workers Limitations
+
+### Is Cloudflare Workers Suitable for UDP Hole Punching?
+
+**Short Answer:** No, Cloudflare Workers is not suitable for UDP/QUIC hole punching testing.
+
+### Limitations
+
+1. **UDP Support is Limited**
+   - [Cloudflare Socket Workers](https://blog.cloudflare.com/introducing-socket-workers/) (UDP/TCP socket API) still in development
+   - Current Workers are HTTP/WebSocket focused
+   - No raw socket control for hole punching
+
+2. **Dedicated IPv4 Required**
+   - [UDP requires dedicated IPv4 addresses](https://fly.io/docs/networking/services/) ($2-5/month extra)
+   - Shared IPs don't support UDP
+   - Added cost and complexity
+
+3. **Anycast Complications**
+   - Cloudflare uses Anycast routing globally
+   - UDP packets may route to different edge servers
+   - Breaks stateful hole punching (need consistent endpoint)
+
+4. **Proxy Architecture**
+   - Workers sit behind Cloudflare's proxy layer
+   - Can't control outbound source port (critical for hole punching)
+   - No direct socket access
+
+### Better Alternatives
+
+| Option | UDP Support | Hole Punching | Recommendation |
+|--------|-------------|---------------|----------------|
+| **Cloudflare Workers** | Limited | ❌ Not suitable | Don't use |
+| **Fly.io** | Requires dedicated IPv4 | ⚠️ Possible with config | Not recommended |
+| **Traditional VPS** | Full | ✅ Works | **Use this** |
+
+---
+
+## AWS NAT Behavior Analysis
+
+### Why AWS Can Be Problematic for Hole Punching
+
+**Short Answer:** Not symmetric NAT - it's security groups + NAT Gateway complexity.
+
+### AWS VPC NAT Behavior
+
+[AWS VPC uses 1:1 NAT](http://www.somic.org/2009/11/02/punching-udp-holes-in-amazon-ec2/) that preserves source ports (similar to Full Cone NAT). This *should* work for hole punching.
+
+**Real Issues:**
+
+1. **Security Groups Block by Default**
+   - Must explicitly allow UDP ingress from `0.0.0.0/0` (any source)
+   - Default: deny all inbound
+   - Easy to misconfigure
+
+2. **NAT Gateway = Symmetric-like Behavior**
+   - If instances are in *private* subnets using NAT Gateway
+   - NAT Gateway may assign different ports for different destinations
+   - This breaks hole punching
+   - **Solution:** Use instances with direct public IPs (not NAT Gateway)
+
+3. **Same-VPC Private IP Issues**
+   - Instances in same VPC using private IPs doesn't work without security group rules
+   - [Reported issue](http://www.somic.org/2009/11/02/punching-udp-holes-in-amazon-ec2/): same-region private IP communication fails without explicit rules
+
+### AWS Configuration for Hole Punching
+
+```bash
+# CRITICAL: Security group must allow UDP from any source
+aws ec2 authorize-security-group-ingress \
+  --group-id sg-xxx \
+  --protocol udp \
+  --port 4433 \
+  --cidr 0.0.0.0/0  # Must be 0.0.0.0/0, not specific IP
+
+# Use instance with PUBLIC IP (not behind NAT Gateway)
+# VPC public subnet, auto-assign public IP
+```
+
+### AWS Summary
+
+| Configuration | Hole Punching Works? | Notes |
+|---------------|----------------------|-------|
+| EC2 with public IP, open security group | ✅ Yes | Recommended |
+| EC2 behind NAT Gateway | ⚠️ Maybe not | Port mapping may vary |
+| EC2 with restrictive security group | ❌ No | Must allow 0.0.0.0/0 UDP |
+| Lightsail with open firewall | ✅ Yes | Simpler than EC2 |
+
+---
+
+## Detailed Cloud Provider Comparison for Hole Punching
+
+### Provider Ranking for NAT Traversal Testing
+
+| Rank | Provider | NAT Type | UDP Support | Ease of Setup | Cost | Notes |
+|------|----------|----------|-------------|---------------|------|-------|
+| 1 | **Vultr** ⭐ | Direct public IP | Full | Easy | $2.50-5/mo | Cheapest, 32 regions |
+| 2 | **DigitalOcean** ⭐ | Direct public IP | Full | Very Easy | $4-6/mo | Best docs, simple firewall |
+| 3 | **Hetzner** | Direct public IP | Full | Easy | €4-5/mo | Cheapest in EU |
+| 4 | **Linode** | Direct public IP | Full | Easy | $5/mo | Akamai backbone |
+| 5 | **GCP** | VPC-based | Full | Complex | Free-$5/mo | Free tier, complex config |
+| 6 | **AWS Lightsail** | Direct public IP | Full | Medium | $3.50-5/mo | Simpler than EC2 |
+| 7 | **AWS EC2** | Security groups | Full | Complex | Varies | Flexible but complex |
+| 8 | **Fly.io** | Behind proxy | Limited | Medium | Varies | Needs dedicated IPv4 |
+
+### Recommendation
+
+**For Task 006 MVP:** **Vultr** or **DigitalOcean**
+
+**Why:**
+- Direct public IPs (no NAT on cloud side)
+- Simple firewall configuration
+- Cheap ($2.50-6/month)
+- Fast provisioning (< 60 seconds)
+- No complex VPC/security group configuration
+
+---
+
+## Fly.io Deep Dive
+
+### Why Fly.io is Not Recommended for This Task
+
+1. **UDP Requires Special Configuration**
+   - Must listen on `fly-global-services` address
+   - Requires dedicated IPv4 ($2/month extra)
+   - [Anycast may not work properly with UDP](https://community.fly.io/t/anycast-not-applicable-with-udp/20526)
+
+2. **Proxy Layer Complications**
+   - Fly Proxy sits between internet and your app
+   - May interfere with NAT traversal
+   - Source port control uncertain
+
+3. **When Fly.io Makes Sense**
+   - Edge deployment (low latency to users)
+   - HTTP/WebSocket workloads
+   - NOT raw UDP applications
+
+---
+
+## Alternative Testing Approaches
+
+### 1. Docker NAT Simulation (Local)
+
+**Pros:** Free, reproducible, no cloud costs
+**Cons:** Synthetic NAT behavior
+
+```bash
+# Setup two Docker networks with NAT
+# Useful for validating protocol before cloud deployment
+```
+
+### 2. Tailscale/ZeroTier NAT Tester
+
+**Pros:** Real NAT data from global users
+**Cons:** Not automated
+
+[Tailscale reports 90%+ success rate](https://tailscale.com/blog/nat-traversal-improvements-pt-1) for NAT traversal in typical conditions.
+
+### 3. punch-check Tool
+
+[GitHub: delthas/punch-check](https://github.com/delthas/punch-check) - A simple tool to check whether your router supports UDP hole-punching and additional NAT properties.
+
+---
+
 ## References
 
 - [DigitalOcean API](https://docs.digitalocean.com/reference/api/)
@@ -427,3 +678,15 @@ key = "/etc/ztna/key.pem"
 - [GCP Compute Engine](https://cloud.google.com/compute/docs)
 - [Let's Encrypt Documentation](https://letsencrypt.org/docs/)
 - [Terraform Cloud Providers](https://registry.terraform.io/browse/providers)
+
+### NAT Traversal Research
+
+- [UDP Hole Punching - Wikipedia](https://en.wikipedia.org/wiki/UDP_hole_punching)
+- [Peer-to-Peer Communication Across NATs - Bryan Ford](https://bford.info/pub/net/p2pnat/)
+- [Implementing NAT Hole Punching with QUIC - arXiv](https://arxiv.org/abs/2408.01791)
+- [Tailscale NAT Traversal Improvements](https://tailscale.com/blog/nat-traversal-improvements-pt-1)
+- [ZeroTier: The State of NAT Traversal](https://www.zerotier.com/blog/the-state-of-nat-traversal/)
+- [Decentralized Hole Punching - Protocol Labs](https://research.protocol.ai/publications/decentralized-hole-punching/seemann2022.pdf)
+- [AWS EC2 Hole Punching](http://www.somic.org/2009/11/02/punching-udp-holes-in-amazon-ec2/)
+- [Cloudflare Socket Workers](https://blog.cloudflare.com/introducing-socket-workers/)
+- [Fly.io UDP Documentation](https://fly.io/docs/networking/udp-and-tcp/)

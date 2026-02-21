@@ -1,0 +1,49 @@
+---
+# Pi Home Cluster Overlay
+# Configures ZTNA for deployment on home Pi k8s cluster with Cilium
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ztna
+
+resources:
+  - ../../base
+  # Note: cilium-l2.yaml contains cluster-scoped resources
+  # Apply separately with: kubectl apply -f cilium-l2.yaml
+
+# Replace placeholder image owner with your Docker Hub username
+images:
+  - name: ghcr.io/OWNER/ztna-intermediate-server
+    newName: docker.io/hyeomans/ztna-intermediate-server
+    newTag: latest
+  - name: ghcr.io/OWNER/ztna-app-connector
+    newName: docker.io/hyeomans/ztna-app-connector
+    newTag: latest
+  - name: ghcr.io/OWNER/ztna-echo-server
+    newName: docker.io/hyeomans/ztna-echo-server
+    newTag: latest
+
+# Patch intermediate-server Service with Cilium L2 IP
+# Update the IP address to match your Cilium L2 announcement pool
+patches:
+  - patch: |-
+      - op: replace
+        path: /metadata/annotations/io.cilium~1lb-ipam-ips
+        value: "10.0.150.205"
+    target:
+      kind: Service
+      name: intermediate-server
+  # Override app-connector entrypoint to skip gosu (k8s runs as non-root via securityContext)
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/command
+        value: ["/usr/local/bin/app-connector"]
+    target:
+      kind: Deployment
+      name: app-connector
+
+labels:
+  - pairs:
+      app.kubernetes.io/instance: pi-home
+      environment: home-lab
+    includeSelectors: false

@@ -1,0 +1,79 @@
+# Dockerfile for ZTNA App Connector
+# Multi-stage build for optimized image size
+
+# =============================================================================
+# Build Stage
+# =============================================================================
+FROM rust:1.83-slim-bookworm AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    cmake \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy app connector source (no workspace, standalone crate)
+COPY app-connector ./app-connector
+
+# Build the app connector in release mode
+WORKDIR /build/app-connector
+RUN cargo build --release
+
+# =============================================================================
+# Runtime Stage
+# =============================================================================
+FROM debian:bookworm-slim
+
+# Install runtime dependencies including gosu for privilege dropping
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    iproute2 \
+    gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN useradd -r -s /bin/false ztna
+
+# Copy binary from builder
+COPY --from=builder /build/app-connector/target/release/app-connector /usr/local/bin/
+
+# Copy entrypoint script
+COPY deploy/docker-nat-sim/entrypoint-connector.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Create certs directory
+RUN mkdir -p /etc/ztna/certs && chown ztna:ztna /etc/ztna/certs
+
+# Default ports
+# 4434 - P2P listen port for incoming Agent connections
+EXPOSE 4434/udp
+
+# Container runs as root initially to set up routes, then drops to ztna user
+# (privilege dropping happens in entrypoint.sh)
+
+# Default environment variables
+ENV RUST_LOG=info
+ENV ZTNA_SERVER=172.20.0.10:4433
+ENV ZTNA_SERVICE_ID=test-service
+ENV ZTNA_FORWARD_HOST=172.22.0.20
+ENV ZTNA_FORWARD_PORT=9999
+ENV ZTNA_P2P_PORT=4434
+ENV ZTNA_CERT=/etc/ztna/certs/connector-cert.pem
+ENV ZTNA_KEY=/etc/ztna/certs/connector-key.pem
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD test -f /proc/1/cmdline || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["--server", "172.20.0.10:4433", \
+     "--service", "test-service", \
+     "--forward", "172.22.0.20:9999", \
+     "--p2p-port", "4434", \
+     "--cert", "/etc/ztna/certs/connector-cert.pem", \
+     "--key", "/etc/ztna/certs/connector-key.pem"]

@@ -287,7 +287,11 @@ impl CandidatePair {
 ///
 /// Formula: 2^32 * MIN(G,D) + 2 * MAX(G,D) + (G > D ? 1 : 0)
 /// where G = controlling priority, D = controlled priority
-pub fn calculate_pair_priority(local_priority: u32, remote_priority: u32, is_controlling: bool) -> u64 {
+pub fn calculate_pair_priority(
+    local_priority: u32,
+    remote_priority: u32,
+    is_controlling: bool,
+) -> u64 {
     let (g, d) = if is_controlling {
         (local_priority as u64, remote_priority as u64)
     } else {
@@ -388,7 +392,8 @@ impl CheckList {
             if pair.needs_retransmit() {
                 pair.record_retransmit();
                 if let Some(txn_id) = pair.transaction_id {
-                    let request = BindingRequest::with_transaction_id(txn_id, pair.priority, pair.nominated);
+                    let request =
+                        BindingRequest::with_transaction_id(txn_id, pair.priority, pair.nominated);
                     self.last_check_time = Some(Instant::now());
                     return Some((idx, request, pair.remote.address));
                 }
@@ -454,12 +459,10 @@ impl CheckList {
         };
 
         for pair in &mut self.pairs {
-            if pair.state == CheckState::InProgress {
-                if pair.transmit_count >= MAX_RETRANSMITS {
-                    pair.mark_failed();
-                } else if pair.is_timed_out(start) {
-                    pair.mark_failed();
-                }
+            if pair.state == CheckState::InProgress
+                && (pair.transmit_count >= MAX_RETRANSMITS || pair.is_timed_out(start))
+            {
+                pair.mark_failed();
             }
         }
     }
@@ -474,9 +477,9 @@ impl CheckList {
 
     /// Check if all checks are complete
     pub fn is_complete(&self) -> bool {
-        self.pairs.iter().all(|p| {
-            matches!(p.state, CheckState::Succeeded | CheckState::Failed)
-        })
+        self.pairs
+            .iter()
+            .all(|p| matches!(p.state, CheckState::Succeeded | CheckState::Failed))
     }
 
     /// Check if any check succeeded
@@ -640,10 +643,8 @@ mod tests {
         assert!(pair.transaction_id.is_some());
 
         // Handle success response
-        let response = BindingResponse::success(
-            request.transaction_id,
-            "203.0.113.50:5000".parse().unwrap(),
-        );
+        let response =
+            BindingResponse::success(request.transaction_id, "203.0.113.50:5000".parse().unwrap());
         assert!(pair.handle_response(&response));
         assert_eq!(pair.state, CheckState::Succeeded);
     }
@@ -656,9 +657,7 @@ mod tests {
             host_candidate("192.168.1.100:5000"),
             host_candidate("10.0.0.1:5000"),
         ];
-        let remote = vec![
-            host_candidate("192.168.1.200:5000"),
-        ];
+        let remote = vec![host_candidate("192.168.1.200:5000")];
 
         list.add_pairs(&local, &remote);
 
@@ -759,7 +758,8 @@ mod tests {
 
         // Get request and mark succeeded
         let (_, request, _) = list.next_request().unwrap();
-        let response = BindingResponse::success(request.transaction_id, "1.2.3.4:5000".parse().unwrap());
+        let response =
+            BindingResponse::success(request.transaction_id, "1.2.3.4:5000".parse().unwrap());
         list.handle_response(&response);
 
         // Now complete
@@ -778,7 +778,8 @@ mod tests {
 
         // Get request and succeed
         let (idx, request, _) = list.next_request().unwrap();
-        let response = BindingResponse::success(request.transaction_id, "1.2.3.4:5000".parse().unwrap());
+        let response =
+            BindingResponse::success(request.transaction_id, "1.2.3.4:5000".parse().unwrap());
         list.handle_response(&response);
 
         // Nominate
@@ -820,11 +821,11 @@ mod tests {
         let mut list = CheckList::new(true);
 
         let local = vec![
-            host_candidate("192.168.1.100:5000"),       // IPv4
-            host_candidate("[::1]:5000"),               // IPv6
+            host_candidate("192.168.1.100:5000"), // IPv4
+            host_candidate("[::1]:5000"),         // IPv6
         ];
         let remote = vec![
-            host_candidate("192.168.1.200:5000"),       // IPv4
+            host_candidate("192.168.1.200:5000"), // IPv4
         ];
 
         list.add_pairs(&local, &remote);

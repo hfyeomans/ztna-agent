@@ -18,9 +18,13 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use super::candidate::{Candidate, gather_host_candidates, gather_reflexive_candidate, gather_relay_candidate};
-use super::connectivity::{BindingResponse, BindingMessage, CheckList, encode_binding, decode_binding};
-use super::signaling::{SignalingMessage, encode_message, decode_message};
+use super::candidate::{
+    gather_host_candidates, gather_reflexive_candidate, gather_relay_candidate, Candidate,
+};
+use super::connectivity::{
+    decode_binding, encode_binding, BindingMessage, BindingResponse, CheckList,
+};
+use super::signaling::{decode_message, encode_message, SignalingMessage};
 
 // ============================================================================
 // Constants
@@ -202,11 +206,14 @@ impl HolePunchCoordinator {
 
     /// Process received signaling message
     pub fn process_signaling(&mut self, data: &[u8]) -> Result<(), String> {
-        let (msg, _consumed) = decode_message(data)
-            .map_err(|e| format!("Decode error: {}", e))?;
+        let (msg, _consumed) = decode_message(data).map_err(|e| format!("Decode error: {}", e))?;
 
         match msg {
-            SignalingMessage::CandidateOffer { session_id, candidates, .. } => {
+            SignalingMessage::CandidateOffer {
+                session_id,
+                candidates,
+                ..
+            } => {
                 if session_id != self.session_id {
                     return Err("Session ID mismatch".to_string());
                 }
@@ -223,13 +230,20 @@ impl HolePunchCoordinator {
                     }
                 }
             }
-            SignalingMessage::CandidateAnswer { session_id, candidates } => {
+            SignalingMessage::CandidateAnswer {
+                session_id,
+                candidates,
+            } => {
                 if session_id != self.session_id {
                     return Err("Session ID mismatch".to_string());
                 }
                 self.remote_candidates = candidates;
             }
-            SignalingMessage::StartPunching { session_id, start_delay_ms, peer_candidates } => {
+            SignalingMessage::StartPunching {
+                session_id,
+                start_delay_ms,
+                peer_candidates,
+            } => {
                 if session_id != self.session_id {
                     return Err("Session ID mismatch".to_string());
                 }
@@ -237,11 +251,21 @@ impl HolePunchCoordinator {
                 if !peer_candidates.is_empty() {
                     self.remote_candidates = peer_candidates;
                 }
-                // Schedule start time
-                self.check_start_time = Some(Instant::now() + Duration::from_millis(start_delay_ms));
-                self.state = HolePunchState::WaitingToStart;
+                // Only schedule start if we haven't already begun checking.
+                // CandidateAnswer may have already transitioned us to Checking
+                // before StartPunching arrives in the same message batch.
+                if self.state != HolePunchState::Checking && self.state != HolePunchState::Connected
+                {
+                    self.check_start_time =
+                        Some(Instant::now() + Duration::from_millis(start_delay_ms));
+                    self.state = HolePunchState::WaitingToStart;
+                }
             }
-            SignalingMessage::PunchingResult { session_id, success, working_address } => {
+            SignalingMessage::PunchingResult {
+                session_id,
+                success,
+                working_address,
+            } => {
                 if session_id != self.session_id {
                     return Err("Session ID mismatch".to_string());
                 }
@@ -252,7 +276,11 @@ impl HolePunchCoordinator {
                     self.state = HolePunchState::FallbackRelay;
                 }
             }
-            SignalingMessage::Error { session_id, message, .. } => {
+            SignalingMessage::Error {
+                session_id,
+                message,
+                ..
+            } => {
                 if session_id == Some(self.session_id) {
                     return Err(format!("Signaling error: {}", message));
                 }
@@ -283,7 +311,8 @@ impl HolePunchCoordinator {
 
         // Build check list
         self.check_list = CheckList::new(self.is_controlling);
-        self.check_list.add_pairs(&self.local_candidates, &self.remote_candidates);
+        self.check_list
+            .add_pairs(&self.local_candidates, &self.remote_candidates);
         self.check_list.start();
 
         self.state = HolePunchState::Checking;
@@ -314,7 +343,11 @@ impl HolePunchCoordinator {
     }
 
     /// Process received binding message
-    pub fn process_binding(&mut self, from: SocketAddr, data: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    pub fn process_binding(
+        &mut self,
+        from: SocketAddr,
+        data: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
         let msg = decode_binding(data)?;
 
         match msg {
@@ -341,6 +374,17 @@ impl HolePunchCoordinator {
 
     /// Handle timeouts
     pub fn on_timeout(&mut self) {
+        // Transition WaitingToStart → Checking once the delay has elapsed.
+        // This handles the case where StartPunching arrives after (or with)
+        // CandidateAnswer and no further signaling messages trigger re-evaluation.
+        if self.state == HolePunchState::WaitingToStart
+            && self
+                .check_start_time
+                .is_some_and(|start| Instant::now() >= start)
+        {
+            self.start_checking();
+        }
+
         if self.state == HolePunchState::Checking {
             self.check_list.handle_timeouts();
 
@@ -361,10 +405,8 @@ impl HolePunchCoordinator {
 
         // Check overall hole punch timeout
         if let Some(start) = self.start_time {
-            if start.elapsed() >= HOLE_PUNCH_TIMEOUT {
-                if self.state != HolePunchState::Connected {
-                    self.state = HolePunchState::Failed;
-                }
+            if start.elapsed() >= HOLE_PUNCH_TIMEOUT && self.state != HolePunchState::Connected {
+                self.state = HolePunchState::Failed;
             }
         }
     }
@@ -389,14 +431,12 @@ impl HolePunchCoordinator {
                     }
                 }
             }
-            HolePunchState::Failed | HolePunchState::FallbackRelay => {
-                HolePunchResult::UseRelay {
-                    reason: "All connectivity checks failed".to_string(),
-                }
-            }
+            HolePunchState::Failed | HolePunchState::FallbackRelay => HolePunchResult::UseRelay {
+                reason: "All connectivity checks failed".to_string(),
+            },
             _ => HolePunchResult::UseRelay {
                 reason: format!("Hole punch not complete: {:?}", self.state),
-            }
+            },
         }
     }
 
@@ -465,10 +505,7 @@ pub fn select_path(
 }
 
 /// Should switch from relay to direct path?
-pub fn should_switch_to_direct(
-    direct_rtt: Duration,
-    relay_rtt: Duration,
-) -> bool {
+pub fn should_switch_to_direct(direct_rtt: Duration, relay_rtt: Duration) -> bool {
     // Switch if direct is at least 50% faster
     direct_rtt < relay_rtt / 2
 }
@@ -494,8 +531,8 @@ pub fn should_switch_to_relay(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::candidate::CandidateType;
+    use super::*;
 
     #[test]
     fn test_coordinator_creation() {
@@ -519,7 +556,10 @@ mod tests {
 
         assert_eq!(coord.state(), HolePunchState::Signaling);
         assert_eq!(coord.local_candidates().len(), 2);
-        assert!(coord.local_candidates().iter().all(|c| c.candidate_type == CandidateType::Host));
+        assert!(coord
+            .local_candidates()
+            .iter()
+            .all(|c| c.candidate_type == CandidateType::Host));
     }
 
     #[test]
@@ -531,8 +571,14 @@ mod tests {
         coord.start_gathering(&local_addrs);
 
         assert_eq!(coord.local_candidates().len(), 2); // 1 host + 1 srflx
-        assert!(coord.local_candidates().iter().any(|c| c.candidate_type == CandidateType::Host));
-        assert!(coord.local_candidates().iter().any(|c| c.candidate_type == CandidateType::ServerReflexive));
+        assert!(coord
+            .local_candidates()
+            .iter()
+            .any(|c| c.candidate_type == CandidateType::Host));
+        assert!(coord
+            .local_candidates()
+            .iter()
+            .any(|c| c.candidate_type == CandidateType::ServerReflexive));
     }
 
     #[test]
@@ -544,7 +590,10 @@ mod tests {
         coord.start_gathering(&local_addrs);
 
         assert_eq!(coord.local_candidates().len(), 2); // 1 host + 1 relay
-        assert!(coord.local_candidates().iter().any(|c| c.candidate_type == CandidateType::Relay));
+        assert!(coord
+            .local_candidates()
+            .iter()
+            .any(|c| c.candidate_type == CandidateType::Relay));
     }
 
     #[test]
@@ -558,7 +607,11 @@ mod tests {
         // Decode and verify
         let (msg, _) = decode_message(&offer.unwrap()).unwrap();
         match msg {
-            SignalingMessage::CandidateOffer { session_id, service_id, candidates } => {
+            SignalingMessage::CandidateOffer {
+                session_id,
+                service_id,
+                candidates,
+            } => {
                 assert_eq!(session_id, 12345);
                 assert_eq!(service_id, "test-service");
                 assert_eq!(candidates.len(), 1);
@@ -622,7 +675,9 @@ mod tests {
             session_id: 12345,
             candidates: vec![Candidate::host("192.168.1.200:5000".parse().unwrap())],
         };
-        coord.process_signaling(&encode_message(&remote_offer).unwrap()).unwrap();
+        coord
+            .process_signaling(&encode_message(&remote_offer).unwrap())
+            .unwrap();
         coord.start_checking();
 
         // Should get a binding request
@@ -647,7 +702,9 @@ mod tests {
             session_id: 12345,
             candidates: vec![Candidate::host("192.168.1.200:5000".parse().unwrap())],
         };
-        coord.process_signaling(&encode_message(&remote_offer).unwrap()).unwrap();
+        coord
+            .process_signaling(&encode_message(&remote_offer).unwrap())
+            .unwrap();
         coord.start_checking();
 
         // Get binding request
@@ -739,7 +796,10 @@ mod tests {
 
         match coord.result() {
             HolePunchResult::DirectPath { remote_addr, .. } => {
-                assert_eq!(remote_addr, "192.168.1.200:5000".parse::<SocketAddr>().unwrap());
+                assert_eq!(
+                    remote_addr,
+                    "192.168.1.200:5000".parse::<SocketAddr>().unwrap()
+                );
             }
             _ => panic!("Expected DirectPath"),
         }
@@ -768,7 +828,9 @@ mod tests {
             session_id: 12345,
             candidates: vec![Candidate::host("192.168.1.200:5000".parse().unwrap())],
         };
-        coord.process_signaling(&encode_message(&remote_offer).unwrap()).unwrap();
+        coord
+            .process_signaling(&encode_message(&remote_offer).unwrap())
+            .unwrap();
         coord.start_checking();
 
         // Simulate timeout by getting all requests without responding

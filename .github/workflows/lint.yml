@@ -1,0 +1,85 @@
+name: Lint
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-lint:
+    name: Rust (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - app-connector
+          - intermediate-server
+          - core/packet_processor
+          - tests/e2e/fixtures/echo-server
+          - tests/e2e/fixtures/quic-client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path ${{ matrix.crate }}/Cargo.toml --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path ${{ matrix.crate }}/Cargo.toml --all-targets -- -D warnings
+
+  swift-lint:
+    name: SwiftLint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: |
+          SWIFTLINT_VERSION="0.57.0"
+          curl -sL "https://github.com/realm/SwiftLint/releases/download/${SWIFTLINT_VERSION}/swiftlint_linux.zip" -o swiftlint.zip
+          unzip -q swiftlint.zip -d swiftlint-bin
+          chmod +x swiftlint-bin/swiftlint
+          sudo mv swiftlint-bin/swiftlint /usr/local/bin/swiftlint
+
+      - name: Lint
+        run: swiftlint lint --strict --reporter github-actions-logging
+
+  shell-lint:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint bash scripts
+        run: |
+          scripts=$(grep -rl '#!/bin/bash\|#!/usr/bin/env bash' --include='*.sh' . | grep -v target | grep -v DerivedData | sort)
+          if [ -n "$scripts" ]; then
+            echo "$scripts" | xargs shellcheck --severity=warning
+          else
+            echo "No bash scripts found"
+          fi
+
+      - name: Check zsh scripts (informational)
+        continue-on-error: true
+        run: |
+          scripts=$(grep -rl '#!/bin/zsh\|#!/usr/bin/env zsh' --include='*.sh' . | grep -v target | grep -v DerivedData | sort)
+          if [ -n "$scripts" ]; then
+            echo "Found zsh scripts (ShellCheck does not support zsh):"
+            echo "$scripts"
+          fi

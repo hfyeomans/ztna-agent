@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-20 (Task 005 Phase 0-5 Complete)
+**Last Updated:** 2026-02-21 (Task 006 Phase 8.5: P2P→Relay failover validated, multi-service HTTP verified)
 
 ---
 
@@ -20,7 +20,10 @@
 - Creates QUIC connections via quiche
 - Sends/receives QUIC DATAGRAMs
 - Parses QAD OBSERVED_ADDRESS messages
-- Tunnels intercepted IP packets
+- Registers for target service (0x10 protocol)
+- Tunnels intercepted IP packets (outgoing via `agent_send_datagram()`)
+- **Receives return packets via `agent_recv_datagram()` FFI** ← NEW (2026-01-31)
+- **Queues received DATAGRAMs in `VecDeque<Vec<u8>>`** ← NEW
 - Thread-safe state management
 
 **Waiting on:** Intermediate Server (002) for testing
@@ -58,9 +61,14 @@
 - QUIC client via quiche (mio event loop, not tokio)
 - Registers as Connector (0x11 protocol)
 - Parses QAD OBSERVED_ADDRESS messages
-- Decapsulates IPv4/UDP packets from DATAGRAMs
-- Forwards UDP payload to configurable local service
-- Constructs return IP/UDP packets with proper checksums
+- **Multi-protocol packet handling:** UDP, TCP, and ICMP
+- Decapsulates IPv4 packets from DATAGRAMs (UDP, TCP, ICMP)
+- **UDP forwarding:** Extracts UDP payload, forwards to configurable local service, constructs return IP/UDP packets
+- **TCP proxy:** Userspace TCP session tracking with non-blocking TcpStream (SYN→connect, ACK→forward, FIN→close, RST→reset)
+- **ICMP Echo Reply:** Responds directly to ping requests (no backend forwarding needed)
+- **JSON config file support:** `--config` flag or default paths (`/etc/ztna/connector.json`, `connector.json`)
+- **0x2F Service-Routed Datagram support:** Receives `[0x2F, id_len, service_id..., ip_packet...]` from Intermediate
+- QUIC keepalive (10s interval prevents 30s idle timeout)
 - Integration test (handshake + QAD + registration verified)
 
 **Critical Compatibility:**
@@ -68,17 +76,39 @@
 - MAX_DATAGRAM_SIZE: 1350
 - Registration: `[0x11][len][service_id]`
 - QAD: 7-byte IPv4 format (0x01 + IP + port)
+- 0x2F: Service-routed datagram (Intermediate strips wrapper before forwarding)
 
 **Key Design Decisions:**
 - **mio over tokio**: Matches Intermediate Server's sans-IO model
-- **UDP-only for MVP**: TCP requires TUN/TAP or TCP state tracking (deferred)
+- **Userspace TCP proxy**: Session-based tracking avoids TUN/TAP requirement
+- **Connector-local ICMP**: Echo Reply generated at Connector, not forwarded to backend
 - **No registration ACK**: Server doesn't acknowledge; treat as best-effort
+- **JSON config**: Supports CLI arg override for backwards compatibility
+
+**P2P Server Mode (Port 4434):**
+- Dual-mode: QUIC client (to Intermediate on 4433) + QUIC server (for Agents on 4434)
+- Packet demux on port 4434: QUIC packets (first byte & 0xC0 != 0) vs Control packets
+- Control packet types: Binding messages (bincode variant 0x00/0x01), Keepalive (0x10 request / 0x11 response)
+- `process_p2p_control_packet()` handles binding requests and keepalive echo
+- Keepalive protocol: raw UDP, 5 bytes: `[type_byte, sequence_u32_le]`
+
+**Multi-Service Architecture (Phase 7):**
+- Per-service routing requires separate Connector instances (each with own --forward-addr)
+- AWS deployment: `ztna-connector.service` (echo-service, port 4434, P2P enabled) + `ztna-connector-web.service` (web-app, port 4435, relay-only)
+- Agent registers for multiple services via providerConfiguration `services` array
+- Intermediate routes 0x2F datagrams to matching Connector by service ID
+
+**Shared Socket Architecture (Phase 8.5 Discovery):**
+- Connector uses SINGLE `quic_socket` on port 4434 for BOTH P2P QUIC and Intermediate relay QUIC
+- Blocking port 4434 globally (e.g., `iptables -A INPUT -p udp --dport 4434 -j DROP`) kills both P2P and relay paths
+- Interface-specific blocking (`iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP`) correctly isolates P2P while preserving loopback relay
+- Future improvement: use separate sockets for P2P and relay connections
 
 **Deferred to Post-MVP:**
-- TCP support (requires TUN/TAP)
-- ICMP support
-- Automatic reconnection
-- Config file (TOML)
+- Automatic reconnection (→ Task 008)
+- Per-service backend routing, currently single --forward address for all services (→ Task 009)
+- TCP window flow control, currently simple ACK-per-segment (→ Task 011)
+- Separate P2P and relay sockets in Connector (→ Task 011)
 
 ---
 
@@ -142,7 +172,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Task 001 Agent = Production macOS NetworkExtension (intercepts system packets)
 - QUIC Test Client = Test harness CLI (sends arbitrary DATAGRAMs from scripts)
 
-**Total Tests: 61+** (Phases 1-6 complete)
+**E2E Test Total: 61+** (Phases 1-6 complete)
 
 **Capabilities Needed (Remaining):**
 - NAT testing (Intermediate on cloud)
@@ -190,7 +220,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Exponential backoff: 100ms → 1600ms (max 5 retransmits)
 - Keepalive: 15s interval, 3 missed = failed, auto fallback to relay
 
-**Test Count:** 79 tests in packet_processor (Phase 0-5 complete)
+**Test Count:** 81 tests in packet_processor (Phase 0-5 complete, includes agent_register)
 
 ---
 
@@ -214,14 +244,14 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | SwiftUI App | ✅ Works | Start/Stop + auto-start/stop for testing |
 | VPNManager | ✅ Works | Retry logic for first-time config |
 | PacketTunnelProvider | ✅ Rewritten | Full QUIC integration via FFI |
-| Bridging Header | ✅ Basic done | P2P/resilience FFI deferred (post-MVP) |
+| Bridging Header | ✅ Complete | 23 FFI functions: 11 relay/core + 12 P2P (connections, hole punch, path resilience) |
 | AgentWrapper.swift | ⏭️ Deferred | FFI used directly (acceptable) |
 
 **Status:**
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Phase 1: Bridging Header | ✅ Complete | Basic FFI (11 functions), P2P deferred |
+| Phase 1: Bridging Header | ✅ Complete | 23 FFI functions (11 core + 12 P2P) |
 | Phase 2: Swift Wrapper | ⏭️ Deferred | Using FFI directly instead |
 | Phase 3: PacketTunnelProvider | ✅ Complete | Full QUIC + UDP + timeout handling |
 | Phase 4: Build Configuration | ✅ Complete | Rust lib + Xcode build working |
@@ -230,9 +260,55 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 7: PR & Merge | ✅ Complete | PR #6 merged 2026-01-23 |
 
 **Key Files:**
-- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set)
-- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration
-- `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (23 total: core lifecycle/connect/packet I/O/timeout + agent_register + keepalive + recv_datagram + 12 P2P: connections, hole punch, path resilience)
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration, keepalive, and return-path TUN injection
+- `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager + configuration UI
+
+**Service Registration:**
+- Calls `agent_register(agent, "echo-service")` after connection established
+- Enables relay routing through Intermediate Server
+
+**Keepalive (Added 2026-01-25):**
+- 10-second keepalive timer prevents 30s QUIC idle timeout
+- Calls `agent_send_intermediate_keepalive()` which sends QUIC PING frame
+- Timer starts after successful registration, stops on disconnect
+
+**Return-Path TUN Injection (Added 2026-01-31):**
+- `drainIncomingDatagrams()` polls `agent_recv_datagram()` after each `agent_recv()`
+- Validates IPv4 version nibble, batches packets
+- Injects via `packetFlow.writePackets()` into TUN for kernel delivery
+- Enables `ping 10.100.0.1` to receive Echo Replies
+
+**Connection Resilience (Added 2026-01-31):**
+- Auto-recovery when QUIC connection drops (server restart, network change, timeout)
+- `NWPathMonitor` detects WiFi → Cellular transitions, triggers reconnect
+- Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (cap), reset on success
+- Three detection paths: NWConnection `.failed`, `updateAgentState()` transitions, keepalive `NotConnected`
+- `attemptReconnect()` reuses existing Agent — calls `agent_connect()` again (no destroy/recreate)
+- State transition tracking prevents duplicate reconnect scheduling
+- P2P state fully reset during reconnection (timers, connections, flags)
+
+**P2P Swift Integration (Added 2026-01-31):**
+- 12 P2P FFI functions wired into PacketTunnelProvider (hole punch, binding, P2P QUIC, routing, keepalive)
+- Three NWConnection types: relay (udpConnection), binding (per-candidate), P2P (direct to Connector)
+- Hole punch auto-starts after service registration
+- Packet routing via `agent_get_active_path()`: Direct (P2P) or Relay
+- P2P keepalive timer (15s interval, 5-byte messages via `agent_poll_keepalive`)
+- Fallback detection via `agent_is_in_fallback()`
+- Path stats logging via `agent_get_path_stats()`
+
+**P2P NAT Testing Results (2026-01-31):**
+- Direct P2P QUIC path achieved: macOS (home NAT) → AWS Connector (port 4434)
+- Hole punch succeeds via server-reflexive candidate (3.128.36.92:4434)
+- 0.0.0.0:4434 candidate fails as expected (non-routable)
+- P2P keepalive stable for 3.5+ minutes (14 consecutive checks, zero missed)
+- ~1.8s warm-up window from tunnel start to P2P data flow (relay handles traffic during)
+- **Bug fix:** Rust `recv()` added keepalive demux — raw 5-byte keepalive (0x10/0x11) intercepted before `quiche::recv()` which would reject non-QUIC data
+
+**Deferred QUIC Enhancements (Post-MVP):**
+- True QUIC connection migration (quiche doesn't support — full reconnect instead)
+- 0-RTT reconnection (requires session ticket storage in quiche)
+- Multiplexed QUIC streams (DATAGRAMs sufficient for current relay needs)
 
 **Test Automation Features:**
 - `--auto-start` - Automatically start VPN on app launch
@@ -245,60 +321,163 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ---
 
-### 006: Cloud Deployment 🔲 NOT STARTED
+### 006: Cloud Deployment ✅ COMPLETE (MVP)
 
-**Location:** Cloud infrastructure + deployment scripts
+**Location:** `deploy/docker-nat-sim/`, `deploy/k8s/` + Cloud infrastructure
 
-**Dependencies:** 004 (E2E Testing - local validation first)
+**Dependencies:** 004 (E2E Testing), 005 (P2P), 005a (Swift Integration) ✅ All complete
+
+**Branch:** `feature/006-cloud-deployment`
 
 **Purpose:**
 - Deploy Intermediate Server and App Connector to cloud
 - Enable NAT testing with real public IPs
-- Validate QAD with actual network conditions
+- Validate P2P hole punching with real NATs
 - Prepare infrastructure for production
+
+**Status:**
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 0: Docker NAT Simulation | ✅ Done | Local NAT testing environment |
+| Phase 1/5: Pi k8s Deployment | ✅ Done | Home cluster with Cilium L2, full E2E relay working |
+| Phase 5a: E2E Relay Routing | ✅ Done | macOS → k8s Intermediate → Connector → Echo |
+| Phase 4: AWS EC2 Deployment | ✅ Done | EC2 t3.micro, Elastic IP 3.128.36.92, systemd services |
+| Phase 4.1: AWS E2E Validation | ✅ Done | macOS behind NAT → AWS relay → echo-service |
+| Phase 4.2: Config File Mechanism | ✅ Done | JSON configs for all components |
+| Phase 4.3: IP→Service Routing | ✅ Done | 0x2F service-routed datagrams, multi-service registration |
+| Phase 4.4: TCP Support | ✅ Done | Userspace TCP proxy with session tracking |
+| Phase 4.5: ICMP Support | ✅ Done | Connector-local Echo Reply |
+| Phase 4.6: Return-Path (DATAGRAM→TUN) | ✅ Done | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` + `writePackets()` |
+| Phase 4.7: Registry Connector Replacement Fix | ✅ Done | `unregister()` guard prevents clobbering new registrations |
+| Phase 4.9: Connection Resilience | ✅ Done | Auto-recovery, NWPathMonitor, exponential backoff |
+| Phase 3: TLS & Security | → Task 007 | Self-signed → Let's Encrypt |
+| Phase 6: P2P Swift Integration | ✅ Done | 12 P2P FFI wired into PacketTunnelProvider (hole punch, binding, P2P QUIC, routing, keepalive) |
+| **Phase 6.8: P2P NAT Testing** | ✅ **DONE** | Direct P2P path achieved: macOS (home NAT) → AWS Connector. Keepalive stable 3.5+ min. |
+| **Phase 7: HTTP App Validation** | ✅ **DONE** | HTTP through tunnel via second connector (web-app, 10.100.0.2). Multi-service routing verified. |
+| **Phase 8: Performance Metrics** | ✅ **DONE** | P2P 32.6ms vs Relay 76ms (2.3x faster). 10-min stability: 600/600, 0% loss. |
+| **Phase 8.5: P2P→Relay Failover** | ✅ **DONE** | Interface-specific iptables test: 180/180, 0% loss, seamless per-packet failover. |
+
+**Phase 0 Completed (Docker NAT Simulation):**
+
+Docker-based NAT simulation for local P2P testing:
+```
+Agent (172.21.0.10) --NAT--> 172.20.0.2 --\
+                                           +--> Intermediate (172.20.0.10)
+Connector (172.22.0.10) --NAT--> 172.20.0.3 --/
+```
+
+**Phase 1 Completed (Pi k8s Deployment):**
+
+Kubernetes deployment to home Pi cluster with Cilium L2:
+```
+macOS (10.0.150.x) --QUIC--> LoadBalancer (10.0.150.205:4433)
+                                   │
+                                   └─► Intermediate Server (k8s)
+                                           │
+                                           └─► App Connector → Echo Server
+```
+
+**k8s Components Verified Working:**
+- ✅ intermediate-server: Running, accepts QUIC connections
+- ✅ app-connector: Running, registers for 'echo-service', receives QAD (30s idle timeout = CrashLoopBackOff is expected)
+- ✅ echo-server: Running, test service
+- ✅ LoadBalancer: 10.0.150.205:4433/UDP via Cilium L2
+- ✅ macOS → k8s connection: QUIC connection successful
+
+**Key Files Created (Phase 0):**
+- `deploy/docker-nat-sim/docker-compose.yml` - 3-network topology
+- `deploy/docker-nat-sim/Dockerfile.*` - Component images (4)
+- `deploy/docker-nat-sim/watch-logs.sh` - Multi-terminal log viewer
+- `tests/e2e/scenarios/docker-nat-demo.sh` - One-command demo
+
+**Key Files Created (Phase 1):**
+- `deploy/k8s/base/` - Kustomize base manifests
+- `deploy/k8s/overlays/pi-home/` - Pi cluster overlay with Cilium L2
+- `deploy/k8s/build-push.sh` - Multi-arch image builder
+- `deploy/k8s/k8s-deploy-skill.md` - Comprehensive deployment guide
+
+**Test Results (Phase 0):**
+- ✅ Agent observed through NAT as 172.20.0.2
+- ✅ Connector observed through NAT as 172.20.0.3
+- ✅ UDP relay through Intermediate working
+- ✅ Echo response received through tunnel
+
+**Test Results (Phase 1):**
+- ✅ k8s pods running on Pi cluster (arm64)
+- ✅ Cilium L2 LoadBalancer IP assigned and accessible
+- ✅ macOS app-connector connects to k8s intermediate-server
+- ✅ QUIC registration + QAD working across network
+- ✅ externalTrafficPolicy: Cluster required for L2 (lesson learned)
+
+**Phase 4 Completed (AWS EC2 Deployment):**
+
+AWS EC2 deployment for cloud testing:
+```
+macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
+                                        │
+                                        └─► EC2 Instance (t3.micro, us-east-2)
+                                                │
+                                                ├─► Intermediate Server (systemd)
+                                                ├─► App Connector → :8080 (localhost)
+                                                └─► Echo Server (Python)
+```
+
+**AWS Components:**
+- ✅ EC2: i-021d9b1765cb49ca7 (ztna-intermediate-server)
+- ✅ Elastic IP: 3.128.36.92
+- ✅ Security Group: sg-0d15ab7f7b196d540 (UDP 4433, 4434, TCP 22)
+- ✅ SSH via Tailscale: 10.0.2.126 (VPC private IP)
+
+**Key Files Created (Phase 4):**
+- `deploy/aws/aws-deploy-skill.md` - Comprehensive AWS deployment guide
 
 **Deployment Targets:**
 | Component | Target |
 |-----------|--------|
 | Intermediate Server | Cloud VM with public IP |
-| App Connector | Cloud VM (same or separate) |
+| App Connector | Cloud VM (same VM for MVP) |
 | Test Service | Cloud VM (localhost) |
 
 **Capabilities needed:**
-- Cloud VM provisioning (DigitalOcean/AWS/Vultr/GCP)
+- Cloud VM provisioning (**Vultr or DigitalOcean recommended**)
 - TLS certificate management (self-signed or Let's Encrypt)
 - Systemd service configuration
-- Firewall rules (UDP 4433)
-- Remote Agent testing (NAT traversal)
+- Firewall rules (UDP 4433, 4434)
+- Remote Agent testing (from home NAT)
 
-**Key Decisions (TBD):**
+**Key Decisions:**
 | Decision | Options | Status |
 |----------|---------|--------|
-| Cloud Provider | DO, AWS, Vultr, GCP | TBD |
-| Deployment | Single VM vs Separate VMs | TBD |
-| Certificates | Self-signed vs Let's Encrypt | TBD |
-| Automation | Manual, Terraform, Ansible | TBD |
+| AWS VPC | New vs Existing | ✅ Using existing masque_proxy-vpc |
+| P2P Port | Ephemeral vs Fixed | ✅ Fixed port 4434 |
+| Cloud Provider | AWS, Vultr, DigitalOcean | ✅ AWS (EC2 deployed) |
+| Deployment | Single VM vs Separate VMs | ✅ Single EC2 (MVP) |
+| Certificates | Self-signed vs Let's Encrypt | ✅ Self-signed (from repo) |
+| Home k8s | Pi cluster | ✅ 10.0.150.101-108 available |
+| SSH Access | Public IP vs Tailscale | ✅ Tailscale (more reliable) |
+
+**⚠️ Critical Testing Insight:**
+> Cloud VMs have **direct public IPs** - they are NOT behind NAT.
+> To test P2P hole punching, the **Agent must be behind real NAT** (home network).
 
 **P2P Testing Plan (from Task 005):**
 
-The following P2P tests require cloud deployment with real NAT:
-
-| Test | Description | Validation |
-|------|-------------|------------|
-| NAT hole punching | Agent behind home NAT, Connector on cloud | Direct path established |
-| Reflexive address accuracy | QAD returns real public IP | Compare with ifconfig.me |
-| NAT type detection | Test against Full Cone, Symmetric NAT | Appropriate fallback behavior |
-| Cross-network latency | Compare direct vs relay RTT | Direct < Relay |
-| Mobile handoff | WiFi → Cellular → WiFi | Connection survives |
-| Keepalive over WAN | 15s interval over internet | Path stays active |
-| Fallback under load | Stress test during path failure | Graceful relay switch |
+| Test | Description | Requires Home NAT? |
+|------|-------------|-------------------|
+| DATAGRAM relay | Agent → Intermediate → Connector | No |
+| QAD public IP | Correct external IP returned | No |
+| **NAT hole punching** | Agent behind NAT, direct path to cloud | **Yes** |
+| **Reflexive address accuracy** | QAD from home NAT | **Yes** |
+| **NAT type behavior** | Full Cone, Restricted, Symmetric | **Yes** |
+| Cross-network latency | Compare direct vs relay RTT | **Yes** |
+| Keepalive over WAN | 15s interval over internet | **Yes** |
 
 **Test Environment Setup:**
-1. Intermediate Server on cloud VM with public IP
-2. App Connector on same or separate cloud VM
-3. Echo server as test backend
-4. iOS/macOS Agent on home/office NAT
-5. Network impairment simulation (tc/netem)
+1. Intermediate Server + App Connector on cloud VM (single VM)
+2. Echo server as test backend (localhost)
+3. macOS Agent on home/office NAT ← **Required for P2P testing**
+4. Optional: Mobile hotspot for CGNAT testing
 
 ---
 
@@ -341,7 +520,7 @@ The following P2P tests require cloud deployment with real NAT:
                     ┌─────────────────────────┐
                     │  005a: Swift Agent      │
                     │  Integration            │
-                    │  🔲 NOT STARTED         │
+                    │  ✅ COMPLETE            │
                     │  (macOS Agent + QUIC)   │
                     └───────────┬─────────────┘
                                 │
@@ -349,9 +528,17 @@ The following P2P tests require cloud deployment with real NAT:
                                 ▼
                     ┌─────────────────────────┐
                     │  006: Cloud Deployment  │
-                    │  🔲 NOT STARTED         │
-                    │  (NAT testing, prod)    │
-                    └─────────────────────────┘
+                    │  ✅ COMPLETE (MVP)      │
+                    └───────────┬─────────────┘
+                                │
+                     ┌──────────┼──────────────────┐
+                     ▼          ▼                   ▼
+               007 (Security) 009 (Multi-Svc)  011 (Protocol)
+               P1             P2               P3
+                     │          │
+                     ▼          ▼
+               008 (Prod Ops) 010 (Dashboard)  012 (Multi-Env)
+               P2             P3               P3
 ```
 
 ---
@@ -362,16 +549,32 @@ The following P2P tests require cloud deployment with real NAT:
 1. ✅ 001: Agent Client (done)
 2. ✅ 002: Intermediate Server (done)
 3. ✅ 003: App Connector (done)
-4. ✅ 004: E2E Testing (Phases 1-6 complete, ready for PR)
+4. ✅ 004: E2E Testing (done - 61+ E2E tests)
 
 **Path to P2P (primary goal):**
-- All of above + 005: P2P Hole Punching
+- ✅ All of above + 005: P2P Hole Punching (done - 81 unit tests)
 
 **Path to real macOS Agent E2E testing:**
-- All of above + 005a: Swift Agent Integration (wire up macOS Agent app with QUIC FFI)
+- ✅ All of above + 005a: Swift Agent Integration (done - macOS Agent + QUIC working)
 
 **Path to production deployment:**
-- All of above + 006: Cloud Deployment (NAT testing, production readiness)
+- ✅ All of above + **006: Cloud Deployment** (COMPLETE — MVP)
+  - ✅ Config files, multi-service routing, TCP/ICMP support
+  - ✅ Return-path DATAGRAM→TUN injection (Agent side) - ICMP ping works E2E
+  - ✅ Registry Connector replacement bug fix
+  - ✅ P2P Swift Integration (12 FFI functions wired into PacketTunnelProvider)
+  - ✅ P2P NAT Testing — direct path achieved, keepalive stable, Rust `recv()` keepalive demux fix
+  - ✅ HTTP app validation — multi-service (echo + web-app) through tunnel
+  - ✅ Performance metrics — P2P 32.6ms vs Relay 76ms, 10-min 0% loss
+  - ✅ P2P→Relay failover — seamless per-packet fallback, 180/180 0% loss
+
+**Path to production (post-MVP):**
+- 🔲 Task 007: Security Hardening (P1) — TLS certs, client auth, rate limiting
+- 🔲 Task 008: Production Operations (P2) — Monitoring, CI/CD, automation
+- 🔲 Task 009: Multi-Service Architecture (P2) — Per-service backends, discovery
+- 🔲 Task 010: Admin Dashboard (P3) — Web UI for management
+- 🔲 Task 011: Protocol Improvements (P3) — IPv6, TCP flow, QUIC migration
+- 🔲 Task 012: Multi-Environment Testing (P3) — DO, multi-region, NAT diversity
 
 ---
 
@@ -381,8 +584,171 @@ The following P2P tests require cloud deployment with real NAT:
 |------|----|----------|------|
 | Agent | Intermediate | QUIC/UDP | 4433 |
 | Connector | Intermediate | QUIC/UDP | 4433 |
-| Agent | Connector (P2P) | QUIC/UDP | dynamic |
+| Agent | Connector (P2P) | QUIC/UDP | 4434 (Connector P2P listen port) |
 | Connector | Local App | TCP/UDP | configurable |
+
+---
+
+## Service Registration & Routing Protocol
+
+The system uses a **configuration-driven, split-tunnel architecture** where only traffic to configured virtual IPs flows through the QUIC tunnel. All other traffic flows normally through the default gateway.
+
+### Split-Tunnel Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       SPLIT-TUNNEL ROUTING MODEL                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  macOS Agent (NetworkExtension TUN)                                         │
+│  ───────────────────────────────────                                        │
+│  Routes: 10.100.0.0/24 → utun (ZTNA tunnel)                               │
+│          0.0.0.0/0     → default gateway (untouched)                       │
+│                                                                              │
+│  Traffic to 10.100.0.1 (echo-service) → Captured → QUIC Tunnel             │
+│  Traffic to 10.100.0.2 (web-app)      → Captured → QUIC Tunnel             │
+│  Traffic to 8.8.8.8 (DNS)             → Normal routing (NOT tunneled)      │
+│  Traffic to 93.184.216.34 (web)       → Normal routing (NOT tunneled)      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration → Registration → Routing Flow
+
+**Step 1: Configuration defines what gets tunneled**
+
+Each component loads a JSON config that defines the services it handles:
+
+```
+Agent Config (agent.json):              Connector Config (connector.json):
+┌──────────────────────────────┐       ┌──────────────────────────────┐
+│ services:                     │       │ services:                     │
+│   - id: "echo-service"       │       │   - id: "echo-service"       │
+│     virtualIp: "10.100.0.1"  │       │     backend: "127.0.0.1:9999"│
+│   - id: "web-app"            │       │     protocol: "udp"          │
+│     virtualIp: "10.100.0.2"  │       │   - id: "web-app"            │
+└──────────────────────────────┘       │     backend: "127.0.0.1:8080"│
+                                        │     protocol: "tcp"          │
+                                        └──────────────────────────────┘
+```
+
+**Step 2: Registration tells the Intermediate who provides/consumes what**
+
+```
+Agent connects → registers 0x10 for "echo-service" AND "web-app"
+Connector connects → registers 0x11 for "echo-service"
+
+Intermediate registry:
+  agent_targets: { agent_conn → {"echo-service", "web-app"} }
+  connectors:    { "echo-service" → connector_conn }
+```
+
+**Step 3: 0x2F Service-Routed Datagrams carry per-packet routing**
+
+When the Agent intercepts a packet to 10.100.0.1, it looks up the route table (virtualIp → serviceId) and wraps the packet with a 0x2F header:
+
+```
+┌────────────┬──────────────────┬─────────────────────┬─────────────────┐
+│ 0x2F       │ ID Length (1B)   │ Service ID (N bytes)│ IP Packet       │
+│ (1 byte)   │                  │                     │ (remaining)     │
+└────────────┴──────────────────┴─────────────────────┴─────────────────┘
+
+Example: ping 10.100.0.1
+[0x2F] [0x0c] [echo-service] [45 00 00 54 ... ICMP Echo Request ...]
+```
+
+The Intermediate reads the 0x2F header, finds the Connector for "echo-service", strips the wrapper, and forwards the raw IP packet to the Connector.
+
+### Registration Message Format
+
+```
+┌────────────────┬──────────────────┬─────────────────────┐
+│ Type (1 byte)  │ Length (1 byte)  │ Service ID (N bytes)│
+└────────────────┴──────────────────┴─────────────────────┘
+```
+
+**Type Byte Values:**
+- `0x10` = Agent registration (targeting a service)
+- `0x11` = Connector registration (providing a service)
+- `0x2F` = Service-routed datagram (per-packet routing)
+
+**Example:**
+```
+Register as Agent for "echo-service":
+  [0x10] [0x0c] [echo-service]  (0x0c = 12 = length of "echo-service")
+
+Register as Connector for "echo-service":
+  [0x11] [0x0c] [echo-service]
+
+Send routed datagram to "echo-service":
+  [0x2F] [0x0c] [echo-service] [ip_packet_bytes...]
+```
+
+### Protocol Support at Connector
+
+The App Connector handles three IP protocols from tunneled packets:
+
+| Protocol | IP Proto | Handling | Backend Required |
+|----------|----------|----------|-----------------|
+| **UDP** | 17 | Extract payload → forward to backend → encapsulate response | Yes |
+| **TCP** | 6 | Userspace proxy: SYN→connect, data→stream, FIN→close | Yes |
+| **ICMP** | 1 | Echo Reply generated at Connector (swap src/dst, type 0) | No |
+
+### FFI Functions
+
+**Rust (`core/packet_processor/src/lib.rs`):**
+```rust
+// Relay / Core FFI
+pub unsafe extern "C" fn agent_register(agent: *mut Agent, service_id: *const c_char) -> AgentResult;
+pub unsafe extern "C" fn agent_send_datagram(agent: *mut Agent, buf: *const u8, len: usize) -> AgentResult;
+pub unsafe extern "C" fn agent_recv_datagram(agent: *mut Agent, out_data: *mut u8, out_len: *mut usize) -> AgentResult;
+
+// P2P Connection FFI
+pub unsafe extern "C" fn agent_connect_p2p(agent: *mut Agent, host: *const c_char, port: u16) -> AgentResult;
+pub unsafe extern "C" fn agent_is_p2p_connected(agent: *const Agent, host: *const c_char, port: u16) -> bool;
+pub unsafe extern "C" fn agent_poll_p2p(agent: *mut Agent, out_data: *mut u8, out_len: *mut usize, out_ip: *mut u8, out_port: *mut u16) -> AgentResult;
+pub unsafe extern "C" fn agent_send_datagram_p2p(agent: *mut Agent, data: *const u8, len: usize, dest_ip: *const u8, dest_port: u16) -> AgentResult;
+
+// Hole Punching FFI
+pub unsafe extern "C" fn agent_start_hole_punch(agent: *mut Agent, service_id: *const c_char) -> AgentResult;
+pub unsafe extern "C" fn agent_poll_hole_punch(agent: *mut Agent, out_ip: *mut u8, out_port: *mut u16, out_complete: *mut u8) -> AgentResult;
+pub unsafe extern "C" fn agent_poll_binding_request(agent: *mut Agent, out_data: *mut u8, out_len: *mut usize, out_ip: *mut u8, out_port: *mut u16) -> AgentResult;
+pub unsafe extern "C" fn agent_process_binding_response(agent: *mut Agent, data: *const u8, len: usize, from_ip: *const u8, from_port: u16) -> AgentResult;
+
+// Path Resilience FFI
+pub unsafe extern "C" fn agent_poll_keepalive(agent: *mut Agent, out_ip: *mut u8, out_port: *mut u16, out_data: *mut u8) -> AgentResult;
+pub unsafe extern "C" fn agent_get_active_path(agent: *const Agent) -> u8;  // 0=Direct, 1=Relay, 2=None
+pub unsafe extern "C" fn agent_is_in_fallback(agent: *const Agent) -> bool;
+pub unsafe extern "C" fn agent_get_path_stats(agent: *const Agent, out_missed: *mut u32, out_rtt: *mut u64, out_fallback: *mut u8) -> AgentResult;
+```
+
+**Swift (`PacketTunnelProvider.swift`):**
+```swift
+// Register for all configured services after connection established
+for serviceId in serviceIds {
+    serviceId.withCString { servicePtr in agent_register(agent, servicePtr) }
+}
+
+// Route table lookup + 0x2F wrapper for outgoing packets
+if let serviceId = routeTable[destIp] {
+    sendRoutedDatagram(agent: agent, serviceId: serviceId, packet: data)
+}
+
+// P2P packet routing (checks active path before sending)
+if isP2PActive, agent_get_active_path(agent) == 0 {  // 0 = Direct
+    sendP2PDatagram(agent: agent, packet: data)       // via agent_send_datagram_p2p
+} else {
+    sendRoutedDatagram(agent: agent, ...)              // via relay
+}
+```
+
+### Important Notes
+
+1. **Service ID must match**: Agent's target service ID must exactly match a registered Connector's service ID
+2. **No ACK**: Registration is fire-and-forget; server doesn't acknowledge
+3. **Re-register on reconnect**: Registration is connection-scoped; lost on disconnect
+4. **Multi-service**: Agent can register for multiple services per connection (0x2F routing)
+5. **Backward compatible**: Non-0x2F datagrams still use implicit single-service routing
 
 ---
 

@@ -39,7 +39,13 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [004](../004-e2e-relay-testing/) | E2E Relay Testing | ✅ Complete | `master` |
 | [005](../005-p2p-hole-punching/) | P2P Hole Punching | ✅ Complete | `master` |
 | [005a](../005a-swift-agent-integration/) | Swift Agent Integration | ✅ Complete | `master` |
-| [006](../006-cloud-deployment/) | Cloud Deployment | 🔲 Not Started | `feature/006-cloud-deployment` |
+| [006](../006-cloud-deployment/) | Cloud Deployment | ✅ Complete (MVP) | `feature/006-cloud-deployment` |
+| [007](../007-security-hardening/) | Security Hardening | ⏳ Not Started | — |
+| [008](../008-production-operations/) | Production Operations | ⏳ Not Started | — |
+| [009](../009-multi-service-architecture/) | Multi-Service Architecture | ⏳ Not Started | — |
+| [010](../010-admin-dashboard/) | Admin Dashboard | ⏳ Not Started | — |
+| [011](../011-protocol-improvements/) | Protocol Improvements | ⏳ Not Started | — |
+| [012](../012-multi-environment-testing/) | Multi-Environment Testing | ⏳ Not Started | — |
 
 ### Task Dependencies
 
@@ -57,10 +63,19 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
          005 (P2P Hole Punching) ✅
                     │
                     ▼
-         005a (Swift Agent Integration) ← Wire up macOS Agent with QUIC FFI
+         005a (Swift Agent Integration) ✅
                     │
                     ▼
-         006 (Cloud Deployment) ← NAT testing, production prep
+         006 (Cloud Deployment) ✅ COMPLETE (MVP)
+                    │
+         ┌──────────┼──────────────────────┐
+         ▼          ▼                      ▼
+   007 (Security)  009 (Multi-Service)   011 (Protocol)
+   P1              P2                     P3
+         │          │                      │
+         ▼          ▼                      │
+   008 (Prod Ops)  010 (Dashboard)       012 (Multi-Env)
+   P2              P3                     P3
 ```
 
 ---
@@ -93,12 +108,19 @@ git push -u origin feature/XXX-task-name
 │                     │     │                      │     │                     │
 │  ┌───────────────┐  │     │  - QUIC Server       │     │  - QUIC Client      │
 │  │ SwiftUI App   │  │     │  - QAD (addr discov) │     │  - Decapsulates     │
-│  └───────┬───────┘  │     │  - Relay (fallback)  │     │  - Forwards to App  │
-│          │          │     │  - Signaling (P2P)   │     │                     │
-│  ┌───────▼───────┐  │     └──────────▲───────────┘     └──────────▲──────────┘
-│  │ NEPacketTun.  │  │                │                            │
+│  │ (configurable │  │     │  - 0x2F svc routing  │     │  - UDP/TCP/ICMP     │
+│  │  host/port/   │  │     │  - Relay (fallback)  │     │  - JSON config      │
+│  │  service)     │  │     │  - Signaling (P2P)   │     │  - Keepalive        │
+│  └───────┬───────┘  │     │  - JSON config       │     │  - P2P server mode  │
+│          │          │     └──────────▲───────────┘     └──────────▲──────────┘
+│  ┌───────▼───────┐  │                │                            │
+│  │ NEPacketTun.  │  │                │    QUIC Tunnel             │
 │  │ Provider      │──┼────────────────┴────────────────────────────┘
-│  └───────┬───────┘  │           QUIC Tunnel (relay or direct)
+│  │ (route table, │  │      (relay or direct P2P, 0x2F service-routed)
+│  │  0x2F wrap,   │  │
+│  │  P2P+hole     │  │
+│  │  punch)       │  │
+│  └───────┬───────┘  │
 │          │ FFI      │
 │  ┌───────▼───────┐  │
 │  │ Rust Core     │  │
@@ -128,6 +150,7 @@ git push -u origin feature/XXX-task-name
 |-----------|------|
 | Architecture Doc | `docs/architecture.md` |
 | Agent Extension | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` |
+| Agent UI + VPN Manager | `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` |
 | Rust QUIC Client | `core/packet_processor/src/lib.rs` |
 | P2P Modules | `core/packet_processor/src/p2p/` |
 | Bridging Header | `ios-macos/Shared/PacketProcessor-Bridging-Header.h` |
@@ -136,6 +159,9 @@ git push -u origin feature/XXX-task-name
 | App Connector | `app-connector/src/main.rs` |
 | E2E Test Framework | `tests/e2e/README.md` |
 | E2E Test Runner | `tests/e2e/run-mvp.sh` |
+| Agent Config (reference) | `deploy/config/agent.json` |
+| Connector Config (reference) | `deploy/config/connector.json` |
+| Intermediate Config (reference) | `deploy/config/intermediate.json` |
 
 ---
 
@@ -174,7 +200,7 @@ xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
     -scheme ZtnaAgent -configuration Debug \
     -derivedDataPath /tmp/ZtnaAgent-build build
 
-# Run all unit tests (79+ tests)
+# Run all unit tests (114+ tests)
 cargo test --workspace
 ```
 
@@ -195,7 +221,7 @@ open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app \
 ### Run E2E Test Suites
 
 ```bash
-# Full E2E suite (61+ tests)
+# Full E2E suite (61+ tests, shell-based)
 tests/e2e/run-mvp.sh
 
 # Individual test suites
@@ -203,6 +229,81 @@ tests/e2e/scenarios/protocol-validation.sh   # 14 tests
 tests/e2e/scenarios/udp-advanced.sh          # 11 tests
 tests/e2e/scenarios/reliability-tests.sh     # 11 tests
 tests/e2e/scenarios/performance-metrics.sh   # 6 tests
+```
+
+### Run Docker NAT Simulation Demo
+
+```bash
+# Full demo (builds Docker images + runs NAT simulation test)
+tests/e2e/scenarios/docker-nat-demo.sh
+
+# Skip builds if images already exist
+tests/e2e/scenarios/docker-nat-demo.sh --no-build
+
+# Cleanup Docker resources
+tests/e2e/scenarios/docker-nat-demo.sh --clean
+
+# Multi-terminal log watching (open 4 terminals)
+deploy/docker-nat-sim/watch-logs.sh intermediate  # Terminal 1
+deploy/docker-nat-sim/watch-logs.sh connector     # Terminal 2
+deploy/docker-nat-sim/watch-logs.sh traffic       # Terminal 3
+# Terminal 4: Run the demo script
+```
+
+### Run Pi k8s Cluster Demo
+
+```bash
+# 1. Verify cluster access
+kubectl --context k8s1 get nodes
+
+# 2. Check deployed components
+kubectl --context k8s1 get pods -n ztna
+kubectl --context k8s1 get svc -n ztna
+
+# 3. Test connection from macOS
+./app-connector/target/release/app-connector \
+  --server 10.0.150.205:4433 \
+  --service test-from-mac \
+  --insecure
+
+# Multi-terminal log watching
+# Terminal 1: Intermediate server
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
+
+# Terminal 2: App connector
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=app-connector -f
+
+# Terminal 3: Watch pods
+watch -n2 'kubectl --context k8s1 get pods -n ztna -o wide'
+
+# Terminal 4: Run test connection (above command)
+```
+
+**Note:** App Connector CrashLoopBackOff is expected - 30 second QUIC idle timeout causes restart when no traffic.
+
+### Run macOS ZtnaAgent E2E with k8s
+
+```bash
+# 1. Verify Extension has k8s IP
+grep "serverHost" ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift
+# Should show: private let serverHost = "10.0.150.205"
+
+# 2. Clean and rebuild if needed
+rm -rf ~/Library/Developer/Xcode/DerivedData/ZtnaAgent-*
+xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
+    -scheme ZtnaAgent -configuration Debug \
+    -derivedDataPath /tmp/ZtnaAgent-build build
+
+# 3. Launch app (Click Start or use auto-start)
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app --args --auto-start
+
+# 4. Monitor k8s for connection
+kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
+# Look for: "New connection from 10.0.0.22:XXXXX"
+
+# 5. Send UDP test traffic to echo-service (10.100.0.1 = virtual service IP)
+echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
+# K8s logs: "Received XX bytes to relay" (UDP packet tunneled)
 ```
 
 ### View Logs
@@ -229,6 +330,22 @@ tail -f tests/e2e/artifacts/logs/*.log
 | **Hole Punching** | NAT traversal technique for direct P2P connection |
 | **Intermediate** | Relay server for bootstrap and fallback |
 | **Connector** | Component that decapsulates packets and forwards to apps |
+| **Service Registration** | Protocol for Agents/Connectors to register with Intermediate for routing |
+| **0x2F Datagram** | Service-routed datagram: `[0x2F, id_len, service_id, ip_packet]` |
+| **Split Tunnel** | Only configured virtual IPs (10.100.0.0/24) go through QUIC tunnel |
+
+### Registration & Routing Protocol
+
+Both Agents and Connectors register with a service ID to enable relay routing:
+- **Agent (0x10)**: "I want to reach service X" (can register multiple)
+- **Connector (0x11)**: "I provide service X"
+- **Service-Routed Datagram (0x2F)**: Per-packet routing with embedded service ID
+
+Registration format: `[type_byte, service_id_length, service_id_bytes...]`
+Routed datagram: `[0x2F, service_id_length, service_id_bytes..., ip_packet_bytes...]`
+
+The Intermediate strips the 0x2F wrapper before forwarding to the Connector.
+See `tasks/_context/components.md` for full protocol details.
 
 ---
 
@@ -240,39 +357,47 @@ Items deferred from MVP implementation that must be addressed for production.
 
 | Item | Component | Description | Risk if Missing |
 |------|-----------|-------------|-----------------|
-| **Stateless Retry** | 002-Server | Anti-amplification protection via HMAC tokens | DoS amplification attacks |
-| **TLS Certificate Verification** | 001-Agent, 002-Server | Currently `verify_peer(false)` | MITM attacks |
-| **Client Authentication** | 002-Server | No auth - any client can connect | Unauthorized access |
-| **Rate Limiting** | 002-Server | No per-client DATAGRAM rate limits | Resource exhaustion |
+| **Stateless Retry** | 002-Server | Anti-amplification protection via HMAC tokens (→ Task 007) | DoS amplification attacks |
+| **TLS Certificate Verification** | 001-Agent, 002-Server | Currently `verify_peer(false)` (→ Task 007) | MITM attacks |
+| **Client Authentication** | 002-Server | No auth - any client can connect (→ Task 007) | Unauthorized access |
+| **Rate Limiting** | 002-Server | No per-client DATAGRAM rate limits (→ Task 007) | Resource exhaustion |
 
 ### Priority 2: Reliability (Recommended)
 
 | Item | Component | Description | Impact if Missing |
 |------|-----------|-------------|-------------------|
-| **Graceful Shutdown** | 002-Server | Connection draining on shutdown | Abrupt disconnects |
-| **Connection State Tracking** | 002-Server | Full state machine for connections | Edge case bugs |
-| **Error Recovery** | 001-Agent, 002-Server, 003-Connector | Automatic reconnection logic | Manual intervention needed |
-| **TCP Support** | 003-Connector | Requires TUN/TAP or TCP state tracking | UDP-only forwarding |
-| **Registration Acknowledgment** | 002-Server, 003-Connector | Server doesn't ACK registration | Silent registration failures |
+| **Graceful Shutdown** | 002-Server | Connection draining on shutdown (→ Task 008) | Abrupt disconnects |
+| **Connection State Tracking** | 002-Server | Full state machine for connections (→ Task 008) | Edge case bugs |
+| ~~Error Recovery (Agent)~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.9) — Auto-reconnect with exponential backoff, NWPathMonitor, 3 detection paths | Agent auto-recovers |
+| **Error Recovery (Server/Connector)** | 002-Server, 003-Connector | Automatic reconnection logic (→ Task 008) | Manual intervention needed |
+| ~~TCP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.4) | Userspace TCP proxy |
+| **Registration Acknowledgment** | 002-Server, 003-Connector | Server doesn't ACK registration (→ Task 007) | Silent registration failures |
+| ~~Return-Path DATAGRAM→TUN~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.6) | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` |
 
 ### Priority 3: Operations (Nice to Have)
 
 | Item | Component | Description |
 |------|-----------|-------------|
-| **Metrics/Stats Endpoint** | 002-Server, 003-Connector | Connection counts, packet rates, latency |
-| **Configuration File (TOML)** | 002-Server, 003-Connector | Currently CLI args only |
-| **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported |
-| **IPv6 QAD Support** | 001-Agent, 002-Server, 003-Connector | Currently IPv4 only (7-byte format) |
-| **Production Certificates** | All | Currently using self-signed dev certs |
-| **ICMP Support** | 003-Connector | Ping replies for connectivity testing |
-| **Multiple Service Registration** | 003-Connector | Currently single service ID only |
+| **Metrics/Stats Endpoint** | 002-Server, 003-Connector | Connection counts, packet rates, latency (→ Task 008) |
+| ~~Configuration File~~ | ~~002-Server, 003-Connector~~ | ✅ Done (Task 006 Phase 4.2) - JSON configs |
+| **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported (→ Task 008) |
+| **IPv6 QAD Support** | 001-Agent, 002-Server, 003-Connector | Currently IPv4 only, 7-byte format (→ Task 011) |
+| **Production Certificates** | All | Currently using self-signed dev certs (→ Task 007) |
+| ~~ICMP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.5) - Echo Reply |
+| ~~Multiple Service Registration~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.3) - 0x2F routing |
+| **Per-Service Backend Routing** | 003-Connector | Route different services to different backends (→ Task 009) |
+| **TCP Window Flow Control** | 003-Connector | Currently simple ACK-per-segment (→ Task 011) |
+| **QUIC Connection Migration** | 001-Agent | quiche doesn't support — full reconnect used instead (→ Task 011) |
+| **QUIC 0-RTT Reconnection** | 001-Agent | Requires session ticket storage in quiche (→ Task 011) |
+| **Multiplexed QUIC Streams** | 002-Server | DATAGRAMs sufficient for current relay needs (→ Task 011) |
+| ~~P2P NAT Testing~~ | ~~006-Cloud~~ | ✅ Done (Task 006 Phase 6.8) — Direct P2P path achieved, keepalive demux fix in Rust `recv()` |
 
 ### Tracking
 
-When implementing deferred items:
-1. Create a task in `tasks/` (e.g., `tasks/006-security-hardening/`)
-2. Reference this section in the task's `plan.md`
-3. Update this table when complete (change to ✅ and add task reference)
+Post-MVP tasks (007-012) have been created to address these deferred items.
+Each item above references its target task number (→ Task NNN).
+When implementing, reference this section in the task's `plan.md` and update
+this table when complete (change to ✅ and add commit reference).
 
 ---
 
@@ -289,28 +414,32 @@ After E2E testing validates local relay functionality, components will be deploy
 │                                                                              │
 │  ┌─────────────┐                ┌─────────────────────────────────────────┐ │
 │  │   Agent     │                │           Cloud Infrastructure           │ │
-│  │  (macOS)    │                │                                          │ │
-│  │             │                │  ┌─────────────────────────────────────┐ │ │
-│  │  Behind     │◄──── QUIC ────►│  │    Intermediate Server              │ │ │
-│  │   NAT       │                │  │    (Public IP: x.x.x.x:4433)        │ │ │
-│  │             │                │  │    - QAD (address discovery)        │ │ │
-│  └─────────────┘                │  │    - DATAGRAM relay                 │ │ │
-│                                  │  └─────────────────────────────────────┘ │ │
-│                                  │                    │                      │ │
-│                                  │                    │ QUIC                 │ │
-│                                  │                    ▼                      │ │
-│                                  │  ┌─────────────────────────────────────┐ │ │
-│                                  │  │    App Connector                    │ │ │
-│                                  │  │    (Cloud VM or Edge)               │ │ │
-│                                  │  │    - UDP forwarding                 │ │ │
-│                                  │  │    - Local service access           │ │ │
-│                                  │  └───────────────┬─────────────────────┘ │ │
+│  │  (macOS)    │                │           (AWS EC2: 3.128.36.92)        │ │
+│  │             │                │                                          │ │
+│  │  Config:    │                │  ┌─────────────────────────────────────┐ │ │
+│  │  services:  │                │  │    Intermediate Server              │ │ │
+│  │  - echo-svc │◄──── QUIC ────►│  │    :4433 (intermediate.json)       │ │ │
+│  │    10.100.  │  0x2F routed   │  │    - QAD + DATAGRAM relay          │ │ │
+│  │    0.1      │                │  │    - 0x2F service routing           │ │ │
+│  │  - web-app  │                │  │    - Multi-service registry         │ │ │
+│  │    10.100.  │                │  └─────────────────────────────────────┘ │ │
+│  │    0.2      │                │                    │                      │ │
+│  │             │                │                    │ QUIC                 │ │
+│  │  Routes:    │                │                    ▼                      │ │
+│  │  10.100.0.  │                │  ┌─────────────────────────────────────┐ │ │
+│  │  0/24→utun  │                │  │    App Connector                    │ │ │
+│  │             │                │  │    (connector.json)                 │ │ │
+│  │  All other  │                │  │    - UDP/TCP/ICMP forwarding        │ │ │
+│  │  traffic:   │                │  │    - TCP session proxy              │ │ │
+│  │  normal     │                │  │    - ICMP Echo Reply                │ │ │
+│  └─────────────┘                │  └───────────────┬─────────────────────┘ │ │
 │                                  │                   │                       │ │
-│                                  │                   │ Local UDP             │ │
+│                                  │                   │ Local UDP/TCP         │ │
 │                                  │                   ▼                       │ │
 │                                  │  ┌─────────────────────────────────────┐ │ │
 │                                  │  │    Internal Services                │ │ │
-│                                  │  │    (DNS, API, etc.)                 │ │ │
+│                                  │  │    echo-server :9999 (UDP)          │ │ │
+│                                  │  │    web-app :8080 (TCP)              │ │ │
 │                                  │  └─────────────────────────────────────┘ │ │
 │                                  └──────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -349,3 +478,35 @@ After E2E testing validates local relay functionality, components will be deploy
 ### Task Reference
 
 See [Task 006: Cloud Deployment](../006-cloud-deployment/) for implementation details.
+
+---
+
+## MVP Boundary (Task 006 Complete)
+
+**Everything below constitutes the MVP — fully implemented and validated:**
+
+- Full E2E relay (UDP/TCP/ICMP) through QUIC DATAGRAM tunnel
+- P2P hole punching with automatic per-packet relay fallback
+- Multi-service routing (0x2F protocol, 2 services: echo-service + web-app)
+- Connection resilience (auto-recovery, NWPathMonitor, exponential backoff)
+- Split-tunnel architecture (only 10.100.0.0/24 tunneled)
+- macOS Agent with SwiftUI config UI + 23 FFI functions
+- AWS EC2 deployment (Intermediate + 2 Connectors + echo + HTTP services)
+- Pi k8s deployment (Kustomize + Cilium L2 LoadBalancer)
+- 177+ tests (116 unit + 61+ E2E)
+- Performance: P2P 32.6ms vs Relay 76ms (2.3x faster), 10-min 0% loss, seamless failover
+
+**Everything below this line is post-MVP.**
+
+---
+
+## Post-MVP Roadmap
+
+| Task | Name | Priority | Description | Dependencies |
+|------|------|----------|-------------|--------------|
+| [007](../007-security-hardening/) | Security Hardening | P1 | TLS certs (Let's Encrypt), client auth, stateless retry, rate limiting | None |
+| [008](../008-production-operations/) | Production Operations | P2 | Prometheus metrics, graceful shutdown, deployment automation, CI/CD | 007 |
+| [009](../009-multi-service-architecture/) | Multi-Service Architecture | P2 | Per-service backend routing, dynamic discovery, health checks | None |
+| [010](../010-admin-dashboard/) | Admin Dashboard | P3 | REST API on Intermediate, web frontend, topology visualization | 008, 009 |
+| [011](../011-protocol-improvements/) | Protocol Improvements | P3 | IPv6 QAD, TCP flow control, separate P2P/relay sockets, QUIC migration, 0-RTT | None |
+| [012](../012-multi-environment-testing/) | Multi-Environment Testing | P3 | DigitalOcean, multi-region, symmetric NAT/CGNAT, load testing | None |
