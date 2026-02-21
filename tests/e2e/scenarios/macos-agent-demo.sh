@@ -195,7 +195,7 @@ if [ "$MODE" = "auto" ]; then
         ok "Extension running (PID: $EXT_PID)"
 
         # Wait for connection
-        for i in {1..30}; do
+        for _ in {1..30}; do
             if /usr/bin/log show --last 5s --predicate "processIdentifier == $EXT_PID" --info 2>/dev/null | grep -q "QUIC connection established"; then
                 ok "QUIC connection established!"
                 break

@@ -36,64 +36,29 @@ pub mod signaling;
 
 // Re-export commonly used types
 pub use candidate::{
-    Candidate,
+    calculate_priority, enumerate_local_addresses, gather_host_candidates,
+    gather_reflexive_candidate, gather_relay_candidate, sort_candidates_by_priority, Candidate,
     CandidateType,
-    calculate_priority,
-    enumerate_local_addresses,
-    gather_host_candidates,
-    gather_reflexive_candidate,
-    gather_relay_candidate,
-    sort_candidates_by_priority,
 };
 
 pub use signaling::{
-    SignalingMessage,
-    SignalingError,
-    encode_message,
-    decode_message,
-    decode_messages,
-    generate_session_id,
-    SIGNALING_TIMEOUT_MS,
+    decode_message, decode_messages, encode_message, generate_session_id, SignalingError,
+    SignalingMessage, SIGNALING_TIMEOUT_MS,
 };
 
 pub use connectivity::{
-    BindingRequest,
-    BindingResponse,
-    BindingMessage,
-    CandidatePair,
-    CheckState,
-    CheckList,
-    calculate_pair_priority,
-    encode_binding,
-    decode_binding,
+    calculate_pair_priority, decode_binding, encode_binding, BindingMessage, BindingRequest,
+    BindingResponse, CandidatePair, CheckList, CheckState,
 };
 
 pub use hole_punch::{
-    HolePunchCoordinator,
-    HolePunchState,
-    HolePunchResult,
-    PathSelection,
-    select_path,
-    should_switch_to_direct,
-    should_switch_to_relay,
-    HOLE_PUNCH_TIMEOUT,
+    select_path, should_switch_to_direct, should_switch_to_relay, HolePunchCoordinator,
+    HolePunchResult, HolePunchState, PathSelection, DEFAULT_START_DELAY_MS, HOLE_PUNCH_TIMEOUT,
     SIGNALING_TIMEOUT,
-    DEFAULT_START_DELAY_MS,
 };
 
 pub use resilience::{
-    PathManager,
-    PathInfo,
-    PathState,
-    PathStats,
-    ActivePath,
-    encode_keepalive_request,
-    encode_keepalive_response,
-    decode_keepalive,
-    KEEPALIVE_INTERVAL,
-    KEEPALIVE_TIMEOUT,
-    MISSED_KEEPALIVES_THRESHOLD,
-    FALLBACK_COOLDOWN,
-    KEEPALIVE_REQUEST,
-    KEEPALIVE_RESPONSE,
+    decode_keepalive, encode_keepalive_request, encode_keepalive_response, ActivePath, PathInfo,
+    PathManager, PathState, PathStats, FALLBACK_COOLDOWN, KEEPALIVE_INTERVAL, KEEPALIVE_REQUEST,
+    KEEPALIVE_RESPONSE, KEEPALIVE_TIMEOUT, MISSED_KEEPALIVES_THRESHOLD,
 };

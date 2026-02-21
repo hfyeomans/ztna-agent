@@ -98,7 +98,10 @@ fn test_connector_handshake_and_qad() {
     let _server = match ServerProcess::start() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to start server (expected in some CI environments): {}", e);
+            eprintln!(
+                "Failed to start server (expected in some CI environments): {}",
+                e
+            );
             return;
         }
     };
@@ -108,9 +111,7 @@ fn test_connector_handshake_and_qad() {
 
     // Create mio poll and UDP socket
     let mut poll = Poll::new().expect("Failed to create poll");
-    let server_addr: SocketAddr = format!("127.0.0.1:{}", SERVER_PORT)
-        .parse()
-        .unwrap();
+    let server_addr: SocketAddr = format!("127.0.0.1:{}", SERVER_PORT).parse().unwrap();
     let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let mut socket = UdpSocket::bind(local_addr).expect("Failed to bind socket");
 
@@ -141,7 +142,9 @@ fn test_connector_handshake_and_qad() {
     loop {
         match conn.send(&mut send_buf) {
             Ok((len, send_info)) => {
-                socket.send_to(&send_buf[..len], send_info.to).expect("Failed to send");
+                socket
+                    .send_to(&send_buf[..len], send_info.to)
+                    .expect("Failed to send");
             }
             Err(quiche::Error::Done) => break,
             Err(e) => panic!("Send error: {:?}", e),
@@ -155,7 +158,8 @@ fn test_connector_handshake_and_qad() {
         }
 
         let poll_timeout = conn.timeout().unwrap_or(Duration::from_millis(100));
-        poll.poll(&mut events, Some(poll_timeout)).expect("Poll failed");
+        poll.poll(&mut events, Some(poll_timeout))
+            .expect("Poll failed");
 
         // Receive packets
         loop {
@@ -183,7 +187,8 @@ fn test_connector_handshake_and_qad() {
             reg_msg.push(service_id.len() as u8);
             reg_msg.extend_from_slice(service_id);
 
-            conn.dgram_send(&reg_msg).expect("Failed to send registration");
+            conn.dgram_send(&reg_msg)
+                .expect("Failed to send registration");
             registered = true;
             println!("Registration sent for service 'test-service'");
         }
@@ -209,7 +214,9 @@ fn test_connector_handshake_and_qad() {
         loop {
             match conn.send(&mut send_buf) {
                 Ok((len, send_info)) => {
-                    socket.send_to(&send_buf[..len], send_info.to).expect("Failed to send");
+                    socket
+                        .send_to(&send_buf[..len], send_info.to)
+                        .expect("Failed to send");
                 }
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
@@ -242,7 +249,10 @@ struct ConnectorProcess {
 }
 
 impl ConnectorProcess {
-    fn start_with_p2p(server_port: u16, p2p_bind_port: u16) -> Result<Self, Box<dyn std::error::Error>> {
+    fn start_with_p2p(
+        server_port: u16,
+        p2p_bind_port: u16,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Build the connector first
         let status = Command::new("cargo")
             .args(["build", "--release"])
@@ -261,11 +271,16 @@ impl ConnectorProcess {
                 "run",
                 "--release",
                 "--",
-                "--server", &format!("127.0.0.1:{}", server_port),
-                "--service", "p2p-test-service",
-                "--forward", "127.0.0.1:9999",
-                "--p2p-cert", "certs/connector-cert.pem",
-                "--p2p-key", "certs/connector-key.pem",
+                "--server",
+                &format!("127.0.0.1:{}", server_port),
+                "--service",
+                "p2p-test-service",
+                "--forward",
+                "127.0.0.1:9999",
+                "--p2p-cert",
+                "certs/connector-cert.pem",
+                "--p2p-key",
+                "certs/connector-key.pem",
             ])
             .current_dir(".")
             .env("RUST_LOG", "info")
@@ -303,7 +318,10 @@ fn test_connector_p2p_mode_starts() {
     let _server = match ServerProcess::start() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to start server (expected in some CI environments): {}", e);
+            eprintln!(
+                "Failed to start server (expected in some CI environments): {}",
+                e
+            );
             return;
         }
     };

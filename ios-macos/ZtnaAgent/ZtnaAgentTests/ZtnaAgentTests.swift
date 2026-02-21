@@ -1,17 +1,9 @@
-//
-//  ZtnaAgentTests.swift
-//  ZtnaAgentTests
-//
-//  Created by Hank Yeomans on 1/18/26.
-//
-
 import Testing
 @testable import ZtnaAgent
 
-struct ZtnaAgentTests {
-
-    @Test func example() async throws {
-        // Write your test here and use APIs like `#expect(...)` to check expected conditions.
-    }
-
+extension Tag {
+    @Tag static var parsing: Self
+    @Tag static var networking: Self
+    @Tag static var wireFormat: Self
+    @Tag static var vpnManager: Self
 }

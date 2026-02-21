@@ -130,7 +130,8 @@ wait_for_container() {
     while [[ $elapsed -lt $timeout ]]; do
         if docker inspect --format='{{.State.Running}}' "${container}" 2>/dev/null | grep -q true; then
             # Check if container has health check
-            local health=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "none")
+            local health
+            health=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "none")
             if [[ "${health}" == "none" ]] || [[ "${health}" == "healthy" ]]; then
                 return 0
             fi

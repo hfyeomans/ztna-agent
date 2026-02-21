@@ -1,5 +1,6 @@
-import NetworkExtension
-import Network
+@preconcurrency import NetworkExtension
+@preconcurrency import Network
+@preconcurrency import Foundation
 import os
 import Darwin
 
@@ -8,7 +9,7 @@ private struct ServiceConfig {
     let virtualIp: String
 }
 
-final class PacketTunnelProvider: NEPacketTunnelProvider {
+final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.hankyeomans.ztna-agent", category: "Tunnel")
 
@@ -24,8 +25,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - QUIC Agent State
 
-    /// Rust QUIC agent (opaque pointer)
-    private var agent: OpaquePointer?
+    /// Thread-safe Rust QUIC agent wrapper (see AgentFFI.swift)
+    private let agentFFI = AgentFFI()
 
     /// UDP connection for QUIC transport
     private var udpConnection: NWConnection?
@@ -33,22 +34,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Dispatch queue for network operations
     private let networkQueue = DispatchQueue(label: "com.hankyeomans.ztna-agent.network")
 
-    /// Timer for QUIC timeout handling
-    private var timeoutTimer: DispatchSourceTimer?
+    /// Task for QUIC timeout handling
+    private var timeoutTask: Task<Void, Never>?
 
-    /// Timer for sending keepalive PINGs to prevent 30s idle timeout
-    private var keepaliveTimer: DispatchSourceTimer?
+    /// Task for sending keepalive PINGs to prevent 30s idle timeout
+    private var keepaliveTask: Task<Void, Never>?
 
     /// Keepalive interval in seconds (should be less than half of 30s idle timeout)
     private let keepaliveIntervalSeconds: Int = 10
 
-    /// Server configuration (loaded from providerConfiguration at tunnel start)
-    private var serverHost: String = "3.128.36.92"
+    // Server configuration (loaded from providerConfiguration at tunnel start)
+    // B8: Default to 0.0.0.0 — require explicit configuration via providerConfiguration
+    private var serverHost: String = "0.0.0.0"
     private var serverPort: UInt16 = 4433
     private var targetServiceId: String = "echo-service"
 
     /// IPv4 bytes derived from serverHost (single source of truth)
-    private var serverIPBytes: [UInt8] = [3, 128, 36, 92]
+    private var serverIPBytes: [UInt8] = [0, 0, 0, 0]
 
     /// Service definitions for IP→service routing
     private var services: [ServiceConfig] = []
@@ -70,8 +72,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Network path monitor for detecting WiFi → Cellular transitions
     private var pathMonitor: NWPathMonitor?
 
-    /// Reconnection timer (exponential backoff)
-    private var reconnectTimer: DispatchSourceTimer?
+    /// Reconnection task (exponential backoff)
+    private var reconnectTask: Task<Void, Never>?
 
     /// Current backoff delay in seconds (doubles each attempt)
     private var reconnectBackoff: TimeInterval = 1.0
@@ -98,11 +100,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var p2pPort: UInt16 = 0
     private var p2pIPBytes: [UInt8] = [0, 0, 0, 0]
 
-    /// Hole punch poll timer (50ms interval during hole punching)
-    private var holePunchTimer: DispatchSourceTimer?
+    /// Hole punch poll task (50ms interval during hole punching)
+    private var holePunchTask: Task<Void, Never>?
 
-    /// P2P keepalive timer (15s interval after P2P established)
-    private var p2pKeepaliveTimer: DispatchSourceTimer?
+    /// P2P keepalive task (15s interval after P2P established)
+    private var p2pKeepaliveTask: Task<Void, Never>?
 
     /// Whether hole punching has been initiated for this connection
     private var holePunchStarted = false
@@ -115,56 +117,74 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Tunnel Lifecycle
 
-    override func startTunnel(options: [String: NSObject]? = nil) async throws {
+    override func startTunnel(
+        options: [String: NSObject]? = nil,
+        completionHandler: @escaping @Sendable (Error?) -> Void
+    ) {
         logger.info("Starting tunnel...")
 
         loadConfiguration()
 
         // Apply tunnel network settings
         let settings = buildTunnelSettings()
-        try await setTunnelNetworkSettings(settings)
-        logger.info("Tunnel settings applied successfully")
+        setTunnelNetworkSettings(settings) { [weak self] error in
+            guard let self else {
+                completionHandler(nil)
+                return
+            }
 
-        // Create QUIC agent
-        guard let newAgent = agent_create() else {
-            logger.error("Failed to create QUIC agent")
-            throw NSError(domain: "ZtnaAgent", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to create QUIC agent"])
+            if let error {
+                self.logger.error("Failed to apply tunnel settings: \(error)")
+                completionHandler(error)
+                return
+            }
+
+            self.logger.info("Tunnel settings applied successfully")
+
+            // Create QUIC agent (thread-safe via AgentFFI)
+            guard self.agentFFI.create() != nil else {
+                self.logger.error("Failed to create QUIC agent")
+                completionHandler(
+                    NSError(domain: "ZtnaAgent", code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "Failed to create QUIC agent"])
+                )
+                return
+            }
+
+            // Create UDP connection to server
+            self.setupUdpConnection()
+
+            self.isRunning = true
+            self.startPacketLoop()
+            self.startPathMonitor()
+            completionHandler(nil)
         }
-        agent = newAgent
-        logger.info("QUIC agent created")
-
-        // Create UDP connection to server
-        setupUdpConnection()
-
-        isRunning = true
-        startPacketLoop()
-        startPathMonitor()
     }
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
         logger.info("Stopping tunnel (reason: \(reason.rawValue))")
+
+        // 1. Atomically signal all entry points to stop (visible to all queues)
         isRunning = false
         hasRegistered = false
 
-        // Stop timers
-        timeoutTimer?.cancel()
-        timeoutTimer = nil
-        keepaliveTimer?.cancel()
-        keepaliveTimer = nil
+        // 2. Cancel all timers (prevents new timer callbacks from firing)
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
 
-        // Stop reconnect timer
-        reconnectTimer?.cancel()
-        reconnectTimer = nil
-
-        // Stop path monitor
+        // 3. Stop path monitor
         pathMonitor?.cancel()
         pathMonitor = nil
 
-        // Clean up P2P resources
-        holePunchTimer?.cancel()
-        holePunchTimer = nil
-        p2pKeepaliveTimer?.cancel()
-        p2pKeepaliveTimer = nil
+        // 4. Cancel all NW connections (prevents new receive callbacks)
+        holePunchTask?.cancel()
+        holePunchTask = nil
+        p2pKeepaliveTask?.cancel()
+        p2pKeepaliveTask = nil
         p2pConnection?.cancel()
         p2pConnection = nil
         for (_, conn) in bindingConnections {
@@ -173,16 +193,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         bindingConnections.removeAll()
         holePunchStarted = false
         isP2PActive = false
-
-        // Cancel UDP connection
         udpConnection?.cancel()
         udpConnection = nil
 
-        // Destroy QUIC agent
-        if let agent = agent {
-            agent_destroy(agent)
-            self.agent = nil
-            logger.info("QUIC agent destroyed")
+        // 5. Wait for all in-flight networkQueue work to complete, then destroy agent.
+        //    The barrier flag ensures this block runs AFTER all previously-enqueued
+        //    blocks finish, preventing use-after-free on the agent pointer.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            networkQueue.async(flags: .barrier) { [weak self] in
+                self?.agentFFI.destroy()
+                continuation.resume()
+            }
         }
     }
 
@@ -276,7 +297,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func setupUdpConnection() {
         let host = NWEndpoint.Host(serverHost)
-        let port = NWEndpoint.Port(rawValue: serverPort)!
+        // A4: Guard against invalid port (e.g. port 0) instead of force-unwrapping
+        guard let port = NWEndpoint.Port(rawValue: serverPort) else {
+            logger.error("Invalid server port \(self.serverPort) — cannot create UDP connection")
+            return
+        }
 
         let params = NWParameters.udp
         params.allowLocalEndpointReuse = true
@@ -295,7 +320,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             case .ready:
                 self.logger.info("UDP connection ready to \(self.serverHost):\(self.serverPort)")
                 // Report local endpoint to quiche for RecvInfo.to path validation
-                if let agent = self.agent {
+                if let agent = self.agentFFI.agent {
                     self.reportLocalAddress(connection: connection, agent: agent)
                 }
                 self.initiateQuicConnection()
@@ -330,7 +355,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard let self, self.isRunning else { return }
 
             if path.status == .satisfied {
-                guard let agent = self.agent else { return }
+                guard let agent = self.agentFFI.agent else { return }
                 let state = agent_get_state(agent)
                 if state == AgentStateClosed || state == AgentStateError
                    || state == AgentStateDisconnected {
@@ -350,19 +375,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func scheduleReconnect(reason: String) {
         guard isRunning, !isReconnecting else { return }
 
-        reconnectTimer?.cancel()
-        reconnectTimer = nil
+        // A6: Set reconnecting flag immediately after guard to prevent overlapping attempts
+        isReconnecting = true
+
+        reconnectTask?.cancel()
+        reconnectTask = nil
 
         let delay = reconnectBackoff
         logger.info("Scheduling reconnect in \(delay)s (reason: \(reason))")
 
-        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
-        timer.schedule(deadline: .now() + delay)
-        timer.setEventHandler { [weak self] in
-            self?.attemptReconnect()
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.networkQueue.async { [weak self] in
+                self?.attemptReconnect()
+            }
         }
-        timer.resume()
-        reconnectTimer = timer
 
         // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (cap)
         reconnectBackoff = min(reconnectBackoff * 2, maxReconnectBackoff)
@@ -371,19 +399,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Tear down old connection and establish a new one.
     /// Reuses the existing Agent — just calls agent_connect() again.
     private func attemptReconnect() {
-        guard agent != nil, isRunning else { return }
+        guard agentFFI.isAlive, isRunning else { return }
         isReconnecting = true
 
         logger.info("Attempting reconnect to \(self.serverHost):\(self.serverPort)")
 
-        keepaliveTimer?.cancel()
-        keepaliveTimer = nil
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
 
         // Reset P2P state — hole punch restarts automatically via registerForService()
-        holePunchTimer?.cancel()
-        holePunchTimer = nil
-        p2pKeepaliveTimer?.cancel()
-        p2pKeepaliveTimer = nil
+        holePunchTask?.cancel()
+        holePunchTask = nil
+        p2pKeepaliveTask?.cancel()
+        p2pKeepaliveTask = nil
         p2pConnection?.cancel()
         p2pConnection = nil
         for (_, conn) in bindingConnections {
@@ -427,7 +455,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - QUIC Connection
 
     private func initiateQuicConnection() {
-        guard let agent else { return }
+        guard let agent = agentFFI.agent else { return }
 
         let host = serverHost
         let port = serverPort
@@ -448,7 +476,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Send Loop (Agent → Network)
 
     private func pumpOutbound() {
-        guard let agent, let connection = udpConnection, isRunning else { return }
+        guard let agent = agentFFI.agent, let connection = udpConnection, isRunning else { return }
 
         var len = sendBuffer.count
         var port: UInt16 = 0
@@ -500,7 +528,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func handleReceivedPacket(_ data: Data) {
-        guard let agent else { return }
+        guard let agent = agentFFI.agent else { return }
 
         var ipBytes = serverIPBytes
 
@@ -532,13 +560,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Called after agent_recv() processes incoming UDP data. The Rust agent
     /// queues any received QUIC DATAGRAMs (IP packets from Connector responses).
     /// We poll until empty and write each packet to packetFlow for kernel delivery.
+    /// B10: Maximum datagrams to drain per invocation to avoid starving timers/control tasks
+    private static let maxDrainBatch = 64
+
     private func drainIncomingDatagrams() {
-        guard let agent, isRunning else { return }
+        guard let agent = agentFFI.agent, isRunning else { return }
 
         var packets: [Data] = []
         var protocols: [NSNumber] = []
+        var drained = 0
 
-        while true {
+        while drained < Self.maxDrainBatch {
             var len = recvBuffer.count
             let result = agent_recv_datagram(agent, &recvBuffer, &len)
 
@@ -552,6 +584,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     packets.append(Data(recvBuffer.prefix(len)))
                     protocols.append(NSNumber(value: AF_INET))
                 }
+                drained += 1
             } else {
                 break
             }
@@ -566,24 +599,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Timeout Handling
 
     private func scheduleTimeout() {
-        guard let agent, isRunning else { return }
+        guard let agent = agentFFI.agent, isRunning else { return }
 
-        timeoutTimer?.cancel()
+        timeoutTask?.cancel()
 
         let timeoutMs = agent_timeout_ms(agent)
         guard timeoutMs > 0 else { return }
 
-        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
-        timer.schedule(deadline: .now() + .milliseconds(Int(timeoutMs)))
-        timer.setEventHandler { [weak self] in
-            self?.handleTimeout()
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(timeoutMs)))
+            guard let self, !Task.isCancelled else { return }
+            self.networkQueue.async { [weak self] in
+                self?.handleTimeout()
+            }
         }
-        timer.resume()
-        timeoutTimer = timer
     }
 
     private func handleTimeout() {
-        guard let agent, isRunning else { return }
+        guard let agent = agentFFI.agent, isRunning else { return }
 
         agent_on_timeout(agent)
         pumpOutbound()
@@ -594,23 +627,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func startKeepaliveTimer() {
         guard isRunning else { return }
 
-        keepaliveTimer?.cancel()
+        keepaliveTask?.cancel()
 
-        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
-        timer.schedule(
-            deadline: .now() + .seconds(keepaliveIntervalSeconds),
-            repeating: .seconds(keepaliveIntervalSeconds)
-        )
-        timer.setEventHandler { [weak self] in
-            self?.sendKeepalive()
+        let interval = keepaliveIntervalSeconds
+        keepaliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(interval))
+                guard let self, !Task.isCancelled, self.isRunning else { break }
+                self.networkQueue.async { [weak self] in
+                    self?.sendKeepalive()
+                }
+            }
         }
-        timer.resume()
-        keepaliveTimer = timer
         logger.info("Keepalive timer started (interval: \(self.keepaliveIntervalSeconds)s)")
     }
 
     private func sendKeepalive() {
-        guard let agent, isRunning else { return }
+        guard let agent = agentFFI.agent, isRunning else { return }
 
         let result = agent_send_intermediate_keepalive(agent)
 
@@ -620,8 +653,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             pumpOutbound()
         } else if result == AgentResultNotConnected {
             logger.warning("Keepalive failed: not connected")
-            keepaliveTimer?.cancel()
-            keepaliveTimer = nil
+            keepaliveTask?.cancel()
+            keepaliveTask = nil
             scheduleReconnect(reason: "keepalive detected disconnection")
         } else {
             logger.warning("Keepalive failed: \(result.rawValue)")
@@ -631,7 +664,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Agent State Monitoring
 
     private func updateAgentState() {
-        guard let agent else { return }
+        guard let agent = agentFFI.agent else { return }
 
         let state = agent_get_state(agent)
 
@@ -672,7 +705,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func checkObservedAddress() {
-        guard let agent else { return }
+        guard let agent = agentFFI.agent else { return }
 
         var ipBytes: [UInt8] = [0, 0, 0, 0]
         var port: UInt16 = 0
@@ -686,9 +719,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func registerForService() {
         let currentHasRegistered = self.hasRegistered
-        let hasAgent = self.agent != nil
+        let hasAgent = agentFFI.isAlive
         logger.info("registerForService() called, hasRegistered=\(currentHasRegistered)")
-        guard let agent, !hasRegistered else {
+        guard let agent = agentFFI.agent, !hasRegistered else {
             logger.info("registerForService() guard failed: agent=\(hasAgent), hasRegistered=\(currentHasRegistered)")
             return
         }
@@ -743,13 +776,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         packetFlow.readPackets { [weak self] packets, protocols in
             guard let self, self.isRunning else { return }
 
-            for (index, packetData) in packets.enumerated() {
-                let protocolFamily = protocols[index].int32Value
-                if protocolFamily == AF_INET || protocolFamily == AF_INET6 {
-                    self.processPacket(packetData, isIPv6: protocolFamily == AF_INET6)
+            // Dispatch packet processing onto networkQueue to serialize access
+            // to shared state (routeTable, isP2PActive, targetServiceId).
+            // The packetFlow callback runs on an unspecified system queue.
+            self.networkQueue.async { [weak self] in
+                guard let self, self.isRunning else { return }
+                for (index, packetData) in packets.enumerated() {
+                    let protocolFamily = protocols[index].int32Value
+                    if protocolFamily == AF_INET || protocolFamily == AF_INET6 {
+                        self.processPacket(packetData, isIPv6: protocolFamily == AF_INET6)
+                    }
                 }
             }
 
+            // Re-register for next packet batch immediately (on packetFlow's queue)
             self.readPackets()
         }
     }
@@ -761,7 +801,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        guard let agent else {
+        guard let agent = agentFFI.agent else {
             logger.debug("No agent, dropping packet")
             return
         }
@@ -877,7 +917,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Initiate hole punching after service registration.
     /// Sends CandidateOffer via signaling stream through the Intermediate.
     private func startHolePunching() {
-        guard let agent, !holePunchStarted, isRunning else { return }
+        guard let agent = agentFFI.agent, !holePunchStarted, isRunning else { return }
 
         let serviceId = targetServiceId
         let result = serviceId.withCString { servicePtr in
@@ -901,21 +941,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func startHolePunchPollTimer() {
-        holePunchTimer?.cancel()
+        holePunchTask?.cancel()
 
-        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
-        timer.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
-        timer.setEventHandler { [weak self] in
-            self?.pollHolePunch()
+        holePunchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard let self, !Task.isCancelled, self.isRunning else { break }
+                self.networkQueue.async { [weak self] in
+                    self?.pollHolePunch()
+                }
+            }
         }
-        timer.resume()
-        holePunchTimer = timer
     }
 
     /// Called every 50ms during hole punching.
     /// Sends binding requests, processes responses, and checks for completion.
     private func pollHolePunch() {
-        guard let agent, isRunning, holePunchStarted else { return }
+        guard let agent = agentFFI.agent, isRunning, holePunchStarted else { return }
 
         // 1. Send any pending binding requests to candidate addresses
         sendPendingBindingRequests()
@@ -929,8 +971,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if complete == 1 {
             // Hole punching finished
-            holePunchTimer?.cancel()
-            holePunchTimer = nil
+            holePunchTask?.cancel()
+            holePunchTask = nil
 
             if result == AgentResultOk {
                 let ip = "\(ipBytes[0]).\(ipBytes[1]).\(ipBytes[2]).\(ipBytes[3])"
@@ -947,7 +989,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Poll for binding requests from Rust and send them via per-candidate NWConnections.
     private func sendPendingBindingRequests() {
-        guard let agent else { return }
+        guard let agent = agentFFI.agent else { return }
 
         var bindingBuffer = [UInt8](repeating: 0, count: 1500)
 
@@ -966,7 +1008,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
             logger.info("Binding request: \(len, privacy: .public) bytes -> \(key, privacy: .public)")
 
-            let connection = getOrCreateBindingConnection(host: host, port: port, key: key)
+            guard let connection = getOrCreateBindingConnection(host: host, port: port, key: key) else {
+                logger.warning("Could not create binding connection for \(key, privacy: .public)")
+                continue
+            }
 
             if connection.state == .ready {
                 logger.info("Sending binding request to \(key, privacy: .public) (\(len, privacy: .public) bytes)")
@@ -982,13 +1027,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Get or create a per-candidate NWConnection for binding request delivery.
-    private func getOrCreateBindingConnection(host: String, port: UInt16, key: String) -> NWConnection {
+    private func getOrCreateBindingConnection(host: String, port: UInt16, key: String) -> NWConnection? {
         if let existing = bindingConnections[key] {
             return existing
         }
 
         let endpoint = NWEndpoint.Host(host)
-        let nwPort = NWEndpoint.Port(rawValue: port)!
+        // A4: Guard against invalid port instead of force-unwrapping
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            logger.warning("Invalid binding port \(port) for \(key)")
+            return nil
+        }
 
         let params = NWParameters.udp
         params.allowLocalEndpointReuse = true
@@ -1022,7 +1071,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         connection.receiveMessage { [weak self] data, _, _, error in
             guard let self, self.isRunning, self.holePunchStarted else { return }
 
-            if let data, !data.isEmpty, let agent = self.agent {
+            if let data, !data.isEmpty, let agent = self.agentFFI.agent {
                 // Parse key to get source IP/port
                 let parts = key.split(separator: ":")
                 if parts.count == 2 {
@@ -1031,7 +1080,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
                     data.withUnsafeBytes { buffer in
                         guard let baseAddress = buffer.baseAddress else { return }
-                        let _ = agent_process_binding_response(
+                        _ = agent_process_binding_response(
                             agent,
                             baseAddress.assumingMemoryBound(to: UInt8.self),
                             data.count,
@@ -1071,7 +1120,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         p2pIPBytes = ipBytes
 
         let endpoint = NWEndpoint.Host(host)
-        let nwPort = NWEndpoint.Port(rawValue: port)!
+        // A4: Guard against invalid port instead of force-unwrapping
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            logger.error("Invalid P2P port \(port) — cannot setup P2P connection")
+            return
+        }
 
         let params = NWParameters.udp
         params.allowLocalEndpointReuse = true
@@ -1102,7 +1155,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Initiate P2P QUIC handshake over the direct connection.
     private func initiateP2PQuicConnection() {
-        guard let agent, let host = p2pHost else { return }
+        guard let agent = agentFFI.agent, let host = p2pHost else { return }
         let port = p2pPort
 
         let result = host.withCString { hostPtr in
@@ -1138,7 +1191,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Feed received P2P UDP data to the Rust agent.
     private func handleP2PReceivedPacket(_ data: Data) {
-        guard let agent else { return }
+        guard let agent = agentFFI.agent else { return }
 
         var ipBytes = p2pIPBytes
 
@@ -1175,7 +1228,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Poll for outbound P2P QUIC packets and send via p2pConnection.
     private func pumpP2POutbound() {
-        guard let agent, let connection = p2pConnection, isRunning else { return }
+        guard let agent = agentFFI.agent, let connection = p2pConnection, isRunning else { return }
 
         while true {
             var len = p2pSendBuffer.count
@@ -1201,20 +1254,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Start P2P keepalive timer (15s interval) after P2P QUIC is established.
     private func startP2PKeepaliveTimer() {
-        p2pKeepaliveTimer?.cancel()
+        p2pKeepaliveTask?.cancel()
 
-        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
-        timer.schedule(deadline: .now() + .seconds(15), repeating: .seconds(15))
-        timer.setEventHandler { [weak self] in
-            self?.sendP2PKeepalive()
+        p2pKeepaliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                guard let self, !Task.isCancelled, self.isRunning else { break }
+                self.networkQueue.async { [weak self] in
+                    self?.sendP2PKeepalive()
+                }
+            }
         }
-        timer.resume()
-        p2pKeepaliveTimer = timer
         logger.info("P2P keepalive timer started (15s interval)")
     }
 
     private func sendP2PKeepalive() {
-        guard let agent, let connection = p2pConnection, isRunning, isP2PActive else { return }
+        guard let agent = agentFFI.agent, let connection = p2pConnection, isRunning, isP2PActive else { return }
 
         var ipBytes: [UInt8] = [0, 0, 0, 0]
         var port: UInt16 = 0
@@ -1237,20 +1292,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if agent_is_in_fallback(agent) {
             logger.warning("P2P path failed — fallen back to relay")
             isP2PActive = false
-            p2pKeepaliveTimer?.cancel()
-            p2pKeepaliveTimer = nil
+            p2pKeepaliveTask?.cancel()
+            p2pKeepaliveTask = nil
         }
     }
 
     private func logPathState() {
-        guard let agent else { return }
+        guard let agent = agentFFI.agent else { return }
 
         let activePath = agent_get_active_path(agent)
         var missedKeepalives: UInt32 = 0
         var rttMs: UInt64 = 0
         var inFallback: UInt8 = 0
 
-        let _ = agent_get_path_stats(agent, &missedKeepalives, &rttMs, &inFallback)
+        _ = agent_get_path_stats(agent, &missedKeepalives, &rttMs, &inFallback)
 
         let pathName: String
         switch activePath {

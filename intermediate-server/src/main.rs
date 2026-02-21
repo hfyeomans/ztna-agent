@@ -24,9 +24,23 @@ mod signaling;
 use client::{Client, ClientType};
 use registry::Registry;
 use signaling::{
-    decode_message, encode_message, DecodeError, SessionManager, SessionState,
-    SignalingError, SignalingMessage, PUNCH_START_DELAY_MS,
+    decode_message, encode_message, DecodeError, SessionManager, SessionState, SignalingError,
+    SignalingMessage, PUNCH_START_DELAY_MS,
 };
+
+// ============================================================================
+// Type Aliases
+// ============================================================================
+
+/// Session data collected for a ready-to-punch P2P session:
+/// (session_id, agent_conn_id, connector_conn_id, agent_candidates, connector_candidates)
+type ReadySession = (
+    u64,
+    quiche::ConnectionId<'static>,
+    quiche::ConnectionId<'static>,
+    Vec<signaling::Candidate>,
+    Vec<signaling::Candidate>,
+);
 
 // ============================================================================
 // Constants
@@ -80,10 +94,7 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args: Vec<String> = std::env::args().collect();
 
@@ -114,7 +125,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .or_else(|| {
             // Positional: first non-flag arg
-            args.get(1).filter(|a| !a.starts_with("--")).and_then(|s| s.parse().ok())
+            args.get(1)
+                .filter(|a| !a.starts_with("--"))
+                .and_then(|s| s.parse().ok())
         })
         .or(config.port)
         .unwrap_or(DEFAULT_PORT);
@@ -149,7 +162,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  ALPN: {:?}", std::str::from_utf8(ALPN_PROTOCOL));
 
     // Create server and run
-    let mut server = Server::new(port, &bind_addr, external_ip.as_deref(), &cert_path, &key_path)?;
+    let mut server = Server::new(
+        port,
+        &bind_addr,
+        external_ip.as_deref(),
+        &cert_path,
+        &key_path,
+    )?;
     server.run()
 }
 
@@ -184,7 +203,13 @@ struct Server {
 }
 
 impl Server {
-    fn new(port: u16, bind_addr: &str, external_ip: Option<&str>, cert_path: &str, key_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        port: u16,
+        bind_addr: &str,
+        external_ip: Option<&str>,
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Parse external address if provided (for NAT environments like AWS Elastic IP)
         let external_addr: Option<SocketAddr> = if let Some(ext_ip) = external_ip {
             Some(format!("{}:{}", ext_ip, port).parse()?)
@@ -252,11 +277,7 @@ impl Server {
 
         loop {
             // Calculate timeout based on earliest connection timeout
-            let timeout = self
-                .clients
-                .values()
-                .filter_map(|c| c.conn.timeout())
-                .min();
+            let timeout = self.clients.values().filter_map(|c| c.conn.timeout()).min();
 
             // Poll for events
             self.poll.poll(&mut events, timeout)?;
@@ -313,12 +334,7 @@ impl Server {
                 }
             };
 
-            log::trace!(
-                "Received {} bytes from {} dcid={:?}",
-                len,
-                from,
-                hdr.dcid
-            );
+            log::trace!("Received {} bytes from {} dcid={:?}", len, from, hdr.dcid);
 
             // Find or create connection
             let conn_id = hdr.dcid.clone().into_owned();
@@ -340,37 +356,38 @@ impl Server {
             // Process packet for existing connection
             // Use external_addr if set (for NAT environments), otherwise use socket local_addr
             let quic_local_addr = self.external_addr.unwrap_or(self.socket.local_addr()?);
-            let (should_send_qad, should_process_dgrams) = if let Some(client) = self.clients.get_mut(&conn_id) {
-                let recv_info = quiche::RecvInfo {
-                    from,
-                    to: quic_local_addr,
-                };
+            let (should_send_qad, should_process_dgrams) =
+                if let Some(client) = self.clients.get_mut(&conn_id) {
+                    let recv_info = quiche::RecvInfo {
+                        from,
+                        to: quic_local_addr,
+                    };
 
-                match client.conn.recv(pkt_slice, recv_info) {
-                    Ok(_) => {
-                        // Update observed address (for QAD)
-                        if client.observed_addr != from {
-                            log::debug!(
-                                "Address change detected: {} -> {}",
-                                client.observed_addr,
-                                from
-                            );
-                            client.observed_addr = from;
-                            client.qad_sent = false; // Re-send QAD
+                    match client.conn.recv(pkt_slice, recv_info) {
+                        Ok(_) => {
+                            // Update observed address (for QAD)
+                            if client.observed_addr != from {
+                                log::debug!(
+                                    "Address change detected: {} -> {}",
+                                    client.observed_addr,
+                                    from
+                                );
+                                client.observed_addr = from;
+                                client.qad_sent = false; // Re-send QAD
+                            }
+
+                            // Check if we need to send QAD or process datagrams
+                            let send_qad = client.conn.is_established() && !client.qad_sent;
+                            (send_qad, true)
                         }
-
-                        // Check if we need to send QAD or process datagrams
-                        let send_qad = client.conn.is_established() && !client.qad_sent;
-                        (send_qad, true)
+                        Err(e) => {
+                            log::debug!("Connection recv error: {:?}", e);
+                            (false, false)
+                        }
                     }
-                    Err(e) => {
-                        log::debug!("Connection recv error: {:?}", e);
-                        (false, false)
-                    }
-                }
-            } else {
-                (false, false)
-            };
+                } else {
+                    (false, false)
+                };
 
             // Send QAD if needed (outside the mutable borrow)
             if should_send_qad {
@@ -433,7 +450,10 @@ impl Server {
         Ok(())
     }
 
-    fn send_qad(&mut self, conn_id: &quiche::ConnectionId<'static>) -> Result<(), Box<dyn std::error::Error>> {
+    fn send_qad(
+        &mut self,
+        conn_id: &quiche::ConnectionId<'static>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.clients.get_mut(conn_id) {
             let qad_msg = qad::build_observed_address(client.observed_addr);
             match client.conn.dgram_send(&qad_msg) {
@@ -453,7 +473,10 @@ impl Server {
         Ok(())
     }
 
-    fn process_datagrams(&mut self, conn_id: &quiche::ConnectionId<'static>) -> Result<(), Box<dyn std::error::Error>> {
+    fn process_datagrams(
+        &mut self,
+        conn_id: &quiche::ConnectionId<'static>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut dgrams = Vec::new();
 
         // Collect DATAGRAMs from this connection
@@ -532,7 +555,8 @@ impl Server {
         }
 
         // Register in routing table
-        self.registry.register(conn_id.clone(), client_type, service_id);
+        self.registry
+            .register(conn_id.clone(), client_type, service_id);
 
         Ok(())
     }
@@ -556,7 +580,10 @@ impl Server {
 
         // Forward the datagram
         if let Some(dest_client) = self.clients.get_mut(&dest_conn_id) {
-            log::info!("Destination connection established: {}", dest_client.conn.is_established());
+            log::info!(
+                "Destination connection established: {}",
+                dest_client.conn.is_established()
+            );
             match dest_client.conn.dgram_send(dgram) {
                 Ok(_) => {
                     log::info!(
@@ -571,7 +598,10 @@ impl Server {
                 }
             }
         } else {
-            log::warn!("Destination client {:?} not found in clients map", dest_conn_id);
+            log::warn!(
+                "Destination client {:?} not found in clients map",
+                dest_conn_id
+            );
         }
 
         Ok(())
@@ -633,7 +663,11 @@ impl Server {
                 }
             }
         } else {
-            log::warn!("Connector {:?} for '{}' not in clients map", dest_conn_id, service_id);
+            log::warn!(
+                "Connector {:?} for '{}' not in clients map",
+                dest_conn_id,
+                service_id
+            );
         }
 
         Ok(())
@@ -672,7 +706,12 @@ impl Server {
                             }
                             Err(quiche::Error::Done) => break,
                             Err(e) => {
-                                log::debug!("Stream recv error on {:?}/{}: {:?}", conn_id, stream_id, e);
+                                log::debug!(
+                                    "Stream recv error on {:?}/{}: {:?}",
+                                    conn_id,
+                                    stream_id,
+                                    e
+                                );
                                 break;
                             }
                         }
@@ -706,7 +745,7 @@ impl Server {
         loop {
             // Get buffer contents
             let buffer_data: Vec<u8> = {
-                if let Some(client) = self.clients.get(&conn_id) {
+                if let Some(client) = self.clients.get(conn_id) {
                     if let Some(buf) = client.signaling_buffers.get(&stream_id) {
                         buf.clone()
                     } else {
@@ -732,7 +771,7 @@ impl Server {
                     );
 
                     // Consume the bytes
-                    if let Some(client) = self.clients.get_mut(&conn_id) {
+                    if let Some(client) = self.clients.get_mut(conn_id) {
                         if let Some(buf) = client.signaling_buffers.get_mut(&stream_id) {
                             buf.drain(..consumed);
                         }
@@ -748,7 +787,7 @@ impl Server {
                 Err(DecodeError::TooLarge(size)) => {
                     log::error!("Signaling message too large: {} bytes", size);
                     // Clear the buffer to recover
-                    if let Some(client) = self.clients.get_mut(&conn_id) {
+                    if let Some(client) = self.clients.get_mut(conn_id) {
                         client.remove_signaling_buffer(stream_id);
                     }
                     break;
@@ -756,7 +795,7 @@ impl Server {
                 Err(DecodeError::Invalid(e)) => {
                     log::error!("Invalid signaling message: {}", e);
                     // Clear the buffer to recover
-                    if let Some(client) = self.clients.get_mut(&conn_id) {
+                    if let Some(client) = self.clients.get_mut(conn_id) {
                         client.remove_signaling_buffer(stream_id);
                     }
                     break;
@@ -787,7 +826,8 @@ impl Server {
                 );
 
                 // Find the Connector for this service
-                let connector_conn_id = match self.registry.find_connector_for_service(&service_id) {
+                let connector_conn_id = match self.registry.find_connector_for_service(&service_id)
+                {
                     Some(id) => id,
                     None => {
                         log::warn!("No Connector for service '{}'", service_id);
@@ -808,7 +848,6 @@ impl Server {
                     service_id.clone(),
                     from_conn_id.clone(),
                     candidates.clone(),
-                    stream_id,
                 );
 
                 // Forward CandidateOffer to Connector
@@ -835,11 +874,7 @@ impl Server {
                 // Find the session
                 if let Some(session) = self.session_manager.get_session_mut(session_id) {
                     // Store Connector's answer
-                    session.set_connector_answer(
-                        from_conn_id.clone(),
-                        candidates,
-                        stream_id,
-                    );
+                    session.set_connector_answer(from_conn_id.clone(), candidates, stream_id);
 
                     log::info!(
                         "Session {} ready to punch (agent={:?}, connector={:?})",
@@ -946,7 +981,7 @@ impl Server {
     /// Process sessions that are ready to start hole punching
     fn process_ready_sessions(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Collect sessions ready to punch
-        let ready_sessions: Vec<(u64, quiche::ConnectionId<'static>, quiche::ConnectionId<'static>, Vec<signaling::Candidate>, Vec<signaling::Candidate>)> = {
+        let ready_sessions: Vec<ReadySession> = {
             let mut ready = Vec::new();
             // Manually iterate to avoid borrow issues
             for (session_id, session) in self.session_manager.sessions_iter() {
@@ -968,7 +1003,9 @@ impl Server {
         };
 
         // Send StartPunching to both parties
-        for (session_id, agent_id, connector_id, agent_candidates, connector_candidates) in ready_sessions {
+        for (session_id, agent_id, connector_id, agent_candidates, connector_candidates) in
+            ready_sessions
+        {
             log::info!("Sending StartPunching for session {}", session_id);
 
             // Send to Agent with Connector's candidates
@@ -1010,7 +1047,9 @@ impl Server {
 
         if let Some(client) = self.clients.get_mut(to_conn_id) {
             // Open a new stream for the response
-            let stream_id = client.conn.stream_priority(0, 0, true)
+            let _stream_id = client
+                .conn
+                .stream_priority(0, 0, true)
                 .map(|_| 0u64)
                 .unwrap_or(0);
 

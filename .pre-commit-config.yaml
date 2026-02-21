@@ -1,0 +1,96 @@
+repos:
+  # Rust formatting (per crate)
+  - repo: local
+    hooks:
+      - id: rust-fmt-app-connector
+        name: rustfmt (app-connector)
+        entry: cargo fmt --manifest-path app-connector/Cargo.toml --all --
+        language: system
+        files: '^app-connector/.*\.rs$'
+        pass_filenames: false
+
+      - id: rust-fmt-intermediate-server
+        name: rustfmt (intermediate-server)
+        entry: cargo fmt --manifest-path intermediate-server/Cargo.toml --all --
+        language: system
+        files: '^intermediate-server/.*\.rs$'
+        pass_filenames: false
+
+      - id: rust-fmt-packet-processor
+        name: rustfmt (packet_processor)
+        entry: cargo fmt --manifest-path core/packet_processor/Cargo.toml --all --
+        language: system
+        files: '^core/packet_processor/.*\.rs$'
+        pass_filenames: false
+
+      - id: rust-fmt-echo-server
+        name: rustfmt (echo-server)
+        entry: cargo fmt --manifest-path tests/e2e/fixtures/echo-server/Cargo.toml --all --
+        language: system
+        files: '^tests/e2e/fixtures/echo-server/.*\.rs$'
+        pass_filenames: false
+
+      - id: rust-fmt-quic-client
+        name: rustfmt (quic-client)
+        entry: cargo fmt --manifest-path tests/e2e/fixtures/quic-client/Cargo.toml --all --
+        language: system
+        files: '^tests/e2e/fixtures/quic-client/.*\.rs$'
+        pass_filenames: false
+
+  # Rust clippy (per crate)
+  - repo: local
+    hooks:
+      - id: rust-clippy-app-connector
+        name: clippy (app-connector)
+        entry: cargo clippy --manifest-path app-connector/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: '^app-connector/.*\.rs$'
+        pass_filenames: false
+
+      - id: rust-clippy-intermediate-server
+        name: clippy (intermediate-server)
+        entry: cargo clippy --manifest-path intermediate-server/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: '^intermediate-server/.*\.rs$'
+        pass_filenames: false
+
+      - id: rust-clippy-packet-processor
+        name: clippy (packet_processor)
+        entry: cargo clippy --manifest-path core/packet_processor/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: '^core/packet_processor/.*\.rs$'
+        pass_filenames: false
+
+      - id: rust-clippy-echo-server
+        name: clippy (echo-server)
+        entry: cargo clippy --manifest-path tests/e2e/fixtures/echo-server/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: '^tests/e2e/fixtures/echo-server/.*\.rs$'
+        pass_filenames: false
+
+      - id: rust-clippy-quic-client
+        name: clippy (quic-client)
+        entry: cargo clippy --manifest-path tests/e2e/fixtures/quic-client/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: '^tests/e2e/fixtures/quic-client/.*\.rs$'
+        pass_filenames: false
+
+  # ShellCheck for bash scripts
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: ShellCheck
+        entry: shellcheck --severity=warning --exclude=SC1071
+        language: system
+        files: '\.(sh|bash)$'
+        exclude: '^(.*target/|.*DerivedData/)'
+
+  # SwiftLint
+  - repo: local
+    hooks:
+      - id: swiftlint
+        name: SwiftLint
+        entry: swiftlint lint --strict --quiet
+        language: system
+        files: '^ios-macos/.*\.swift$'
+        pass_filenames: false

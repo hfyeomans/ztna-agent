@@ -51,7 +51,7 @@ impl Client {
 
     /// Get or create a signaling buffer for a stream
     pub fn get_signaling_buffer(&mut self, stream_id: u64) -> &mut Vec<u8> {
-        self.signaling_buffers.entry(stream_id).or_insert_with(Vec::new)
+        self.signaling_buffers.entry(stream_id).or_default()
     }
 
     /// Remove a signaling buffer for a stream

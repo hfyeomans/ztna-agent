@@ -188,18 +188,18 @@ impl PathInfo {
             let expected_response_seq = self.next_sequence.wrapping_sub(1);
 
             // If we haven't received response for the last sent keepalive
-            if self.last_acked_sequence != expected_response_seq {
-                if sent_time.elapsed() >= KEEPALIVE_TIMEOUT {
-                    self.missed_keepalives += 1;
+            if self.last_acked_sequence != expected_response_seq
+                && sent_time.elapsed() >= KEEPALIVE_TIMEOUT
+            {
+                self.missed_keepalives += 1;
 
-                    // Update state based on missed count
-                    if self.missed_keepalives >= MISSED_KEEPALIVES_THRESHOLD {
-                        self.state = PathState::Failed;
-                        self.last_failure = Some(Instant::now());
-                        return true;
-                    } else if self.missed_keepalives > 0 {
-                        self.state = PathState::Degraded;
-                    }
+                // Update state based on missed count
+                if self.missed_keepalives >= MISSED_KEEPALIVES_THRESHOLD {
+                    self.state = PathState::Failed;
+                    self.last_failure = Some(Instant::now());
+                    return true;
+                } else if self.missed_keepalives > 0 {
+                    self.state = PathState::Degraded;
                 }
             }
         }
@@ -226,7 +226,10 @@ impl PathInfo {
 
     /// Check if path is usable for data
     pub fn is_usable(&self) -> bool {
-        matches!(self.state, PathState::Active | PathState::Degraded | PathState::Recovering)
+        matches!(
+            self.state,
+            PathState::Active | PathState::Degraded | PathState::Recovering
+        )
     }
 }
 
@@ -400,7 +403,11 @@ impl PathManager {
             in_fallback: self.in_fallback,
             direct_rtt: self.direct_path.as_ref().and_then(|p| p.rtt),
             direct_state: self.direct_path.as_ref().map(|p| p.state),
-            missed_keepalives: self.direct_path.as_ref().map(|p| p.missed_keepalives).unwrap_or(0),
+            missed_keepalives: self
+                .direct_path
+                .as_ref()
+                .map(|p| p.missed_keepalives)
+                .unwrap_or(0),
         }
     }
 }

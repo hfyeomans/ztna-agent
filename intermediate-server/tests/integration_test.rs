@@ -102,7 +102,10 @@ fn test_client_connection_and_qad() {
     let _server = match ServerProcess::start(TEST_SERVER_PORT) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to start server (expected in some CI environments): {}", e);
+            eprintln!(
+                "Failed to start server (expected in some CI environments): {}",
+                e
+            );
             return;
         }
     };

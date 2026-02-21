@@ -1,6 +1,9 @@
 import SwiftUI
 import NetworkExtension
 import Observation
+import os
+
+private let appLogger = Logger(subsystem: "com.hankyeomans.ztna-agent", category: "App")
 
 @main
 struct ZtnaAgentApp: App {
@@ -44,16 +47,16 @@ struct ZtnaAgentApp: App {
                             }
 
                             if vpnManager.status == .connected {
-                                print("[TEST] Connected. Will auto-stop in \(Int(duration)) seconds...")
+                                appLogger.info("[TEST] Connected. Will auto-stop in \(Int(duration)) seconds...")
                                 try? await Task.sleep(for: .seconds(duration))
-                                print("[TEST] Auto-stopping VPN...")
+                                appLogger.info("[TEST] Auto-stopping VPN...")
                                 vpnManager.stop()
 
                                 // Wait for disconnect
                                 try? await Task.sleep(for: .milliseconds(500))
 
                                 if shouldExitAfterStop {
-                                    print("[TEST] Exiting app...")
+                                    appLogger.info("[TEST] Exiting app...")
                                     try? await Task.sleep(for: .milliseconds(200))
                                     exit(0)
                                 }
@@ -70,7 +73,8 @@ struct ZtnaAgentApp: App {
 final class VPNManager {
     private(set) var status: VPNStatus = .unknown
     private var manager: NETunnelProviderManager?
-    nonisolated(unsafe) private var statusTask: Task<Void, Never>?
+    private var statusTask: Task<Void, Never>?
+    private let logger = Logger(subsystem: "com.hankyeomans.ztna-agent", category: "VPNManager")
 
     // MARK: - Tunnel Configuration
 
@@ -104,10 +108,6 @@ final class VPNManager {
         serverPort = savedPort > 0 ? UInt16(savedPort) : 4433
         serviceId = UserDefaults.standard.string(forKey: "ztnaServiceId") ?? "echo-service"
         startStatusObserver()
-    }
-    
-    deinit {
-        statusTask?.cancel()
     }
     
     private func startStatusObserver() {
@@ -168,7 +168,7 @@ final class VPNManager {
                     return
                 } catch {
                     lastError = error
-                    print("VPN start attempt \(attempt) failed: \(error)")
+                    logger.warning("VPN start attempt \(attempt) failed: \(error)")
                     if attempt < 3 {
                         // Wait and reload before retrying
                         try? await Task.sleep(for: .milliseconds(500))
@@ -181,7 +181,7 @@ final class VPNManager {
                 throw error
             }
         } catch {
-            print("VPN start error: \(error)")
+            logger.error("VPN start error: \(error)")
             status = .startError
         }
     }

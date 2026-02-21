@@ -24,8 +24,8 @@ mod qad;
 mod signaling;
 
 use signaling::{
-    decode_message, encode_message, gather_candidates_with_observed, Candidate, DecodeError,
-    P2PSessionManager, P2PSessionState, SignalingMessage,
+    decode_message, encode_message, gather_candidates_with_observed, DecodeError,
+    P2PSessionManager, SignalingMessage,
 };
 
 // ============================================================================
@@ -76,6 +76,9 @@ const MAX_TCP_PAYLOAD: usize = MAX_DATAGRAM_SIZE - 40;
 /// TCP session idle timeout in seconds
 const TCP_SESSION_TIMEOUT_SECS: u64 = 120;
 
+/// Maximum concurrent TCP proxy sessions (prevents fd exhaustion)
+const MAX_TCP_SESSIONS: usize = 256;
+
 /// mio token for QUIC socket
 const QUIC_SOCKET_TOKEN: Token = Token(0);
 
@@ -114,9 +117,10 @@ const KEEPALIVE_REQUEST: u8 = 0x10;
 const KEEPALIVE_RESPONSE: u8 = 0x11;
 
 /// Returns true if this packet looks like a non-QUIC P2P message.
-/// QUIC long header: first byte & 0x80 != 0. QUIC short header: first byte & 0x40 != 0.
-/// Binding messages start with bincode enum index 0x00/0x01.
-/// Keepalive messages start with 0x10/0x11.
+/// B5: Heuristic P2P control packet demux — relies on first byte bit pattern.
+/// Wire format: QUIC long header has bit 7 set (0x80), short header has bit 6 set (0x40).
+/// Control packets (binding 0x00/0x01, keepalive 0x10/0x11) have both bits clear.
+/// Post-MVP (Task 007): add explicit magic byte to avoid collision with future protocols.
 fn is_p2p_control_packet(data: &[u8]) -> bool {
     !data.is_empty() && (data[0] & 0xC0) == 0
 }
@@ -212,10 +216,7 @@ fn load_config(path: &str) -> Result<ConnectorConfig, Box<dyn std::error::Error>
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
@@ -252,14 +253,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build effective config: CLI args override config file values
     let config_server = config.intermediate_server.as_ref();
-    let config_host = config_server.and_then(|s| s.host.as_deref()).unwrap_or("127.0.0.1");
-    let config_port = config_server.and_then(|s| s.port).unwrap_or(DEFAULT_SERVER_PORT);
+    let config_host = config_server
+        .and_then(|s| s.host.as_deref())
+        .unwrap_or("127.0.0.1");
+    let config_port = config_server
+        .and_then(|s| s.port)
+        .unwrap_or(DEFAULT_SERVER_PORT);
     let config_server_addr = format!("{}:{}", config_host, config_port);
 
     let first_service = config.services.as_ref().and_then(|s| s.first());
 
-    let server_addr = parse_arg(&args, "--server")
-        .unwrap_or(config_server_addr);
+    let server_addr = parse_arg(&args, "--server").unwrap_or(config_server_addr);
     let service_id = parse_arg(&args, "--service")
         .or_else(|| first_service.map(|s| s.id.clone()))
         .unwrap_or_else(|| "default".to_string());
@@ -268,20 +272,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| format!("127.0.0.1:{}", DEFAULT_FORWARD_PORT));
 
     let p2p_config = config.p2p.as_ref();
-    let p2p_cert = parse_arg(&args, "--p2p-cert")
-        .or_else(|| p2p_config.and_then(|p| p.cert.clone()));
-    let p2p_key = parse_arg(&args, "--p2p-key")
-        .or_else(|| p2p_config.and_then(|p| p.key.clone()));
+    let p2p_cert =
+        parse_arg(&args, "--p2p-cert").or_else(|| p2p_config.and_then(|p| p.cert.clone()));
+    let p2p_key = parse_arg(&args, "--p2p-key").or_else(|| p2p_config.and_then(|p| p.key.clone()));
     let p2p_port: u16 = parse_arg(&args, "--p2p-listen-port")
         .and_then(|s| s.parse().ok())
         .or_else(|| p2p_config.and_then(|p| p.port))
         .unwrap_or(DEFAULT_P2P_PORT);
-    let external_ip: Option<std::net::IpAddr> = parse_arg(&args, "--external-ip")
-        .and_then(|s| s.parse().ok());
+    let external_ip: Option<std::net::IpAddr> =
+        parse_arg(&args, "--external-ip").and_then(|s| s.parse().ok());
 
-    let server_addr: SocketAddr = server_addr.parse()
-        .map_err(|_| "Invalid server address")?;
-    let forward_addr: SocketAddr = forward_addr.parse()
+    let server_addr: SocketAddr = server_addr.parse().map_err(|_| "Invalid server address")?;
+    let forward_addr: SocketAddr = forward_addr
+        .parse()
         .map_err(|_| "Invalid forward address")?;
 
     log::info!("ZTNA App Connector starting...");
@@ -290,7 +293,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  Forward: {}", forward_addr);
     log::info!("  P2P Port: {}", p2p_port);
     log::info!("  ALPN:    {:?}", std::str::from_utf8(ALPN_PROTOCOL));
-    log::info!("  P2P:     {}", if p2p_cert.is_some() { "enabled" } else { "disabled" });
+    log::info!(
+        "  P2P:     {}",
+        if p2p_cert.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     if let Some(ip) = external_ip {
         log::info!("  External IP: {}", ip);
     }
@@ -338,7 +348,9 @@ struct Connector {
     server_addr: SocketAddr,
     /// Service ID for registration
     service_id: String,
-    /// Forward address for local traffic
+    /// Forward address for local traffic.
+    /// B7: MVP limitation — all TCP traffic routes to this single backend regardless
+    /// of destination IP. Post-MVP (Task 009): per-service TCP routing.
     forward_addr: SocketAddr,
     /// Random number generator
     rng: SystemRandom,
@@ -397,11 +409,14 @@ impl Connector {
         client_config.set_initial_max_streams_bidi(100);
         client_config.set_initial_max_streams_uni(100);
 
-        // Disable server certificate verification (for MVP with self-signed certs)
+        // TODO(007): Enable TLS certificate verification — currently disabled for
+        // MVP self-signed certs. Task 007 (Security Hardening) will add Let's Encrypt
+        // certs and proper CA chain validation.
         client_config.verify_peer(false);
 
         // Create server config if P2P certificates are provided
-        let server_config = if let (Some(cert_path), Some(key_path)) = (p2p_cert_path, p2p_key_path) {
+        let server_config = if let (Some(cert_path), Some(key_path)) = (p2p_cert_path, p2p_key_path)
+        {
             let mut cfg = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
             // Load TLS certificates for server mode
@@ -420,7 +435,8 @@ impl Connector {
             cfg.set_initial_max_streams_bidi(100);
             cfg.set_initial_max_streams_uni(100);
 
-            // Disable client certificate verification (for MVP)
+            // TODO(007): Enable client certificate verification — disabled for MVP.
+            // Task 007 (Security Hardening) will add mutual TLS authentication.
             cfg.verify_peer(false);
 
             log::info!("P2P server mode enabled with certificates");
@@ -485,7 +501,8 @@ impl Connector {
 
         loop {
             // Calculate timeout based on all connection timeouts
-            let timeout = self.calculate_min_timeout()
+            let timeout = self
+                .calculate_min_timeout()
                 .map(|t| t.min(Duration::from_millis(100)))
                 .or(Some(Duration::from_millis(100)));
 
@@ -578,7 +595,11 @@ impl Connector {
             &mut self.client_config,
         )?;
 
-        log::info!("Connecting to Intermediate at {} (scid={:?})", self.server_addr, scid);
+        log::info!(
+            "Connecting to Intermediate at {} (scid={:?})",
+            self.server_addr,
+            scid
+        );
 
         self.intermediate_conn = Some(conn);
         self.registered = false;
@@ -617,7 +638,11 @@ impl Connector {
         Ok(())
     }
 
-    fn process_intermediate_packet(&mut self, pkt_buf: &mut [u8], from: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    fn process_intermediate_packet(
+        &mut self,
+        pkt_buf: &mut [u8],
+        from: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref mut conn) = self.intermediate_conn {
             let recv_info = quiche::RecvInfo {
                 from,
@@ -641,7 +666,11 @@ impl Connector {
         Ok(())
     }
 
-    fn process_p2p_packet(&mut self, pkt_buf: &mut [u8], from: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    fn process_p2p_packet(
+        &mut self,
+        pkt_buf: &mut [u8],
+        from: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // P2P server mode not enabled
         if self.server_config.is_none() {
             log::trace!("P2P packet from {} ignored (server mode disabled)", from);
@@ -689,13 +718,20 @@ impl Connector {
             // New P2P connection from Agent
             self.handle_new_p2p_connection(&hdr, from, pkt_buf)?;
         } else {
-            log::debug!("Non-Initial packet for unknown P2P connection from {}", from);
+            log::debug!(
+                "Non-Initial packet for unknown P2P connection from {}",
+                from
+            );
         }
 
         Ok(())
     }
 
-    fn process_p2p_control_packet(&mut self, data: &[u8], from: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    fn process_p2p_control_packet(
+        &mut self,
+        data: &[u8],
+        from: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if data.is_empty() {
             return Ok(());
         }
@@ -718,10 +754,14 @@ impl Connector {
                 // Try as binding message
                 match bincode::deserialize::<BindingMessage>(data) {
                     Ok(BindingMessage::Request(request)) => {
-                        log::info!("Binding request from {} (txn {:02x}{:02x}{:02x}{:02x})",
+                        log::info!(
+                            "Binding request from {} (txn {:02x}{:02x}{:02x}{:02x})",
                             from,
-                            request.transaction_id[0], request.transaction_id[1],
-                            request.transaction_id[2], request.transaction_id[3]);
+                            request.transaction_id[0],
+                            request.transaction_id[1],
+                            request.transaction_id[2],
+                            request.transaction_id[3]
+                        );
 
                         let response = BindingMessage::Response(BindingResponse {
                             transaction_id: request.transaction_id,
@@ -731,15 +771,28 @@ impl Connector {
 
                         if let Ok(encoded) = bincode::serialize(&response) {
                             self.quic_socket.send_to(&encoded, from)?;
-                            log::info!("Binding response sent to {} ({} bytes)", from, encoded.len());
+                            log::info!(
+                                "Binding response sent to {} ({} bytes)",
+                                from,
+                                encoded.len()
+                            );
                         }
                     }
                     Ok(BindingMessage::Response(response)) => {
-                        log::info!("Binding response from {} (success={})", from, response.success);
+                        log::info!(
+                            "Binding response from {} (success={})",
+                            from,
+                            response.success
+                        );
                     }
                     Err(e) => {
-                        log::debug!("Unknown P2P control message from {} (type=0x{:02x}, len={}): {}",
-                            from, data[0], data.len(), e);
+                        log::debug!(
+                            "Unknown P2P control message from {} (type=0x{:02x}, len={}): {}",
+                            from,
+                            data[0],
+                            data.len(),
+                            e
+                        );
                     }
                 }
             }
@@ -778,7 +831,11 @@ impl Connector {
         let conn = quiche::accept(&scid, None, local_addr, from, server_config)?;
 
         let scid_owned = scid.into_owned();
-        log::info!("New P2P connection from Agent at {} (scid={:?})", from, scid_owned);
+        log::info!(
+            "New P2P connection from Agent at {} (scid={:?})",
+            from,
+            scid_owned
+        );
 
         // Create P2P client
         let mut client = P2PClient::new(conn, from);
@@ -811,7 +868,11 @@ impl Connector {
                         if dgrams.is_empty() {
                             log::trace!("dgram_recv: {:?} (no datagrams)", e);
                         } else {
-                            log::debug!("dgram_recv: {:?} (collected {} datagrams)", e, dgrams.len());
+                            log::debug!(
+                                "dgram_recv: {:?} (collected {} datagrams)",
+                                e,
+                                dgrams.len()
+                            );
                         }
                         break;
                     }
@@ -840,7 +901,10 @@ impl Connector {
         Ok(())
     }
 
-    fn process_p2p_client_datagrams(&mut self, conn_id: &quiche::ConnectionId<'static>) -> Result<(), Box<dyn std::error::Error>> {
+    fn process_p2p_client_datagrams(
+        &mut self,
+        conn_id: &quiche::ConnectionId<'static>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut dgrams = Vec::new();
         let mut should_send_qad = false;
         let mut client_addr = None;
@@ -887,7 +951,11 @@ impl Connector {
         Ok(())
     }
 
-    fn send_qad_to_p2p_client(&mut self, conn_id: &quiche::ConnectionId<'static>, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    fn send_qad_to_p2p_client(
+        &mut self,
+        conn_id: &quiche::ConnectionId<'static>,
+        addr: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.p2p_clients.get_mut(conn_id) {
             let qad_msg = qad::build_observed_address(addr);
             match client.conn.dgram_send(&qad_msg) {
@@ -959,8 +1027,10 @@ impl Connector {
 
         let udp_header_start = ip_header_len;
         let src_port = u16::from_be_bytes([dgram[udp_header_start], dgram[udp_header_start + 1]]);
-        let dst_port = u16::from_be_bytes([dgram[udp_header_start + 2], dgram[udp_header_start + 3]]);
-        let udp_len = u16::from_be_bytes([dgram[udp_header_start + 4], dgram[udp_header_start + 5]]) as usize;
+        let dst_port =
+            u16::from_be_bytes([dgram[udp_header_start + 2], dgram[udp_header_start + 3]]);
+        let udp_len =
+            u16::from_be_bytes([dgram[udp_header_start + 4], dgram[udp_header_start + 5]]) as usize;
 
         // Extract UDP payload
         let payload_start = ip_header_len + 8;
@@ -974,11 +1044,16 @@ impl Connector {
 
         log::debug!(
             "Forwarding UDP: {}:{} -> {}:{} ({} bytes)",
-            src_ip, src_port, self.forward_addr.ip(), self.forward_addr.port(), payload.len()
+            src_ip,
+            src_port,
+            self.forward_addr.ip(),
+            self.forward_addr.port(),
+            payload.len()
         );
 
         // Store flow mapping for return traffic
-        self.flow_map.insert((src_ip, src_port, dst_port), Instant::now());
+        self.flow_map
+            .insert((src_ip, src_port, dst_port), Instant::now());
 
         // Forward payload to local service
         match self.local_socket.send_to(payload, self.forward_addr) {
@@ -1009,12 +1084,16 @@ impl Connector {
         let src_port = u16::from_be_bytes([dgram[tcp_start], dgram[tcp_start + 1]]);
         let dst_port = u16::from_be_bytes([dgram[tcp_start + 2], dgram[tcp_start + 3]]);
         let seq_num = u32::from_be_bytes([
-            dgram[tcp_start + 4], dgram[tcp_start + 5],
-            dgram[tcp_start + 6], dgram[tcp_start + 7],
+            dgram[tcp_start + 4],
+            dgram[tcp_start + 5],
+            dgram[tcp_start + 6],
+            dgram[tcp_start + 7],
         ]);
         let _ack_num = u32::from_be_bytes([
-            dgram[tcp_start + 8], dgram[tcp_start + 9],
-            dgram[tcp_start + 10], dgram[tcp_start + 11],
+            dgram[tcp_start + 8],
+            dgram[tcp_start + 9],
+            dgram[tcp_start + 10],
+            dgram[tcp_start + 11],
         ]);
         let data_offset = ((dgram[tcp_start + 12] >> 4) & 0x0F) as usize * 4;
         let flags = dgram[tcp_start + 13];
@@ -1030,16 +1109,45 @@ impl Connector {
         let mut packets_to_send: Vec<Vec<u8>> = Vec::new();
 
         if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 {
+            // B3: Reject new connections when at capacity (prevents fd exhaustion)
+            if self.tcp_sessions.len() >= MAX_TCP_SESSIONS {
+                log::warn!(
+                    "TCP session limit ({}) reached, sending RST to {}:{}",
+                    MAX_TCP_SESSIONS,
+                    src_ip,
+                    src_port
+                );
+                packets_to_send.push(build_tcp_packet(
+                    dst_ip,
+                    dst_port,
+                    src_ip,
+                    src_port,
+                    0,
+                    seq_num.wrapping_add(1),
+                    TCP_RST | TCP_ACK,
+                    0,
+                    &[],
+                ));
+                for packet in &packets_to_send {
+                    self.send_ip_packet(packet)?;
+                }
+                return Ok(());
+            }
+
             // SYN - new connection request
             log::debug!(
                 "TCP SYN: {}:{} -> {}:{} (seq={})",
-                src_ip, src_port, dst_ip, dst_port, seq_num
+                src_ip,
+                src_port,
+                dst_ip,
+                dst_port,
+                seq_num
             );
 
-            match StdTcpStream::connect_timeout(
-                &self.forward_addr,
-                Duration::from_secs(2),
-            ) {
+            // MVP: blocking connect with reduced timeout (500ms).
+            // Post-MVP (Task 008): use non-blocking mio::net::TcpStream::connect()
+            // to avoid stalling the event loop entirely.
+            match StdTcpStream::connect_timeout(&self.forward_addr, Duration::from_millis(500)) {
                 Ok(stream) => {
                     stream.set_nonblocking(true)?;
                     stream.set_nodelay(true)?;
@@ -1063,9 +1171,15 @@ impl Connector {
                     };
 
                     packets_to_send.push(build_tcp_packet(
-                        dst_ip, dst_port, src_ip, src_port,
-                        our_isn, seq_num.wrapping_add(1),
-                        TCP_SYN | TCP_ACK, 65535, &[],
+                        dst_ip,
+                        dst_port,
+                        src_ip,
+                        src_port,
+                        our_isn,
+                        seq_num.wrapping_add(1),
+                        TCP_SYN | TCP_ACK,
+                        65535,
+                        &[],
                     ));
 
                     self.tcp_sessions.insert(flow_key, session);
@@ -1074,9 +1188,15 @@ impl Connector {
                 Err(e) => {
                     log::warn!("TCP connect to {} failed: {}", self.forward_addr, e);
                     packets_to_send.push(build_tcp_packet(
-                        dst_ip, dst_port, src_ip, src_port,
-                        0, seq_num.wrapping_add(1),
-                        TCP_RST | TCP_ACK, 0, &[],
+                        dst_ip,
+                        dst_port,
+                        src_ip,
+                        src_port,
+                        0,
+                        seq_num.wrapping_add(1),
+                        TCP_RST | TCP_ACK,
+                        0,
+                        &[],
                     ));
                 }
             }
@@ -1087,10 +1207,15 @@ impl Connector {
         } else if flags & TCP_FIN != 0 {
             if let Some(session) = self.tcp_sessions.remove(&flow_key) {
                 packets_to_send.push(build_tcp_packet(
-                    dst_ip, dst_port, src_ip, src_port,
+                    dst_ip,
+                    dst_port,
+                    src_ip,
+                    src_port,
                     session.our_seq,
                     seq_num.wrapping_add(1 + payload.len() as u32),
-                    TCP_FIN | TCP_ACK, 65535, &[],
+                    TCP_FIN | TCP_ACK,
+                    65535,
+                    &[],
                 ));
                 drop(session.stream);
                 log::debug!("TCP session closed by FIN: {}:{}", src_ip, src_port);
@@ -1111,13 +1236,21 @@ impl Connector {
                         Ok(n) => {
                             session.their_seq = seq_num.wrapping_add(n as u32);
                             packets_to_send.push(build_tcp_packet(
-                                dst_ip, dst_port, src_ip, src_port,
-                                session.our_seq, session.their_seq,
-                                TCP_ACK, 65535, &[],
+                                dst_ip,
+                                dst_port,
+                                src_ip,
+                                src_port,
+                                session.our_seq,
+                                session.their_seq,
+                                TCP_ACK,
+                                65535,
+                                &[],
                             ));
                             log::trace!(
                                 "TCP forwarded {} bytes to backend for {}:{}",
-                                n, src_ip, src_port
+                                n,
+                                src_ip,
+                                src_port
                             );
                         }
                         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -1127,10 +1260,15 @@ impl Connector {
                         Err(e) => {
                             log::debug!("TCP write to backend failed: {}", e);
                             packets_to_send.push(build_tcp_packet(
-                                dst_ip, dst_port, src_ip, src_port,
+                                dst_ip,
+                                dst_port,
+                                src_ip,
+                                src_port,
                                 session.our_seq,
                                 seq_num.wrapping_add(payload.len() as u32),
-                                TCP_RST | TCP_ACK, 0, &[],
+                                TCP_RST | TCP_ACK,
+                                0,
+                                &[],
                             ));
                             remove_session = true;
                         }
@@ -1169,7 +1307,11 @@ impl Connector {
 
         // Only handle Echo Request (type 8, code 0)
         if icmp_type != 8 || icmp_code != 0 {
-            log::trace!("ICMP type={} code={}, ignoring (only Echo Request handled)", icmp_type, icmp_code);
+            log::trace!(
+                "ICMP type={} code={}, ignoring (only Echo Request handled)",
+                icmp_type,
+                icmp_code
+            );
             return Ok(());
         }
 
@@ -1177,14 +1319,16 @@ impl Connector {
 
         log::debug!(
             "ICMP Echo Request: {} -> {} ({} bytes)",
-            src_ip, dst_ip, icmp_data.len()
+            src_ip,
+            dst_ip,
+            icmp_data.len()
         );
 
         // Build Echo Reply: swap src/dst IP, change type 8→0, recalculate checksum
-        let reply = build_icmp_reply(dst_ip, src_ip, icmp_data);
-        self.send_ip_packet(&reply)?;
-
-        log::trace!("ICMP Echo Reply sent: {} -> {}", dst_ip, src_ip);
+        if let Some(reply) = build_icmp_reply(dst_ip, src_ip, icmp_data) {
+            self.send_ip_packet(&reply)?;
+            log::trace!("ICMP Echo Reply sent: {} -> {}", dst_ip, src_ip);
+        }
         Ok(())
     }
 
@@ -1217,43 +1361,63 @@ impl Connector {
                     Ok(0) => {
                         // Backend closed connection
                         packets_to_send.push(build_tcp_packet(
-                            session.service_ip, session.service_port,
-                            session.agent_ip, session.agent_port,
-                            session.our_seq, session.their_seq,
-                            TCP_FIN | TCP_ACK, 65535, &[],
+                            session.service_ip,
+                            session.service_port,
+                            session.agent_ip,
+                            session.agent_port,
+                            session.our_seq,
+                            session.their_seq,
+                            TCP_FIN | TCP_ACK,
+                            65535,
+                            &[],
                         ));
                         to_remove.push(*flow_key);
                         log::debug!(
                             "TCP backend closed for {}:{}",
-                            session.agent_ip, session.agent_port
+                            session.agent_ip,
+                            session.agent_port
                         );
                         break;
                     }
                     Ok(n) => {
                         packets_to_send.push(build_tcp_packet(
-                            session.service_ip, session.service_port,
-                            session.agent_ip, session.agent_port,
-                            session.our_seq, session.their_seq,
-                            TCP_PSH | TCP_ACK, 65535, &read_buf[..n],
+                            session.service_ip,
+                            session.service_port,
+                            session.agent_ip,
+                            session.agent_port,
+                            session.our_seq,
+                            session.their_seq,
+                            TCP_PSH | TCP_ACK,
+                            65535,
+                            &read_buf[..n],
                         ));
                         session.our_seq = session.our_seq.wrapping_add(n as u32);
                         session.last_active = Instant::now();
                         log::trace!(
                             "TCP backend -> agent: {} bytes for {}:{}",
-                            n, session.agent_ip, session.agent_port
+                            n,
+                            session.agent_ip,
+                            session.agent_port
                         );
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(e) => {
                         log::debug!(
                             "TCP backend read error for {}:{}: {}",
-                            session.agent_ip, session.agent_port, e
+                            session.agent_ip,
+                            session.agent_port,
+                            e
                         );
                         packets_to_send.push(build_tcp_packet(
-                            session.service_ip, session.service_port,
-                            session.agent_ip, session.agent_port,
-                            session.our_seq, session.their_seq,
-                            TCP_RST | TCP_ACK, 0, &[],
+                            session.service_ip,
+                            session.service_port,
+                            session.agent_ip,
+                            session.agent_port,
+                            session.our_seq,
+                            session.their_seq,
+                            TCP_RST | TCP_ACK,
+                            0,
+                            &[],
                         ));
                         to_remove.push(*flow_key);
                         break;
@@ -1296,7 +1460,11 @@ impl Connector {
         Ok(())
     }
 
-    fn send_return_traffic(&mut self, payload: &[u8], from: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    fn send_return_traffic(
+        &mut self,
+        payload: &[u8],
+        from: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Find matching flow (any flow for now - simplified MVP)
         // In a real implementation, we'd track the original src/dst properly
 
@@ -1325,7 +1493,9 @@ impl Connector {
                     Ok(_) => {
                         log::trace!(
                             "Sent return packet: {} bytes to agent ({}:{})",
-                            packet.len(), orig_src_ip, orig_src_port
+                            packet.len(),
+                            orig_src_ip,
+                            orig_src_port
                         );
                     }
                     Err(e) => {
@@ -1357,7 +1527,10 @@ impl Connector {
             msg.push(id_bytes.len() as u8);
             msg.extend_from_slice(id_bytes);
 
-            log::debug!("DATAGRAM max_writable_len={:?}", conn.dgram_max_writable_len());
+            log::debug!(
+                "DATAGRAM max_writable_len={:?}",
+                conn.dgram_max_writable_len()
+            );
 
             match conn.dgram_send(&msg) {
                 Ok(_) => {
@@ -1386,13 +1559,13 @@ impl Connector {
 
         // Clean up old flow mappings (older than 60 seconds)
         let now = Instant::now();
-        self.flow_map.retain(|_, ts| now.duration_since(*ts).as_secs() < 60);
+        self.flow_map
+            .retain(|_, ts| now.duration_since(*ts).as_secs() < 60);
 
         // Clean up idle TCP sessions
         let tcp_timeout = TCP_SESSION_TIMEOUT_SECS;
-        self.tcp_sessions.retain(|_, session| {
-            now.duration_since(session.last_active).as_secs() < tcp_timeout
-        });
+        self.tcp_sessions
+            .retain(|_, session| now.duration_since(session.last_active).as_secs() < tcp_timeout);
     }
 
     /// Send a QUIC PING to keep the Intermediate connection alive
@@ -1421,7 +1594,8 @@ impl Connector {
             loop {
                 match conn.send(&mut self.send_buf) {
                     Ok((len, send_info)) => {
-                        self.quic_socket.send_to(&self.send_buf[..len], send_info.to)?;
+                        self.quic_socket
+                            .send_to(&self.send_buf[..len], send_info.to)?;
                     }
                     Err(quiche::Error::Done) => break,
                     Err(e) => {
@@ -1437,7 +1611,8 @@ impl Connector {
             loop {
                 match client.conn.send(&mut self.send_buf) {
                     Ok((len, send_info)) => {
-                        self.quic_socket.send_to(&self.send_buf[..len], send_info.to)?;
+                        self.quic_socket
+                            .send_to(&self.send_buf[..len], send_info.to)?;
                     }
                     Err(quiche::Error::Done) => break,
                     Err(e) => {
@@ -1452,7 +1627,8 @@ impl Connector {
     }
 
     fn cleanup_closed_p2p(&mut self) {
-        let closed: Vec<_> = self.p2p_clients
+        let closed: Vec<_> = self
+            .p2p_clients
             .iter()
             .filter(|(_, c)| c.conn.is_closed())
             .map(|(id, _)| id.clone())
@@ -1468,7 +1644,9 @@ impl Connector {
     /// Process signaling streams from Intermediate Server
     fn process_signaling_streams(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Check if we have an established connection
-        let has_conn = self.intermediate_conn.as_ref()
+        let has_conn = self
+            .intermediate_conn
+            .as_ref()
             .map(|c| c.is_established())
             .unwrap_or(false);
 
@@ -1494,7 +1672,8 @@ impl Connector {
                             if len == 0 {
                                 break;
                             }
-                            self.signaling_buffer.extend_from_slice(&self.stream_buf[..len]);
+                            self.signaling_buffer
+                                .extend_from_slice(&self.stream_buf[..len]);
                         }
                         Err(quiche::Error::Done) => break,
                         Err(e) => {
@@ -1550,7 +1729,10 @@ impl Connector {
     }
 
     /// Handle a decoded signaling message
-    fn handle_signaling_message(&mut self, msg: SignalingMessage) -> Result<(), Box<dyn std::error::Error>> {
+    fn handle_signaling_message(
+        &mut self,
+        msg: SignalingMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match msg {
             SignalingMessage::CandidateOffer {
                 session_id,
@@ -1649,7 +1831,10 @@ impl Connector {
 
             SignalingMessage::CandidateAnswer { session_id, .. } => {
                 // Connector shouldn't receive CandidateAnswer (that's what it sends)
-                log::warn!("Unexpected CandidateAnswer received for session {}", session_id);
+                log::warn!(
+                    "Unexpected CandidateAnswer received for session {}",
+                    session_id
+                );
             }
 
             SignalingMessage::Error {
@@ -1675,7 +1860,10 @@ impl Connector {
     }
 
     /// Send a signaling message to the Intermediate Server
-    fn send_signaling_message(&mut self, msg: &SignalingMessage) -> Result<(), Box<dyn std::error::Error>> {
+    fn send_signaling_message(
+        &mut self,
+        msg: &SignalingMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let encoded = encode_message(msg).map_err(|e| format!("encode error: {}", e))?;
 
         if let Some(ref mut conn) = self.intermediate_conn {
@@ -1718,7 +1906,7 @@ fn build_udp_packet(
     packet[6..8].copy_from_slice(&[0x40, 0x00]); // Flags (Don't Fragment) + Fragment Offset
     packet[8] = 64; // TTL
     packet[9] = 17; // Protocol (UDP)
-    // packet[10..12] = checksum (leave as 0 for now)
+                    // packet[10..12] = checksum (leave as 0 for now)
     packet[12..16].copy_from_slice(&src_ip.octets());
     packet[16..20].copy_from_slice(&dst_ip.octets());
 
@@ -1758,6 +1946,7 @@ fn ip_checksum(header: &[u8]) -> u16 {
     !sum as u16
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_tcp_packet(
     src_ip: Ipv4Addr,
     src_port: u16,
@@ -1839,7 +2028,16 @@ fn tcp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
     !sum as u16
 }
 
-fn build_icmp_reply(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, echo_request: &[u8]) -> Vec<u8> {
+fn build_icmp_reply(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, echo_request: &[u8]) -> Option<Vec<u8>> {
+    // B1: Validate minimum ICMP echo length (type + code + checksum + id + seq = 8 bytes)
+    if echo_request.len() < 8 {
+        log::warn!(
+            "Dropping malformed ICMP packet ({} bytes, need >= 8)",
+            echo_request.len()
+        );
+        return None;
+    }
+
     let total_len = 20 + echo_request.len();
     let mut packet = vec![0u8; total_len];
 
@@ -1865,7 +2063,7 @@ fn build_icmp_reply(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, echo_request: &[u8]) -> 
     let icmp_cksum = icmp_checksum(&packet[20..]);
     packet[22..24].copy_from_slice(&icmp_cksum.to_be_bytes());
 
-    packet
+    Some(packet)
 }
 
 fn icmp_checksum(data: &[u8]) -> u16 {
@@ -1925,7 +2123,7 @@ mod tests {
 
         // Verify IP header
         assert_eq!(packet[0], 0x45); // IPv4, IHL=5
-        assert_eq!(packet[9], 17);   // UDP protocol
+        assert_eq!(packet[9], 17); // UDP protocol
 
         // Verify UDP header
         let src_port = u16::from_be_bytes([packet[20], packet[21]]);
@@ -1984,7 +2182,7 @@ mod tests {
 
         // IP header checks
         assert_eq!(packet[0], 0x45); // IPv4, IHL=5
-        assert_eq!(packet[9], 6);    // TCP protocol
+        assert_eq!(packet[9], 6); // TCP protocol
         assert_eq!(packet.len(), 40); // 20 IP + 20 TCP, no payload
 
         // TCP header checks
@@ -2051,7 +2249,7 @@ mod tests {
     fn test_max_tcp_payload_fits_datagram() {
         // MAX_TCP_PAYLOAD + IP header + TCP header must fit in MAX_DATAGRAM_SIZE
         assert_eq!(MAX_TCP_PAYLOAD + 40, MAX_DATAGRAM_SIZE);
-        assert!(MAX_TCP_PAYLOAD > 0);
+        assert_eq!(MAX_TCP_PAYLOAD, 1310);
     }
 
     #[test]
@@ -2059,8 +2257,8 @@ mod tests {
         // Build a mock Echo Request ICMP payload:
         // Type=8, Code=0, Checksum=XX, Identifier=0x1234, Sequence=0x0001, Data="ping"
         let mut echo_request = vec![
-            8,    // Type: Echo Request
-            0,    // Code
+            8, // Type: Echo Request
+            0, // Code
             0, 0, // Checksum (placeholder)
             0x12, 0x34, // Identifier
             0x00, 0x01, // Sequence
@@ -2075,7 +2273,8 @@ mod tests {
             Ipv4Addr::new(10, 100, 0, 1),
             Ipv4Addr::new(192, 168, 1, 100),
             &echo_request,
-        );
+        )
+        .expect("valid ICMP echo should produce reply");
 
         // IP header checks
         assert_eq!(reply[0], 0x45);
@@ -2105,8 +2304,8 @@ mod tests {
     #[test]
     fn test_icmp_checksum_validity() {
         let data = [
-            0u8, 0,    // Type: Echo Reply, Code: 0
-            0, 0,      // Checksum (will be computed)
+            0u8, 0, // Type: Echo Reply, Code: 0
+            0, 0, // Checksum (will be computed)
             0x12, 0x34, // Identifier
             0x00, 0x01, // Sequence
             b't', b'e', b's', b't', // Data
@@ -2116,6 +2315,10 @@ mod tests {
         let mut with_cksum = data.to_vec();
         with_cksum[2..4].copy_from_slice(&cksum.to_be_bytes());
 
-        assert_eq!(icmp_checksum(&with_cksum), 0, "ICMP checksum should verify to 0");
+        assert_eq!(
+            icmp_checksum(&with_cksum),
+            0,
+            "ICMP checksum should verify to 0"
+        );
     }
 }

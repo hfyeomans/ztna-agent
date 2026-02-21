@@ -193,8 +193,8 @@ pub fn decode_message(buf: &[u8]) -> Result<(SignalingMessage, usize), DecodeErr
 /// Decode error types
 #[derive(Debug)]
 pub enum DecodeError {
-    /// Need more bytes
-    Incomplete(usize),
+    /// Need more bytes (value = bytes still needed)
+    Incomplete(#[allow(dead_code)] usize),
     /// Message too large
     TooLarge(usize),
     /// Invalid format
@@ -223,7 +223,8 @@ pub enum P2PSessionState {
 /// A P2P signaling session from the Connector's perspective
 #[derive(Debug)]
 pub struct P2PSession {
-    /// Session ID
+    /// Session ID (used for session tracking in P2P hole punching)
+    #[allow(dead_code)]
     pub session_id: u64,
     /// Agent's candidates
     pub agent_candidates: Vec<Candidate>,
@@ -265,7 +266,8 @@ impl P2PSession {
         self.state = P2PSessionState::Punching;
     }
 
-    /// Check if punching should start now
+    /// Check if punching should start now (used during P2P connectivity checks)
+    #[allow(dead_code)]
     pub fn should_start_punching(&self) -> bool {
         match (self.state, self.punch_start_time) {
             (P2PSessionState::Punching, Some(start)) => Instant::now() >= start,
@@ -309,7 +311,8 @@ impl P2PSessionManager {
         self.sessions.insert(session_id, session);
     }
 
-    /// Get a session by ID
+    /// Get a session by ID (used during P2P connectivity checks)
+    #[allow(dead_code)]
     pub fn get_session(&self, session_id: u64) -> Option<&P2PSession> {
         self.sessions.get(&session_id)
     }
@@ -350,16 +353,6 @@ impl Default for P2PSessionManager {
 // ============================================================================
 // Candidate Gathering Helpers
 // ============================================================================
-
-/// Gather host candidates from local addresses
-pub fn gather_local_candidates(bind_addr: SocketAddr) -> Vec<Candidate> {
-    let mut candidates = Vec::new();
-
-    // Add host candidate for the bind address
-    candidates.push(Candidate::host(bind_addr));
-
-    candidates
-}
 
 /// Gather candidates including observed (server-reflexive) address
 pub fn gather_candidates_with_observed(
@@ -416,7 +409,8 @@ mod tests {
 
         // Update session
         if let Some(session) = manager.get_session_mut(100) {
-            session.set_local_candidates(vec![Candidate::host("192.168.1.1:5000".parse().unwrap())]);
+            session
+                .set_local_candidates(vec![Candidate::host("192.168.1.1:5000".parse().unwrap())]);
             assert_eq!(session.state, P2PSessionState::AwaitingStart);
         }
 

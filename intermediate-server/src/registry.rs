@@ -93,7 +93,12 @@ impl Registry {
         if let Some(service_id) = self.connector_services.remove(conn_id) {
             // Only remove from connectors if this connection is still the active one.
             // A newer Connector may have already taken over the service.
-            if self.connectors.get(&service_id).map(|c| c == conn_id).unwrap_or(false) {
+            if self
+                .connectors
+                .get(&service_id)
+                .map(|c| c == conn_id)
+                .unwrap_or(false)
+            {
                 self.connectors.remove(&service_id);
             }
             log::info!(
@@ -143,11 +148,13 @@ impl Registry {
     }
 
     /// Get the number of registered Connectors
+    #[cfg(test)]
     pub fn connector_count(&self) -> usize {
         self.connectors.len()
     }
 
     /// Get the number of registered Agents
+    #[cfg(test)]
     pub fn agent_count(&self) -> usize {
         self.agent_targets.len()
     }
@@ -182,7 +189,11 @@ mod tests {
         let connector_id = make_conn_id(1);
         let agent_id = make_conn_id(2);
 
-        registry.register(connector_id.clone(), ClientType::Connector, "web-app".to_string());
+        registry.register(
+            connector_id.clone(),
+            ClientType::Connector,
+            "web-app".to_string(),
+        );
         registry.register(agent_id.clone(), ClientType::Agent, "web-app".to_string());
 
         // Agent → Connector
@@ -205,7 +216,11 @@ mod tests {
         let connector_id = make_conn_id(1);
         let agent_id = make_conn_id(2);
 
-        registry.register(connector_id.clone(), ClientType::Connector, "web-app".to_string());
+        registry.register(
+            connector_id.clone(),
+            ClientType::Connector,
+            "web-app".to_string(),
+        );
         registry.register(agent_id.clone(), ClientType::Agent, "database".to_string());
 
         assert_eq!(registry.find_destination(&agent_id), None);
@@ -218,7 +233,11 @@ mod tests {
         let connector_id = make_conn_id(1);
         let agent_id = make_conn_id(2);
 
-        registry.register(connector_id.clone(), ClientType::Connector, "web-app".to_string());
+        registry.register(
+            connector_id.clone(),
+            ClientType::Connector,
+            "web-app".to_string(),
+        );
         registry.register(agent_id.clone(), ClientType::Agent, "web-app".to_string());
 
         registry.unregister(&connector_id);
@@ -234,7 +253,11 @@ mod tests {
         let connector_id = make_conn_id(1);
         let agent_id = make_conn_id(2);
 
-        registry.register(connector_id.clone(), ClientType::Connector, "web-app".to_string());
+        registry.register(
+            connector_id.clone(),
+            ClientType::Connector,
+            "web-app".to_string(),
+        );
         registry.register(agent_id.clone(), ClientType::Agent, "web-app".to_string());
 
         registry.unregister(&agent_id);
@@ -252,11 +275,23 @@ mod tests {
         let agent_id = make_conn_id(3);
 
         // Register two Connectors for different services
-        registry.register(echo_connector_id.clone(), ClientType::Connector, "echo-service".to_string());
-        registry.register(web_connector_id.clone(), ClientType::Connector, "web-app".to_string());
+        registry.register(
+            echo_connector_id.clone(),
+            ClientType::Connector,
+            "echo-service".to_string(),
+        );
+        registry.register(
+            web_connector_id.clone(),
+            ClientType::Connector,
+            "web-app".to_string(),
+        );
 
         // Register Agent for both services
-        registry.register(agent_id.clone(), ClientType::Agent, "echo-service".to_string());
+        registry.register(
+            agent_id.clone(),
+            ClientType::Agent,
+            "echo-service".to_string(),
+        );
         registry.register(agent_id.clone(), ClientType::Agent, "web-app".to_string());
 
         // Explicit service routing
@@ -288,7 +323,11 @@ mod tests {
         let mut registry = Registry::new();
 
         let agent_id = make_conn_id(1);
-        registry.register(agent_id.clone(), ClientType::Agent, "echo-service".to_string());
+        registry.register(
+            agent_id.clone(),
+            ClientType::Agent,
+            "echo-service".to_string(),
+        );
         registry.register(agent_id.clone(), ClientType::Agent, "web-app".to_string());
 
         assert_eq!(
@@ -311,8 +350,16 @@ mod tests {
         let agent_id = make_conn_id(3);
 
         // Old Connector registers for echo-service
-        registry.register(old_connector.clone(), ClientType::Connector, "echo-service".to_string());
-        registry.register(agent_id.clone(), ClientType::Agent, "echo-service".to_string());
+        registry.register(
+            old_connector.clone(),
+            ClientType::Connector,
+            "echo-service".to_string(),
+        );
+        registry.register(
+            agent_id.clone(),
+            ClientType::Agent,
+            "echo-service".to_string(),
+        );
 
         // Verify routing works
         assert_eq!(
@@ -321,7 +368,11 @@ mod tests {
         );
 
         // New Connector takes over echo-service (e.g., reconnect)
-        registry.register(new_connector.clone(), ClientType::Connector, "echo-service".to_string());
+        registry.register(
+            new_connector.clone(),
+            ClientType::Connector,
+            "echo-service".to_string(),
+        );
 
         // Verify routing points to new Connector
         assert_eq!(

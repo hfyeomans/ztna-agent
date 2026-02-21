@@ -64,29 +64,23 @@ mod tests {
     fn test_build_observed_address() {
         // Test case from research.md: 203.0.113.5:54321
         // Expected: 01 CB 00 71 05 D4 31
-        let addr = SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::new(203, 0, 113, 5),
-            54321,
-        ));
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 54321));
 
         let msg = build_observed_address(addr);
 
         assert_eq!(msg.len(), 7);
         assert_eq!(msg[0], 0x01); // Type
-        assert_eq!(msg[1], 203);  // IP octet 1
-        assert_eq!(msg[2], 0);    // IP octet 2
-        assert_eq!(msg[3], 113);  // IP octet 3
-        assert_eq!(msg[4], 5);    // IP octet 4
+        assert_eq!(msg[1], 203); // IP octet 1
+        assert_eq!(msg[2], 0); // IP octet 2
+        assert_eq!(msg[3], 113); // IP octet 3
+        assert_eq!(msg[4], 5); // IP octet 4
         assert_eq!(msg[5], 0xD4); // Port high byte (54321 = 0xD431)
         assert_eq!(msg[6], 0x31); // Port low byte
     }
 
     #[test]
     fn test_localhost_address() {
-        let addr = SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::new(127, 0, 0, 1),
-            4433,
-        ));
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 4433));
 
         let msg = build_observed_address(addr);
 

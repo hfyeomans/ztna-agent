@@ -99,7 +99,8 @@ impl Candidate {
         related_address: Option<SocketAddr>,
     ) -> Self {
         let local_pref = local_preference(&address);
-        let priority = calculate_priority(candidate_type.type_preference(), local_pref, COMPONENT_ID);
+        let priority =
+            calculate_priority(candidate_type.type_preference(), local_pref, COMPONENT_ID);
         let foundation = generate_foundation(candidate_type, &address);
 
         Self {
@@ -118,7 +119,11 @@ impl Candidate {
 
     /// Create a server reflexive candidate from QAD response
     pub fn server_reflexive(public_address: SocketAddr, base_address: SocketAddr) -> Self {
-        Self::new(CandidateType::ServerReflexive, public_address, Some(base_address))
+        Self::new(
+            CandidateType::ServerReflexive,
+            public_address,
+            Some(base_address),
+        )
     }
 
     /// Create a relay candidate (via Intermediate)
@@ -204,7 +209,10 @@ fn generate_foundation(candidate_type: CandidateType, addr: &SocketAddr) -> Stri
 /// # Arguments
 /// * `local_addrs` - List of local addresses from interface enumeration
 /// * `include_loopback` - Whether to include loopback addresses (for testing)
-pub fn gather_host_candidates(local_addrs: &[SocketAddr], include_loopback: bool) -> Vec<Candidate> {
+pub fn gather_host_candidates(
+    local_addrs: &[SocketAddr],
+    include_loopback: bool,
+) -> Vec<Candidate> {
     local_addrs
         .iter()
         .filter(|addr| include_loopback || !addr.ip().is_loopback())
@@ -233,10 +241,7 @@ pub fn gather_reflexive_candidate(
 /// # Arguments
 /// * `intermediate_addr` - Address of the Intermediate server
 /// * `base_addr` - Local address used to connect to Intermediate
-pub fn gather_relay_candidate(
-    intermediate_addr: SocketAddr,
-    base_addr: SocketAddr,
-) -> Candidate {
+pub fn gather_relay_candidate(intermediate_addr: SocketAddr, base_addr: SocketAddr) -> Candidate {
     Candidate::relay(intermediate_addr, base_addr)
 }
 
@@ -321,7 +326,7 @@ mod tests {
 
         // Relay candidate (lowest type pref)
         let relay_priority = calculate_priority(0, 65535, 1);
-        assert_eq!(relay_priority, (0 << 24) | (65535 << 8) | 255);
+        assert_eq!(relay_priority, (65535 << 8) | 255);
 
         // Host > srflx > prflx > relay
         let srflx_priority = calculate_priority(100, 65535, 1);
@@ -402,7 +407,10 @@ mod tests {
     #[test]
     fn test_sort_candidates_by_priority() {
         let mut candidates = vec![
-            Candidate::relay("10.0.0.1:4433".parse().unwrap(), "192.168.1.1:5000".parse().unwrap()),
+            Candidate::relay(
+                "10.0.0.1:4433".parse().unwrap(),
+                "192.168.1.1:5000".parse().unwrap(),
+            ),
             Candidate::host("192.168.1.100:50000".parse().unwrap()),
             Candidate::server_reflexive(
                 "203.0.113.50:50000".parse().unwrap(),

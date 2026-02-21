@@ -1,0 +1,27 @@
+included:
+  - ios-macos
+
+excluded:
+  - "**/DerivedData"
+  - "**/build"
+  - "**/.build"
+
+disabled_rules:
+  - line_length
+  - trailing_whitespace
+  - type_body_length
+  - file_length
+  - function_body_length
+  - cyclomatic_complexity
+  - nesting
+  - identifier_name
+  - force_cast
+  - todo
+
+opt_in_rules:
+  - empty_count
+  - closure_spacing
+  - redundant_nil_coalescing
+  - first_where
+
+reporter: xcode

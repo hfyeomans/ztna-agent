@@ -192,7 +192,8 @@ verify_infrastructure() {
 
     # Check NAT is working
     log_info "Checking NAT configuration..."
-    local connector_ip=$(docker logs ztna-app-connector 2>&1 | grep "QAD: Observed address" | tail -1 | grep -oE '172\.20\.0\.[0-9]+' || echo "")
+    local connector_ip
+    connector_ip=$(docker logs ztna-app-connector 2>&1 | grep "QAD: Observed address" | tail -1 | grep -oE '172\.20\.0\.[0-9]+' || echo "")
     if [[ "$connector_ip" == "172.20.0.3" ]]; then
         log_success "NAT working: Connector appears as $connector_ip (NATted)"
     else
@@ -214,7 +215,6 @@ run_demo_test() {
     # Run the quic-client test
     local output
     output=$(docker compose --profile test run --rm quic-client 2>&1)
-    local exit_code=$?
 
     echo "$output"
     echo ""

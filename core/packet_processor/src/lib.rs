@@ -5,6 +5,12 @@
 //! - QUIC tunnel management via quiche
 //! - Multi-connection support (Intermediate + P2P)
 //! - FFI interface for Swift integration
+//!
+//! All public functions in this crate are `unsafe extern "C"` FFI entry points
+//! called from Swift via the C bridging header. Safety requirements are
+//! documented on each function; the blanket allow avoids repetitive per-function
+//! `# Safety` doc sections that would all say the same thing.
+#![allow(clippy::missing_safety_doc)]
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -38,6 +44,12 @@ const ALPN_PROTOCOL: &[u8] = b"ztna-v1";
 
 /// Registration message type for Agent (matches intermediate-server)
 const REG_TYPE_AGENT: u8 = 0x10;
+
+/// QAD observed address message type
+const QAD_OBSERVED_ADDRESS: u8 = 0x01;
+
+/// Maximum queued received datagrams before dropping oldest (prevents OOM in NE)
+const MAX_QUEUED_DATAGRAMS: usize = 4096;
 
 // ============================================================================
 // FFI Enums
@@ -227,7 +239,8 @@ impl Agent {
         let conn = quiche::connect(
             Some("ztna-server"), // SNI
             &scid,
-            self.local_addr.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap()),
+            self.local_addr
+                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap()),
             server_addr,
             &mut self.config,
         )?;
@@ -258,7 +271,8 @@ impl Agent {
         let conn = quiche::connect(
             Some("ztna-connector"), // SNI
             &scid,
-            self.local_addr.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap()),
+            self.local_addr
+                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap()),
             connector_addr,
             &mut self.config,
         )?;
@@ -294,7 +308,9 @@ impl Agent {
         // Create recv info
         let recv_info = quiche::RecvInfo {
             from,
-            to: self.local_addr.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap()),
+            to: self
+                .local_addr
+                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap()),
         };
 
         // Feed data to QUIC connection (quiche requires mutable buffer for in-place decryption)
@@ -364,7 +380,10 @@ impl Agent {
 
     /// Queue an IP packet for sending via DATAGRAM (Intermediate connection)
     fn send_datagram(&mut self, data: &[u8]) -> Result<(), quiche::Error> {
-        let conn = self.intermediate_conn.as_mut().ok_or(quiche::Error::InvalidState)?;
+        let conn = self
+            .intermediate_conn
+            .as_mut()
+            .ok_or(quiche::Error::InvalidState)?;
 
         if !conn.is_established() {
             return Err(quiche::Error::InvalidState);
@@ -380,11 +399,19 @@ impl Agent {
     /// Dequeue next received IP packet (from tunnel)
     ///
     /// Returns the number of bytes written, or None if queue is empty.
+    /// Oversized datagrams that exceed the output buffer are dropped to
+    /// prevent head-of-line blocking (the old behavior silently blocked
+    /// the entire queue forever).
     fn recv_datagram(&mut self, out: &mut [u8]) -> Option<usize> {
         let data = self.received_datagrams.pop_front()?;
         if data.len() > out.len() {
-            // Buffer too small — put it back
-            self.received_datagrams.push_front(data);
+            // Drop oversized datagram to prevent head-of-line blocking.
+            // Returning None with the packet removed lets subsequent packets through.
+            log::warn!(
+                "Dropping oversized datagram ({} bytes, buffer {})",
+                data.len(),
+                out.len()
+            );
             return None;
         }
         out[..data.len()].copy_from_slice(&data);
@@ -399,7 +426,10 @@ impl Agent {
     ///
     /// Message format: [0x10, service_id_len, service_id_bytes...]
     fn register(&mut self, service_id: &str) -> Result<(), quiche::Error> {
-        let conn = self.intermediate_conn.as_mut().ok_or(quiche::Error::InvalidState)?;
+        let conn = self
+            .intermediate_conn
+            .as_mut()
+            .ok_or(quiche::Error::InvalidState)?;
 
         if !conn.is_established() {
             return Err(quiche::Error::InvalidState);
@@ -427,7 +457,10 @@ impl Agent {
     /// This should be called periodically (e.g., every 10 seconds) to keep the
     /// QUIC connection alive when there's no other traffic.
     fn send_intermediate_keepalive(&mut self) -> Result<(), quiche::Error> {
-        let conn = self.intermediate_conn.as_mut().ok_or(quiche::Error::InvalidState)?;
+        let conn = self
+            .intermediate_conn
+            .as_mut()
+            .ok_or(quiche::Error::InvalidState)?;
 
         if !conn.is_established() {
             return Err(quiche::Error::InvalidState);
@@ -440,8 +473,14 @@ impl Agent {
     }
 
     /// Queue an IP packet for sending via DATAGRAM (P2P connection)
-    fn send_datagram_p2p(&mut self, data: &[u8], connector_addr: SocketAddr) -> Result<(), quiche::Error> {
-        let p2p = self.p2p_conns.get_mut(&connector_addr)
+    fn send_datagram_p2p(
+        &mut self,
+        data: &[u8],
+        connector_addr: SocketAddr,
+    ) -> Result<(), quiche::Error> {
+        let p2p = self
+            .p2p_conns
+            .get_mut(&connector_addr)
             .ok_or(quiche::Error::InvalidState)?;
 
         if !p2p.conn.is_established() {
@@ -492,7 +531,8 @@ impl Agent {
 
     /// Check if a P2P connection is established to the given address
     fn is_p2p_connected(&self, connector_addr: SocketAddr) -> bool {
-        self.p2p_conns.get(&connector_addr)
+        self.p2p_conns
+            .get(&connector_addr)
             .map(|p2p| p2p.conn.is_established())
             .unwrap_or(false)
     }
@@ -506,8 +546,6 @@ impl Agent {
                 AgentState::Draining
             } else if conn.is_established() {
                 AgentState::Connected
-            } else if conn.is_in_early_data() {
-                AgentState::Connecting
             } else {
                 AgentState::Connecting
             };
@@ -527,17 +565,20 @@ impl Agent {
             let data = &self.scratch_buffer[..len];
 
             // Check for QAD message (simple protocol: first byte = message type)
-            if !data.is_empty() && data[0] == 0x01 {
+            if !data.is_empty() && data[0] == QAD_OBSERVED_ADDRESS {
                 // QAD OBSERVED_ADDRESS message
                 // Format: 0x01 | 4 bytes IPv4 | 2 bytes port (big endian)
                 if len >= 7 {
                     let ip = std::net::Ipv4Addr::new(data[1], data[2], data[3], data[4]);
                     let port = u16::from_be_bytes([data[5], data[6]]);
-                    self.observed_address =
-                        Some(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+                    self.observed_address = Some(SocketAddr::new(std::net::IpAddr::V4(ip), port));
                 }
             } else if len > 0 {
                 // Tunneled IP packet — queue for Swift to read via agent_recv_datagram()
+                // Enforce queue bounds to prevent OOM in Network Extension (~50MB limit)
+                if self.received_datagrams.len() >= MAX_QUEUED_DATAGRAMS {
+                    self.received_datagrams.pop_front(); // drop oldest
+                }
                 self.received_datagrams.push_back(data.to_vec());
             }
         }
@@ -557,15 +598,18 @@ impl Agent {
         // Now process collected datagrams (avoiding borrow issues)
         for data in received_datagrams {
             // Check for QAD message (Connector sends its observed address)
-            if !data.is_empty() && data[0] == 0x01 {
+            if !data.is_empty() && data[0] == QAD_OBSERVED_ADDRESS {
                 // QAD from Connector - we could use this for diagnostics
                 // but for now we ignore it (we already know our own address from Intermediate)
                 continue;
             }
 
             // Check for keepalive message
-            if data.len() >= 5 && (data[0] == p2p::KEEPALIVE_REQUEST || data[0] == p2p::KEEPALIVE_RESPONSE) {
-                if let Some(response) = self.path_manager.process_keepalive(*connector_addr, &data) {
+            if data.len() >= 5
+                && (data[0] == p2p::KEEPALIVE_REQUEST || data[0] == p2p::KEEPALIVE_RESPONSE)
+            {
+                if let Some(response) = self.path_manager.process_keepalive(*connector_addr, &data)
+                {
                     // Queue keepalive response to be sent
                     if let Some(p2p) = self.p2p_conns.get_mut(connector_addr) {
                         let _ = p2p.conn.dgram_send(&response);
@@ -660,7 +704,8 @@ impl Agent {
         loop {
             match conn.stream_recv(0, &mut self.stream_buffer) {
                 Ok((len, _fin)) => {
-                    self.signaling_buffer.extend_from_slice(&self.stream_buffer[..len]);
+                    self.signaling_buffer
+                        .extend_from_slice(&self.stream_buffer[..len]);
                 }
                 Err(quiche::Error::Done) => break,
                 Err(_) => break,
@@ -789,7 +834,7 @@ impl Agent {
     }
 
     /// Get the current active path address for sending data
-    fn active_send_addr(&self) -> Option<SocketAddr> {
+    fn _active_send_addr(&self) -> Option<SocketAddr> {
         self.path_manager.active_addr()
     }
 }
@@ -945,12 +990,15 @@ pub unsafe extern "C" fn agent_set_local_addr(
         let ip_bytes = slice::from_raw_parts(ip, 4);
         let addr = SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3],
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3],
             )),
             port,
         );
         agent.local_addr = Some(addr);
-        eprintln!("[agent] local_addr set to {}", addr);
+        log::info!("[agent] local_addr set to {}", addr);
         AgentResult::Ok
     }));
 
@@ -964,7 +1012,8 @@ pub unsafe extern "C" fn agent_is_connected(agent: *const Agent) -> bool {
         return false;
     }
 
-    panic::catch_unwind(AssertUnwindSafe(|| (*agent).state == AgentState::Connected)).unwrap_or(false)
+    panic::catch_unwind(AssertUnwindSafe(|| (*agent).state == AgentState::Connected))
+        .unwrap_or(false)
 }
 
 /// Register the Agent for a target service
@@ -1175,10 +1224,11 @@ pub unsafe extern "C" fn agent_recv_datagram(
         let agent = &mut *agent;
         let capacity = *out_len;
 
-        let mut buf = vec![0u8; capacity];
-        match agent.recv_datagram(&mut buf) {
+        // Write directly into the caller's buffer — avoids an intermediate
+        // Vec heap allocation + memcpy on every call (hot path).
+        let buf = slice::from_raw_parts_mut(out_data, capacity);
+        match agent.recv_datagram(buf) {
             Some(len) => {
-                std::ptr::copy_nonoverlapping(buf.as_ptr(), out_data, len);
                 *out_len = len;
                 AgentResult::Ok
             }
@@ -1294,12 +1344,10 @@ pub unsafe extern "C" fn agent_connect_p2p(
         // Parse socket address
         let addr: SocketAddr = match format!("{}:{}", host_str, port).parse() {
             Ok(a) => a,
-            Err(_) => {
-                match host_str.parse::<std::net::IpAddr>() {
-                    Ok(ip) => SocketAddr::new(ip, port),
-                    Err(_) => return AgentResult::InvalidAddress,
-                }
-            }
+            Err(_) => match host_str.parse::<std::net::IpAddr>() {
+                Ok(ip) => SocketAddr::new(ip, port),
+                Err(_) => return AgentResult::InvalidAddress,
+            },
         };
 
         // Initiate P2P connection
@@ -1338,12 +1386,10 @@ pub unsafe extern "C" fn agent_is_p2p_connected(
 
         let addr: SocketAddr = match format!("{}:{}", host_str, port).parse() {
             Ok(a) => a,
-            Err(_) => {
-                match host_str.parse::<std::net::IpAddr>() {
-                    Ok(ip) => SocketAddr::new(ip, port),
-                    Err(_) => return false,
-                }
-            }
+            Err(_) => match host_str.parse::<std::net::IpAddr>() {
+                Ok(ip) => SocketAddr::new(ip, port),
+                Err(_) => return false,
+            },
         };
 
         agent.is_p2p_connected(addr)
@@ -1370,7 +1416,12 @@ pub unsafe extern "C" fn agent_poll_p2p(
     out_ip: *mut u8,
     out_port: *mut u16,
 ) -> AgentResult {
-    if agent.is_null() || out_data.is_null() || out_len.is_null() || out_ip.is_null() || out_port.is_null() {
+    if agent.is_null()
+        || out_data.is_null()
+        || out_len.is_null()
+        || out_ip.is_null()
+        || out_port.is_null()
+    {
         return AgentResult::InvalidPointer;
     }
 
@@ -1547,7 +1598,12 @@ pub unsafe extern "C" fn agent_poll_binding_request(
     out_ip: *mut u8,
     out_port: *mut u16,
 ) -> AgentResult {
-    if agent.is_null() || out_data.is_null() || out_len.is_null() || out_ip.is_null() || out_port.is_null() {
+    if agent.is_null()
+        || out_data.is_null()
+        || out_len.is_null()
+        || out_ip.is_null()
+        || out_port.is_null()
+    {
         return AgentResult::InvalidPointer;
     }
 
@@ -1708,7 +1764,11 @@ pub unsafe extern "C" fn agent_get_path_stats(
     out_rtt_ms: *mut u64,
     out_in_fallback: *mut u8,
 ) -> AgentResult {
-    if agent.is_null() || out_missed_keepalives.is_null() || out_rtt_ms.is_null() || out_in_fallback.is_null() {
+    if agent.is_null()
+        || out_missed_keepalives.is_null()
+        || out_rtt_ms.is_null()
+        || out_in_fallback.is_null()
+    {
         return AgentResult::InvalidPointer;
     }
 
@@ -1735,18 +1795,16 @@ pub unsafe extern "C" fn agent_get_path_stats(
 /// This is the legacy function for simple packet filtering.
 /// For QUIC tunneling, use the agent_* functions instead.
 #[no_mangle]
-pub extern "C" fn process_packet(data: *const u8, len: libc::size_t) -> PacketAction {
+pub unsafe extern "C" fn process_packet(data: *const u8, len: libc::size_t) -> PacketAction {
     if data.is_null() || len == 0 {
         return PacketAction::Forward;
     }
 
     let result = panic::catch_unwind(|| {
-        let slice = unsafe { slice::from_raw_parts(data, len) };
+        let slice = slice::from_raw_parts(data, len);
 
-        match etherparse::SlicedPacket::from_ip(slice) {
-            Err(_) => PacketAction::Forward,
-            Ok(_) => PacketAction::Forward,
-        }
+        let _ = etherparse::SlicedPacket::from_ip(slice);
+        PacketAction::Forward
     });
 
     result.unwrap_or(PacketAction::Forward)
@@ -1763,7 +1821,7 @@ mod tests {
     #[test]
     fn test_process_packet() {
         let data = [0u8; 20];
-        let action = process_packet(data.as_ptr(), data.len());
+        let action = unsafe { process_packet(data.as_ptr(), data.len()) };
         assert_eq!(action, PacketAction::Forward);
     }
 
@@ -1891,16 +1949,24 @@ mod tests {
         assert_eq!(conn_coord.state(), HolePunchState::Signaling);
 
         // Agent gets offer
-        let offer = agent_coord.get_candidate_offer().expect("Should have offer");
+        let offer = agent_coord
+            .get_candidate_offer()
+            .expect("Should have offer");
 
         // Connector processes offer (simulates Intermediate forwarding)
-        conn_coord.process_signaling(&offer).expect("Should process offer");
+        conn_coord
+            .process_signaling(&offer)
+            .expect("Should process offer");
 
         // Connector generates answer
-        let answer = conn_coord.poll_signaling_message().expect("Should have answer");
+        let answer = conn_coord
+            .poll_signaling_message()
+            .expect("Should have answer");
 
         // Agent processes answer
-        agent_coord.process_signaling(&answer).expect("Should process answer");
+        agent_coord
+            .process_signaling(&answer)
+            .expect("Should process answer");
 
         // Both should have remote candidates now
         assert!(!agent_coord.remote_candidates().is_empty());
@@ -1918,15 +1984,19 @@ mod tests {
         assert_eq!(conn_coord.state(), HolePunchState::Checking);
 
         // Agent polls for binding request
-        let (addr, request_data) = agent_coord.poll_binding_request().expect("Should have request");
+        let (addr, request_data) = agent_coord
+            .poll_binding_request()
+            .expect("Should have request");
 
         // Connector processes binding request and responds
-        let response_data = conn_coord.process_binding(addr, &request_data)
+        let response_data = conn_coord
+            .process_binding(addr, &request_data)
             .expect("Should process binding")
             .expect("Should have response");
 
         // Agent processes binding response
-        agent_coord.process_binding("192.168.1.200:5000".parse().unwrap(), &response_data)
+        agent_coord
+            .process_binding("192.168.1.200:5000".parse().unwrap(), &response_data)
             .expect("Should process response");
 
         // Agent should be connected now
@@ -1936,7 +2006,7 @@ mod tests {
 
     #[test]
     fn test_path_manager_integration() {
-        use crate::p2p::{PathManager, ActivePath, PathState};
+        use crate::p2p::{ActivePath, PathManager};
 
         let mut manager = PathManager::new();
 
@@ -2028,7 +2098,7 @@ mod tests {
         expected.extend_from_slice(id_bytes);
 
         assert_eq!(expected[0], 0x10); // Agent type
-        assert_eq!(expected[1], 12);   // "echo-service" length
+        assert_eq!(expected[1], 12); // "echo-service" length
         assert_eq!(&expected[2..], b"echo-service");
     }
 
@@ -2062,21 +2132,25 @@ mod tests {
     fn test_agent_recv_datagram_buffer_too_small() {
         let mut agent = Agent::new().unwrap();
 
-        // Queue a packet larger than the output buffer
-        let pkt = vec![0x45; 100];
-        agent.received_datagrams.push_back(pkt.clone());
+        // Queue an oversized packet followed by a normal packet
+        let big_pkt = vec![0x45; 100];
+        let normal_pkt = vec![0x45; 10];
+        agent.received_datagrams.push_back(big_pkt);
+        agent.received_datagrams.push_back(normal_pkt.clone());
 
-        // Tiny buffer should fail and preserve the packet in the queue
+        // B2: Oversized datagram is DROPPED (not re-queued), returns None
         let mut tiny_buf = [0u8; 10];
         assert!(agent.recv_datagram(&mut tiny_buf).is_none());
 
-        // Packet should still be in the queue
+        // Oversized packet was dropped — queue should have only the normal packet
         assert_eq!(agent.received_datagrams.len(), 1);
 
-        // With adequate buffer, should succeed
-        let mut buf = [0u8; 1500];
-        let len = agent.recv_datagram(&mut buf).unwrap();
-        assert_eq!(len, 100);
-        assert_eq!(&buf[..len], &pkt);
+        // Normal packet should be retrievable
+        let len = agent.recv_datagram(&mut tiny_buf).unwrap();
+        assert_eq!(len, 10);
+        assert_eq!(&tiny_buf[..len], &normal_pkt);
+
+        // Queue empty
+        assert!(agent.recv_datagram(&mut tiny_buf).is_none());
     }
 }
