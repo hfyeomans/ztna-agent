@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-02-21 (Task 006 Phase 8.5: P2P→Relay failover validated, multi-service HTTP verified)
+**Last Updated:** 2026-02-21 (Task 006 PR #7 merged to master. Swift 6 modernization + linting infra complete.)
 
 ---
 
@@ -261,7 +261,9 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 **Key Files:**
 - `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (23 total: core lifecycle/connect/packet I/O/timeout + agent_register + keepalive + recv_datagram + 12 P2P: connections, hole punch, path resilience)
-- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration, keepalive, and return-path TUN injection
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration, keepalive, and return-path TUN injection (Swift 6, strict concurrency)
+- `ios-macos/ZtnaAgent/Extension/AgentFFI.swift` - Extracted FFI boundary types and helper functions
+- `ios-macos/ZtnaAgent/ZtnaAgent/TunnelUtilities.swift` - IPv4 parsing, routed datagram builder
 - `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager + configuration UI
 
 **Service Registration:**
@@ -327,7 +329,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 **Dependencies:** 004 (E2E Testing), 005 (P2P), 005a (Swift Integration) ✅ All complete
 
-**Branch:** `feature/006-cloud-deployment`
+**Branch:** `master` (PR #7 merged 2026-02-21)
 
 **Purpose:**
 - Deploy Intermediate Server and App Connector to cloud
@@ -478,6 +480,34 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 2. Echo server as test backend (localhost)
 3. macOS Agent on home/office NAT ← **Required for P2P testing**
 4. Optional: Mobile hotspot for CGNAT testing
+
+---
+
+### 013: Swift Modernization ✅ COMPLETE
+
+**Location:** `ios-macos/ZtnaAgent/`, `.github/workflows/`, `.pre-commit-config.yaml`, `.swiftlint.yml`
+
+**Branch:** `master` (merged in PR #7)
+
+**Completed:**
+- Swift 6 language mode with `SWIFT_STRICT_CONCURRENCY = complete`
+- macOS deployment target aligned to 26.2
+- Extracted `AgentFFI.swift` (FFI boundary) and `TunnelUtilities.swift` (IP parsing utilities)
+- Added `TunnelUtilitiesTests.swift` and `VPNManagerTests.swift` (Swift Testing framework)
+- Removed deprecated `Persistence.swift`, duplicate `App/ContentView.swift` and `Extension/PacketTunnelProvider.swift`
+
+**Linting Infrastructure:**
+- GitHub Actions CI: 3 parallel jobs (Rust 5-crate matrix, SwiftLint, ShellCheck)
+- Pre-commit hooks: 12 hooks (5 rustfmt, 5 clippy, 1 shellcheck, 1 swiftlint)
+- All existing violations fixed across Rust (45+ clippy), Swift (10), Shell (5)
+- `.swiftlint.yml` with pragmatic disabled rules for existing codebase
+
+**Key Files:**
+- `ios-macos/ZtnaAgent/Extension/AgentFFI.swift` — Extracted FFI boundary types and functions
+- `ios-macos/ZtnaAgent/ZtnaAgent/TunnelUtilities.swift` — IPv4 parsing, routed datagram builder
+- `.github/workflows/lint.yml` — CI lint workflow
+- `.pre-commit-config.yaml` — Local pre-commit hooks
+- `.swiftlint.yml` — SwiftLint configuration
 
 ---
 

@@ -39,13 +39,14 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [004](../004-e2e-relay-testing/) | E2E Relay Testing | ✅ Complete | `master` |
 | [005](../005-p2p-hole-punching/) | P2P Hole Punching | ✅ Complete | `master` |
 | [005a](../005a-swift-agent-integration/) | Swift Agent Integration | ✅ Complete | `master` |
-| [006](../006-cloud-deployment/) | Cloud Deployment | ✅ Complete (MVP) | `feature/006-cloud-deployment` |
-| [007](../007-security-hardening/) | Security Hardening | ⏳ Not Started | — |
+| [006](../006-cloud-deployment/) | Cloud Deployment | ✅ Complete (MVP) | `master` (PR #7 merged) |
+| [007](../007-security-hardening/) | Security Hardening | ⏳ Not Started (26 findings documented) | — |
 | [008](../008-production-operations/) | Production Operations | ⏳ Not Started | — |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | ⏳ Not Started | — |
 | [010](../010-admin-dashboard/) | Admin Dashboard | ⏳ Not Started | — |
 | [011](../011-protocol-improvements/) | Protocol Improvements | ⏳ Not Started | — |
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | ⏳ Not Started | — |
+| [013](../013-swift-modernization/) | Swift Modernization | ✅ Complete | `master` (PR #7) |
 
 ### Task Dependencies
 
@@ -68,10 +69,12 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
                     ▼
          006 (Cloud Deployment) ✅ COMPLETE (MVP)
                     │
+                    ├──► 013 (Swift Modernization) ✅ COMPLETE
+                    │
          ┌──────────┼──────────────────────┐
          ▼          ▼                      ▼
    007 (Security)  009 (Multi-Service)   011 (Protocol)
-   P1              P2                     P3
+   P1 (26 findings) P2                   P3
          │          │                      │
          ▼          ▼                      │
    008 (Prod Ops)  010 (Dashboard)       012 (Multi-Env)
@@ -136,11 +139,12 @@ git push -u origin feature/XXX-task-name
 | Component | Technology | Notes |
 |-----------|------------|-------|
 | QUIC Library | `quiche` (Cloudflare) | Sans-IO model, Rust |
-| Agent | Swift 6.2 + Rust FFI | NetworkExtension framework |
+| Agent | Swift 6 (strict concurrency) + Rust FFI | NetworkExtension framework, macOS 26.2+ |
 | Intermediate Server | Rust + mio | Event loop matches quiche examples |
 | Connector | Rust + mio | Matches Intermediate (mio chosen over tokio) |
 | Packet Encapsulation | QUIC DATAGRAM | RFC 9221 |
 | Address Discovery | QAD | Replaces STUN |
+| Linting | clippy + rustfmt, SwiftLint, ShellCheck | GitHub Actions CI + pre-commit hooks |
 
 ---
 
@@ -150,10 +154,15 @@ git push -u origin feature/XXX-task-name
 |-----------|------|
 | Architecture Doc | `docs/architecture.md` |
 | Agent Extension | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` |
+| Agent FFI Bridge | `ios-macos/ZtnaAgent/Extension/AgentFFI.swift` |
+| Agent Utilities | `ios-macos/ZtnaAgent/ZtnaAgent/TunnelUtilities.swift` |
 | Agent UI + VPN Manager | `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` |
 | Rust QUIC Client | `core/packet_processor/src/lib.rs` |
 | P2P Modules | `core/packet_processor/src/p2p/` |
 | Bridging Header | `ios-macos/Shared/PacketProcessor-Bridging-Header.h` |
+| CI Lint Workflow | `.github/workflows/lint.yml` |
+| Pre-commit Config | `.pre-commit-config.yaml` |
+| SwiftLint Config | `.swiftlint.yml` |
 | Intermediate Server | `intermediate-server/src/main.rs` |
 | Signaling Module | `intermediate-server/src/signaling.rs` |
 | App Connector | `app-connector/src/main.rs` |
@@ -496,6 +505,16 @@ See [Task 006: Cloud Deployment](../006-cloud-deployment/) for implementation de
 - 177+ tests (116 unit + 61+ E2E)
 - Performance: P2P 32.6ms vs Relay 76ms (2.3x faster), 10-min 0% loss, seamless failover
 
+**Post-MVP completions (merged in PR #7):**
+
+- Swift 6 language mode with strict concurrency (`SWIFT_STRICT_CONCURRENCY = complete`)
+- macOS deployment target aligned to 26.2
+- Extracted `AgentFFI.swift` (FFI boundary) and `TunnelUtilities.swift` (IP parsing)
+- Unit tests: `TunnelUtilitiesTests` + `VPNManagerTests` (Swift Testing framework)
+- Multi-language linting CI: GitHub Actions (Rust clippy/fmt, SwiftLint, ShellCheck)
+- Pre-commit hooks: 12 hooks (5 rustfmt, 5 clippy, 1 shellcheck, 1 swiftlint)
+- Security review: 26 findings documented in task 007 (1 Critical, 4 High, 8 Medium, 9 Low, 4 Info)
+
 **Everything below this line is post-MVP.**
 
 ---
@@ -504,9 +523,10 @@ See [Task 006: Cloud Deployment](../006-cloud-deployment/) for implementation de
 
 | Task | Name | Priority | Description | Dependencies |
 |------|------|----------|-------------|--------------|
-| [007](../007-security-hardening/) | Security Hardening | P1 | TLS certs (Let's Encrypt), client auth, stateless retry, rate limiting | None |
+| [007](../007-security-hardening/) | Security Hardening | P1 | 26 findings: TLS certs, client auth, rate limiting, FFI safety, protocol hardening | None |
 | [008](../008-production-operations/) | Production Operations | P2 | Prometheus metrics, graceful shutdown, deployment automation, CI/CD | 007 |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | P2 | Per-service backend routing, dynamic discovery, health checks | None |
 | [010](../010-admin-dashboard/) | Admin Dashboard | P3 | REST API on Intermediate, web frontend, topology visualization | 008, 009 |
 | [011](../011-protocol-improvements/) | Protocol Improvements | P3 | IPv6 QAD, TCP flow control, separate P2P/relay sockets, QUIC migration, 0-RTT | None |
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | P3 | DigitalOcean, multi-region, symmetric NAT/CGNAT, load testing | None |
+| ~~[013](../013-swift-modernization/)~~ | ~~Swift Modernization~~ | ~~Done~~ | ~~Swift 6, strict concurrency, deployment target 26.2, linting infra~~ | ~~None~~ |

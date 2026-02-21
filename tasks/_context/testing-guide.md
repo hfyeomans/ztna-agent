@@ -1,7 +1,48 @@
 # ZTNA Testing & Demo Guide
 
 **Last Updated:** 2026-02-21
-**Status:** Task 006 Phase 8.5 Complete - HTTP validation, performance metrics, P2P→relay failover verified
+**Status:** Task 006 Complete (PR #7 merged). Swift 6 + linting infrastructure added.
+
+---
+
+## Linting & Code Quality
+
+### Pre-commit Hooks (Local)
+
+```bash
+# Install (one-time)
+brew install pre-commit shellcheck
+pre-commit install
+
+# Run all hooks on staged files (automatic on git commit)
+pre-commit run
+
+# Run all hooks on entire codebase
+pre-commit run --all-files
+```
+
+12 hooks: 5 rustfmt (per crate), 5 clippy (per crate), 1 ShellCheck, 1 SwiftLint.
+
+### CI Lint (GitHub Actions)
+
+Runs automatically on push/PR to master. Three parallel jobs:
+- **Rust**: clippy + fmt across 5 crates (matrix strategy)
+- **SwiftLint**: Strict mode with github-actions-logging reporter
+- **ShellCheck**: Bash scripts only (zsh informational)
+
+### Manual Lint Commands
+
+```bash
+# Rust (per crate)
+cargo fmt --manifest-path app-connector/Cargo.toml --all -- --check
+cargo clippy --manifest-path app-connector/Cargo.toml --all-targets -- -D warnings
+
+# Swift
+swiftlint lint --strict
+
+# Shell (bash only)
+grep -rl '#!/bin/bash' --include='*.sh' . | grep -v target | xargs shellcheck --severity=warning
+```
 
 ---
 
