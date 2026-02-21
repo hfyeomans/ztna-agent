@@ -31,3 +31,8 @@ Document intentional placeholder/scaffolding code related to security hardening 
 | `app-connector/src/main.rs` | -- | `--insecure` flag bypasses cert verification | C1 | Active | Remove for production |
 | `core/packet_processor/src/lib.rs` | 582 | No queue depth limit on `received_datagrams` | H1 | Active | Add max queue constant |
 | `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` | 47 | Hardcoded `3.128.36.92` default | M1 | Active | Use `0.0.0.0` placeholder |
+| `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` | 264 | `parseIPv4` returns `[0,0,0,0]` on invalid input | M7 | Active | Return optional, fail explicitly |
+| `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` | 735-752 | `hasRegistered` boolean for partial multi-service registration | L8 | Active | Track per-service registration state |
+| `deploy/k8s/build-push.sh` | 147-156 | `--no-push` silently pushes on multi-platform | M8 | Active | Fail fast instead of silent push |
+| `app-connector/src/main.rs` | 1207-1222 | TCP FIN removes session without half-close drain | L6 | Active | Implement half-close draining |
+| `deploy/aws/aws-deploy-skill.md` | 141-143 | `StrictHostKeyChecking=no` in SSH guide | L9 | Active | Replace with ssh-keyscan approach |

@@ -149,6 +149,26 @@ Full security review performed on `feature/006-cloud-deployment` branch (15,900 
 
 **Fix:** Add distinctive magic prefix to keepalive messages, or verify upper bits don't match QUIC header patterns.
 
+### M7. `parseIPv4` Returns `[0,0,0,0]` for Non-IPv4 Input Without Failing
+
+**File:** `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift:264`
+
+**Description:** `parseIPv4()` returns `[0, 0, 0, 0]` when the input is not a valid IPv4 literal (e.g., a hostname or IPv6 address). While `ipv4ToUInt32` has a guard against this, any direct caller of `parseIPv4` would silently get a zero address. The function should return an optional or throw to make failure explicit.
+
+**Source:** PR #7 review (CodeRabbit)
+
+**Fix:** Change `parseIPv4` return type to `[UInt8]?` (optional), return `nil` on invalid input, and update all callers to handle the failure case.
+
+### M8. `--no-push` Flag Still Pushes on Multi-Platform Builds
+
+**File:** `deploy/k8s/build-push.sh:147-156`
+
+**Description:** When `DO_PUSH=false` (set by `--no-push`) and the platform string contains a comma (multi-platform), the script silently falls back to `--push` because Docker buildx `--load` only supports single-platform. This violates the `--no-push` flag semantics and could cause accidental image publishes.
+
+**Source:** PR #7 review (CodeRabbit)
+
+**Fix:** Fail fast with an error message instead of silently pushing. Require explicit `--push` or `--arm64-only` for multi-platform builds.
+
 ---
 
 ## Low Findings
@@ -185,6 +205,46 @@ Full security review performed on `feature/006-cloud-deployment` branch (15,900 
 
 **Status:** Current code appears to use `guard let` — verify during implementation.
 
+### L6. TCP FIN Removes Session Without Half-Close Draining
+
+**File:** `app-connector/src/main.rs:1207-1222`
+
+**Description:** When a FIN is received from the agent side, the TCP session is immediately removed and the backend `TcpStream` is dropped. This does not implement TCP half-close — any remaining buffered data the backend may have to send is lost. A proper implementation would enter a CLOSE_WAIT-like state and drain the backend stream before teardown.
+
+**Source:** PR #7 review (Gemini)
+
+**Fix:** On FIN from agent, shut down the write half of the backend stream and continue reading until the backend also closes or a timeout expires, then remove the session.
+
+### L7. TCP Backend Streams Polled Manually Instead of mio-Integrated
+
+**File:** `app-connector/src/main.rs:1349-1427`
+
+**Description:** `process_tcp_sessions()` iterates all TCP sessions and calls `stream.read()` on each tick, relying on `WouldBlock`. These streams are not registered with the mio event loop via `Registry::register()`, so the function runs on every loop iteration regardless of data availability. This is less efficient than event-driven I/O.
+
+**Source:** PR #7 review (Gemini)
+
+**Fix:** Register TCP backend streams with the mio `Poll` and only read when `READABLE` events fire. Naturally resolved when H3 migrates to non-blocking mio TCP.
+
+### L8. Partial Multi-Service Registration Marks Agent as Fully Registered
+
+**File:** `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift:735-752`
+
+**Description:** The `hasRegistered` boolean is set to `true` after *any* service successfully registers. If 3 services are requested and only 1 succeeds, the agent considers itself fully registered and starts keepalives/hole-punching. Failed services are logged as warnings but not retried.
+
+**Source:** PR #7 review (CodeRabbit)
+
+**Fix:** Track per-service registration state with a `Set<String>` of registered service IDs. Only set `hasRegistered = true` when all requested services are registered. Retry failed registrations on subsequent keepalive cycles.
+
+### L9. SSH Guide Recommends Disabling Host Key Verification
+
+**File:** `deploy/aws/aws-deploy-skill.md:141-143`
+
+**Description:** The deployment guide recommends `StrictHostKeyChecking=no` and `UserKnownHostsFile=/dev/null` for SSH connections, which disables MITM protection. While labeled as a "tip" for convenience after instance restarts, it teaches an insecure pattern.
+
+**Source:** PR #7 review (CodeRabbit)
+
+**Fix:** Replace with `ssh-keyscan -H <host> >> ~/.ssh/known_hosts` followed by a normal SSH command. Mark the `StrictHostKeyChecking=no` approach as a last-resort fallback with a security warning.
+
 ---
 
 ## Info Findings
@@ -200,6 +260,26 @@ Full security review performed on `feature/006-cloud-deployment` branch (15,900 
 **File:** `deploy/docker-nat-sim/docker-compose.yml:70,213`
 
 **Status:** Read-only mount (correct). Ensure `certs/` is in `.gitignore`.
+
+### I3. Local Filesystem Paths Exposed in Test Report
+
+**File:** `deploy/docker-nat-sim/TEST_REPORT.md:37`
+
+**Description:** Test report contains absolute local path `/Users/hank/dev/src/agent-driver/ztna-agent/certs/`, exposing developer username and directory structure. Reduces portability and leaks developer identity.
+
+**Source:** PR #7 review (CodeRabbit)
+
+**Fix:** Replace with relative path `./certs/` or generic placeholder `/path/to/ztna-agent/certs/`.
+
+### I4. Build Script Default Registry Doesn't Match Help Text
+
+**File:** `deploy/k8s/build-push.sh:31-32`
+
+**Description:** Script defaults to `docker.io` / `hyeomans` but help text and header reference `ghcr.io` / `hfyeomans`. Could push to unintended registry when using defaults.
+
+**Source:** PR #7 review (CodeRabbit)
+
+**Fix:** Align defaults with help text: `REGISTRY="${REGISTRY:-ghcr.io}"` and `OWNER="${OWNER:-hfyeomans}"`.
 
 ---
 
@@ -239,3 +319,4 @@ Full security review performed on `feature/006-cloud-deployment` branch (15,900 
 - QUIC RFC 9000 Section 8: Address Validation
 - Let's Encrypt ACME: https://letsencrypt.org/docs/
 - Security review: 2026-02-21 (this document)
+- PR #7 code review (Gemini + CodeRabbit): 2026-02-21 — added M7, M8, L6-L9, I3-I4

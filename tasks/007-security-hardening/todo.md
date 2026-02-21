@@ -35,12 +35,14 @@
 - [ ] Implement credential provisioning for Connectors
 - [ ] Test unauthorized client rejection
 
-## Phase 3: Rate Limiting & DoS Protection (H1, H3)
+## Phase 3: Rate Limiting & DoS Protection (H1, H3, L6, L7)
 
 - [ ] **H1:** Cap `received_datagrams` queue depth (e.g., 1024) in `packet_processor/src/lib.rs:582`
 - [ ] **H3:** Validate destination IP in TCP proxy matches expected virtual service IP (`app-connector/src/main.rs`)
 - [ ] **H3:** Migrate TCP proxy to non-blocking `mio::net::TcpStream::connect()` (remove 500ms blocking)
+- [ ] **H3:** Register TCP backend streams with mio `Poll` for event-driven I/O (resolves L7)
 - [ ] **H3:** Add rate limiting on new TCP session creation per source
+- [ ] **L6:** Implement TCP half-close: on FIN, drain backend stream before removing session (`main.rs:1207-1222`)
 - [ ] Add per-IP connection rate limiting on Intermediate
 - [ ] Add registration flood protection
 - [ ] Add DATAGRAM throughput limits per connection
@@ -56,14 +58,20 @@
 - [ ] **M6:** Add distinctive magic prefix to keepalive messages (avoid 5-byte QUIC collision)
 - [ ] Update quic-test-client for auth testing
 
-## Phase 5: Configuration & Operational Security (M1, L2, L3, L4)
+## Phase 5: Configuration & Operational Security (M1, M7, M8, L2-L5, L8-L9, I1-I4)
 
 - [ ] **M1:** Remove hardcoded AWS IP `3.128.36.92` from Swift defaults (use `0.0.0.0` placeholder)
 - [ ] **M1:** Move real IPs to `.env` files in `.gitignore`
+- [ ] **M7:** Change `parseIPv4` to return optional, fail explicitly on non-IPv4 input (`PacketTunnelProvider.swift:264`)
+- [ ] **M8:** Fix `--no-push` to fail fast on multi-platform builds instead of silently pushing (`build-push.sh:147-156`)
 - [ ] **M4:** Remove `NET_ADMIN`/`NET_RAW` from non-gateway Docker containers
 - [ ] **L2:** Add startup validation for cert/key file paths in config loading
 - [ ] **L3:** Replace `from_utf8_lossy` with strict `from_utf8` for service IDs
 - [ ] **L4:** Validate interface names in `setup-nat.sh` (regex `^[a-zA-Z0-9]+$`)
 - [ ] **L5:** Audit Swift code for force-unwraps on `NWEndpoint.Port` construction
+- [ ] **L8:** Track per-service registration state instead of boolean `hasRegistered` (`PacketTunnelProvider.swift:735-752`)
+- [ ] **L9:** Replace `StrictHostKeyChecking=no` in SSH guide with `ssh-keyscan` approach (`aws-deploy-skill.md:141-143`)
 - [ ] **I1:** Reduce network topology logging to `debug` level for production
 - [ ] **I2:** Verify `certs/` directory is in `.gitignore`
+- [ ] **I3:** Redact local filesystem paths in `TEST_REPORT.md` (replace `/Users/hank/...` with relative paths)
+- [ ] **I4:** Align build-push.sh default registry/owner with help text (`docker.io` → `ghcr.io`)

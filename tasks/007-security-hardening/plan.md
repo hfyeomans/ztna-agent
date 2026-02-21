@@ -11,7 +11,7 @@
 
 ## Purpose
 
-Implement production-grade security across the ZTNA system. This is the highest-priority post-MVP task. A security review on 2026-02-21 identified 18 findings (1 Critical, 4 High, 6 Medium, 5 Low, 2 Info). All findings are documented in `research.md` with specific file locations and fix approaches.
+Implement production-grade security across the ZTNA system. This is the highest-priority post-MVP task. A security review on 2026-02-21 identified 18 findings, and PR #7 code review added 8 more, for a total of 26 findings (1 Critical, 4 High, 8 Medium, 9 Low, 4 Info). All findings are documented in `research.md` with specific file locations and fix approaches.
 
 ---
 
@@ -35,8 +35,14 @@ Implement production-grade security across the ZTNA system. This is the highest-
 | L3 | **Low** | 5 | intermediate-server | `from_utf8_lossy` routing collisions |
 | L4 | **Low** | 5 | setup-nat.sh | Unsanitized env vars in `/proc` paths |
 | L5 | **Low** | 5 | Swift agent | Verify no force-unwrap on `NWEndpoint.Port` |
+| L6 | **Low** | 3 | app-connector | TCP FIN removes session without half-close draining |
+| L7 | **Low** | 3 | app-connector | TCP backends polled manually, not mio-integrated |
+| L8 | **Low** | 5 | Swift agent | Partial multi-service registration marks fully registered |
+| L9 | **Low** | 5 | deploy docs | SSH guide disables host key verification |
 | I1 | **Info** | 5 | All servers | Verbose network topology logging at `info` level |
 | I2 | **Info** | 5 | docker-compose | Verify `certs/` is in `.gitignore` |
+| I3 | **Info** | 5 | TEST_REPORT.md | Local filesystem paths exposed in test report |
+| I4 | **Info** | 5 | build-push.sh | Default registry doesn't match help text |
 
 ---
 
@@ -69,7 +75,8 @@ Prevent resource exhaustion and abuse.
 
 - Cap `received_datagrams` queue (OOM prevention)
 - TCP proxy destination IP validation (SSRF prevention)
-- Non-blocking TCP connect (event loop DoS prevention)
+- Non-blocking TCP connect with mio-integrated backend streams (event loop DoS prevention)
+- TCP half-close handling (drain backend before teardown)
 - Per-IP rate limiting on Intermediate Server
 
 ### Phase 4: Protocol Hardening (M2, M5, M6)
@@ -83,15 +90,21 @@ Harden protocol-level ambiguities and FFI safety.
 - QUIC stateless retry tokens
 - Registration ACK protocol
 
-### Phase 5: Configuration & Operational Security (M1, M4, L1-L5, I1-I2)
+### Phase 5: Configuration & Operational Security (M1, M4, M7-M8, L1-L5, L8-L9, I1-I4)
 **Priority: LOW-MEDIUM**
 
 Clean up hardcoded values, excessive permissions, and operational hygiene.
 
 - Remove hardcoded AWS IP from Swift defaults
 - Remove excessive Docker capabilities
+- Make `parseIPv4` return optional (fail explicitly on non-IPv4 input)
+- Fix `--no-push` to error on multi-platform builds
+- Track per-service registration state in Swift agent
 - Strict UTF-8 validation on service IDs
 - Startup cert path validation
+- Replace insecure SSH guidance in deploy docs
+- Redact local paths in test reports
+- Align build script defaults with documentation
 - Production logging levels
 
 ---
