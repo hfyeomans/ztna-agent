@@ -147,7 +147,8 @@ final class VPNManager {
                 "serverPort": Int(serverPort),
                 "serviceId": serviceId,
                 "services": [
-                    ["id": serviceId, "virtualIp": "10.100.0.1"]
+                    ["id": serviceId, "virtualIp": "10.100.0.1"],
+                    ["id": "web-app", "virtualIp": "10.100.0.2"]
                 ] as [[String: Any]]
             ]
 

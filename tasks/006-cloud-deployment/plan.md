@@ -3,7 +3,7 @@
 **Task ID:** 006-cloud-deployment
 **Branch:** `feature/006-cloud-deployment`
 **Depends On:** 004 (E2E Testing), 005 (P2P Hole Punching), 005a (Swift Integration)
-**Last Updated:** 2026-01-25
+**Last Updated:** 2026-02-21
 
 ---
 
@@ -991,18 +991,78 @@ if ip_header.protocol != 17 {
 
 ## Phase Summary
 
-| Phase | Description | Environment |
-|-------|-------------|-------------|
-| 0 | Docker NAT simulation (optional) | Local |
-| 1 | Config parameterization | Local |
-| 2 | DigitalOcean deployment | Cloud |
-| 3 | Basic relay validation | DO + Home NAT |
-| 4 | AWS VPC deployment | Cloud |
-| 5 | Home MVP (Pi k8s) deployment | Home |
-| 6 | NAT-to-NAT hole punching validation | Home MVP |
-| 7 | Test applications deployment | All |
-| 8 | Performance and gaming tests | All |
-| 9 | Documentation | - |
+| Phase | Description | Environment | Status |
+|-------|-------------|-------------|--------|
+| 0 | Docker NAT simulation | Local | ✅ Complete |
+| 1 | Config parameterization | Local | Partial |
+| 2 | DigitalOcean deployment | Cloud | Skipped (AWS used) |
+| 3 | Basic relay validation | DO + Home NAT | Skipped (AWS used) |
+| 4 | AWS VPC deployment | Cloud | ✅ Complete |
+| 4.9 | Connection resilience | Swift-only | ✅ Complete |
+| 5 | Home MVP (Pi k8s) deployment | Home | ✅ Complete |
+| 5a | Full E2E relay routing | Rust + Swift | ✅ Complete |
+| 6 | P2P Swift integration + NAT testing | AWS + Home NAT | ✅ Complete |
+| 7 | HTTP test application validation | AWS | In Progress |
+| 8 | Performance metrics (P2P vs relay) | AWS | Pending |
+| 9 | Documentation | - | Pending |
+| 10 | PR & Merge | - | Pending |
+
+---
+
+## Phase 7: Test Application Validation (Revised 2026-02-21)
+
+> **Original plan:** httpbin + QuakeKube on Pi k8s.
+> **Actual implementation:** Simple HTTP server on AWS EC2, second connector for web-app service.
+> **Reason:** Validates TCP-through-tunnel with minimal infra. QuakeKube deferred to post-MVP.
+
+### Architecture
+
+```
+macOS Agent
+├── 10.100.0.1 → echo-service  → ztna-connector  (port 4434, P2P enabled)  → echo-server :9999
+└── 10.100.0.2 → web-app       → ztna-connector-web (port 4435, relay-only) → http-server :8080
+```
+
+### Key Constraint: Single forward_addr per Connector
+
+The App Connector only forwards to a single `forward_addr`. Per-service backend routing is NOT implemented (config struct has fields but they're `#[allow(dead_code)]`). Workaround: run separate connector instances per service.
+
+### Changes
+
+| Component | Change |
+|-----------|--------|
+| AWS: http-server.service | python3 -m http.server 8080 serving /opt/ztna/www/ |
+| AWS: ztna-connector-web.service | Second connector: web-app service, relay-only, port 4435 |
+| ContentView.swift | Add `["id": "web-app", "virtualIp": "10.100.0.2"]` to services array |
+
+### Verification
+
+- `curl http://10.100.0.2:8080/` returns 200 with HTML content
+- UDP echo to 10.100.0.1 still works (no regression)
+- Both services registered in Agent logs
+
+---
+
+## Phase 8: Performance Metrics (Revised 2026-02-21)
+
+> **Original plan:** Relay/direct latency + throughput + 1-hour stability + QuakeKube gaming test.
+> **Actual implementation:** Ping RTT comparison (P2P vs relay), 10-min stability test.
+> **Reason:** Application-level ping is sufficient for MVP. agent_get_path_stats() returns 0ms RTT.
+
+### Methodology
+
+| Metric | P2P Path (10.100.0.1) | Relay Path (10.100.0.2) |
+|--------|-----------------------|------------------------|
+| Latency | ping -c 50 via P2P direct | ping -c 50 via relay |
+| Stability | ping -c 600 (10 min) | N/A |
+| Path flapping | Agent log monitoring | N/A |
+
+### Not in Scope (Post-MVP)
+
+- Throughput benchmarks (iperf)
+- QuakeKube gaming latency
+- 1-hour stability test
+- Fixing agent_get_path_stats() 0ms RTT bug
 
 ---
 

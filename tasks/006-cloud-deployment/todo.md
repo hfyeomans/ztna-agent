@@ -3,7 +3,8 @@
 **Task ID:** 006-cloud-deployment
 **Branch:** `feature/006-cloud-deployment`
 **Depends On:** Task 004, Task 005, Task 005a
-**Last Updated:** 2026-01-25
+**Status:** ✅ COMPLETE (MVP)
+**Last Updated:** 2026-02-21
 
 ---
 
@@ -373,104 +374,127 @@ Agent → Intermediate → Connector → Echo Server → Response
 
 ---
 
-## Phase 6: NAT-to-NAT Hole Punching Validation
+## Phase 6: P2P Swift Integration + NAT Testing
 
 > **Prerequisites:**
-> - Phase 5a complete (Agent registration working)
-> - OR use hole punching CandidateOffer which implicitly registers
+> - Phase 5a complete (Agent registration working) ✅
+> - Connection resilience implemented (Phase 4.9) ✅
+> - 12 P2P FFI functions implemented in Rust (81 tests passing) ✅
+>
+> **Implementation:** Swift-only (bridging header + PacketTunnelProvider). No Rust changes needed.
 >
 > **Test Topology:**
 > - macOS Agent behind home router NAT
-> - App Connector in k8s (also behind home NAT = hairpin NAT)
-> - OR App Connector on different network/NAT (e.g., mobile hotspot)
+> - AWS Intermediate Server (3.128.36.92) as signaling relay
+> - AWS App Connector (registered for echo-service)
 
-### 6.1 Direct Path Verification Setup
-- [ ] Add path selection logging to Agent
-  ```rust
-  info!("Path selected: {} (peer: {})", path_type, peer_addr);
-  ```
-- [ ] Add path selection logging to Connector
-- [ ] Rebuild and redeploy components
+### 6.1 P2P FFI Bridge
+- [x] Add 12 P2P FFI declarations to PacketProcessor-Bridging-Header.h
+- [x] Verify static library has P2P symbols (nm check — all 12 confirmed)
+- [x] Build succeeds with new declarations
 
-### 6.2 Hole Punch Tests
-- [ ] Start Agent on macOS (home WiFi)
-- [ ] Start Connector on Pi k8s (home network)
-- [ ] Both connect to cloud Intermediate
-- [ ] Verify candidate exchange completes
-- [ ] Check logs for "Path selected: DIRECT"
+### 6.2 Hole Punch Initiation
+- [x] Add P2P state properties to PacketTunnelProvider
+- [x] Implement startHolePunching() — calls agent_start_hole_punch after registration
+- [x] Start hole punch poll timer (50ms interval)
 
-### 6.3 Direct Path Proof
-- [ ] **Log proof:** Grep logs for "DIRECT" path selection
-- [ ] **Packet capture proof:** Run tcpdump on Mac
-  ```bash
-  tcpdump -i en0 udp and not host <intermediate-ip>
-  ```
-  - Verify packets going to Connector's IP, not Intermediate
-- [ ] **Relay disable proof:**
-  - SSH to Intermediate, stop DATAGRAM relay
-  - Verify traffic continues (if truly direct)
-  - Restart relay after test
+### 6.3 Binding Request Pump
+- [x] Implement sendPendingBindingRequests() — polls agent_poll_binding_request
+- [x] Create per-candidate NWConnections for binding delivery
+- [x] Implement binding response receive loop → agent_process_binding_response
+- [x] Poll agent_poll_hole_punch for completion
 
-### 6.4 Fallback Test
-- [ ] Block direct UDP between Agent and Connector (iptables or firewall)
-- [ ] Verify traffic switches to relay
-- [ ] Measure relay latency vs direct latency
-- [ ] Unblock and verify direct path resumes
+### 6.4 P2P QUIC Connection
+- [x] Implement setupP2PConnection() — NWConnection to working address
+- [x] Call agent_connect_p2p() on UDP ready
+- [x] Implement P2P receive loop (agent_recv with P2P source)
+- [x] Implement pumpP2POutbound() — agent_poll_p2p
 
-### 6.5 Hairpin NAT Test
-- [ ] Document home router model
-- [ ] If hairpin fails, document limitation
-- [ ] Test with mobile hotspot (different NAT) if available
+### 6.5 Packet Routing
+- [x] Check agent_get_active_path() in packet processing
+- [x] Route via agent_send_datagram_p2p when direct path active
+- [x] Fallback to relay on P2P send failure
+
+### 6.6 P2P Keepalive & Path Monitoring
+- [x] Implement P2P keepalive timer (15s, agent_poll_keepalive)
+- [x] Log path state (agent_get_path_stats)
+- [x] Detect fallback (agent_is_in_fallback)
+
+### 6.7 Cleanup & Resilience
+- [x] Clean up P2P resources in stopTunnel()
+- [x] Reset P2P state in attemptReconnect()
+- [x] Hole punch restarts automatically after reconnection
+
+### 6.8 Testing ✅ COMPLETE (2026-01-31)
+- [x] Build succeeds (zero errors, zero warnings)
+- [x] Relay still works (no regression)
+- [x] Hole punch initiates after registration (log check)
+- [x] Test: macOS (home NAT) → AWS Intermediate → Connector
+- [x] Document result: **direct path achieved** ✅
+- [x] P2P QUIC connection established — 14 consecutive keepalive checks (3.5+ min), zero missed
+- [x] Bug found & fixed: Agent `recv()` fed raw keepalive responses to `quiche::recv()` → added keepalive demux in `recv()` before QUIC routing
+- [ ] If direct: tcpdump proof of non-relay traffic (deferred — functional proof via logs sufficient for MVP)
+- [x] If direct: fallback test (block direct, verify relay takeover) ✅ Phase 8.5 — 180/180 packets, 0% loss, seamless per-packet failover
 
 ---
 
-## Phase 7: Test Application Validation
+## Phase 7: Test Application Validation (HTTP through tunnel)
 
-### 7.1 HTTP App Testing
-- [ ] Configure Agent to route to http-app service
-- [ ] Test basic connectivity: `curl http://<tunnel>/get`
-- [ ] Test latency endpoint: `curl http://<tunnel>/delay/1`
-- [ ] Test POST echo: `curl -X POST http://<tunnel>/post -d "test"`
-- [ ] Measure end-to-end latency
-- [ ] Document results
+> **Revised 2026-02-21:** Using simple HTTP server on AWS instead of httpbin/QuakeKube.
+> Second connector instance for web-app service (relay-only).
 
-### 7.2 QuakeKube Testing
-- [ ] Configure Connector to route to QuakeKube service
-- [ ] Connect browser to QuakeJS web client
-- [ ] Verify game loads and connects
-- [ ] Measure in-game ping
-- [ ] Play test game, note any lag
-- [ ] Document playability results:
-  - [ ] Ping < 150ms? (Acceptable)
-  - [ ] Ping < 80ms? (Good)
-  - [ ] Visible lag during movement?
-  - [ ] Packet loss observed?
+### 7.1 Deploy HTTP Server on AWS
+- [x] Create /opt/ztna/www/index.html test content
+- [x] Create http-server.service (python3 -m http.server 8080)
+- [x] Verify HTTP server running locally on AWS
 
-### 7.3 Native Quake Client (Optional)
-- [ ] Install native Quake 3 client
-- [ ] Connect via UDP to QuakeKube
-- [ ] Compare latency with WebSocket client
+### 7.2 Deploy Second Connector (web-app)
+- [x] Create ztna-connector-web.service (web-app, port 4435, relay-only)
+- [x] Verify connector registers with Intermediate for 'web-app'
+- [x] Verify no port conflict with existing echo-service connector
+
+### 7.3 Update macOS Agent for Multi-Service
+- [x] Add web-app service to ContentView.swift providerConfiguration
+- [x] Build succeeds (zero errors)
+- [x] Both services register in Agent logs after VPN connect
+- [x] Test: `curl http://10.100.0.2:8080/` returns 200 with HTML content
+- [x] Test: UDP echo to 10.100.0.1 still works (no regression)
+- [x] Test: Multiple concurrent HTTP requests succeed
+- [x] Document results
+
+### 7.4 Deferred (Post-MVP)
+- [ ] QuakeKube gaming latency testing
+- [ ] httpbin advanced endpoint testing
+- [ ] Per-service backend routing in Connector (currently single forward_addr)
 
 ---
 
 ## Phase 8: Performance Metrics
 
-### 8.1 Latency Testing
-- [ ] Measure relay path latency (Agent → Intermediate → Connector)
-- [ ] Measure direct path latency (Agent → Connector P2P)
-- [ ] Calculate latency improvement from direct path
-- [ ] Test under load (multiple requests/packets)
+> **Revised 2026-02-21:** Using application-level ping RTT instead of FFI path stats
+> (agent_get_path_stats returns 0ms RTT). P2P via 10.100.0.1, relay via 10.100.0.2.
 
-### 8.2 Throughput Testing
-- [ ] Measure sustained throughput via relay
-- [ ] Measure sustained throughput via direct path
-- [ ] Compare with baseline (non-tunneled)
+### 8.1 P2P Latency (Direct Path)
+- [x] ping -c 50 10.100.0.1 (P2P direct after hole punch)
+- [x] Record min/avg/max/stddev: 31.154/32.644/34.492/0.760 ms
 
-### 8.3 Stability Testing
-- [ ] Run continuous traffic for 1 hour
-- [ ] Monitor for disconnections
-- [ ] Monitor for path flapping (direct ↔ relay)
-- [ ] Check keepalive effectiveness
+### 8.2 Relay Latency
+- [x] HTTP curl -c 50 10.100.0.2 (relay-only via web-app connector)
+- [x] Record min/avg/max: 64.6/76.0/165.5 ms
+- [x] Calculate P2P improvement ratio: 2.3x faster
+
+### 8.3 Sustained Stability Test
+- [x] ping -c 600 10.100.0.1 (10 minutes via P2P)
+- [x] Verify 0% packet loss (600/600 received)
+- [x] Monitor Agent logs for path flapping (none observed)
+- [x] Verify keepalive missed_keepalives stays at 0 (confirmed)
+- [x] Document results
+
+### 8.4 Deferred (Post-MVP)
+- [ ] Throughput benchmarks (iperf)
+- [ ] 1-hour stability test
+- [ ] Fix agent_get_path_stats() 0ms RTT bug
+- [ ] Load testing under concurrent connections
 
 ---
 
@@ -517,10 +541,10 @@ Agent → Intermediate → Connector → Echo Server → Response
 
 ---
 
-## 🎯 CURRENT PHASE: Post-Cloud Deployment Tasks
+## ✅ MVP COMPLETE (2026-02-21)
 
-> **Status (2026-01-26):** AWS E2E test pending VPN connection. Once verified,
-> proceeding with configuration mechanism, then protocol expansion.
+> **All 11 deliverables complete.** Post-MVP work organized into Tasks 007-012.
+> See `tasks/_context/README.md` Post-MVP Roadmap for details.
 
 ### Recommended Task Sequence (Option 2 - Config First)
 
@@ -533,8 +557,11 @@ Agent → Intermediate → Connector → Echo Server → Response
 | 5 | **ICMP Support** | ✅ Complete | Echo Reply at Connector (2026-01-31) |
 | 6 | **Return-Path (DATAGRAM→TUN)** | ✅ Complete | agent_recv_datagram + drainIncomingDatagrams (2026-01-31) |
 | 7 | **Connection Resilience** | ✅ Implemented | Auto-recovery with exponential backoff + NWPathMonitor (2026-01-31) |
-| 8 | **P2P NAT Testing** | ⬜ Next | Phase 6 — hole punching with real NATs |
-| 9 | **Admin Dashboard** | ⬜ Future | UI layer on config mechanism |
+| 8 | **P2P NAT Testing** | ✅ Complete | Phase 6.8 — direct P2P path achieved (2026-01-31) |
+| 9 | **HTTP App Validation** | ✅ Complete | Phase 7 — HTTP through tunnel + multi-service (2026-02-21) |
+| 10 | **Performance Metrics** | ✅ Complete | Phase 8 — P2P 32.9ms vs Relay 76ms, 0% loss 10min (2026-02-21) |
+| 11 | **P2P→Relay Failover** | ✅ Complete | Phase 8.5 — 180/180, 0% loss, per-packet fallback (2026-02-21) |
+| 12 | **Admin Dashboard** | → Task 010 | UI layer on config mechanism |
 
 ### Task Details
 

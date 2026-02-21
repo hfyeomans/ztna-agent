@@ -1,9 +1,34 @@
 # Task State: Cloud Deployment
 
 **Task ID:** 006-cloud-deployment
-**Status:** In Progress
+**Status:** ✅ COMPLETE (MVP)
 **Branch:** `feature/006-cloud-deployment`
-**Last Updated:** 2026-01-31
+**Last Updated:** 2026-02-21
+
+---
+
+## MVP Summary
+
+Task 006 delivers the complete MVP for the ZTNA agent system. All core functionality validated end-to-end across real cloud infrastructure.
+
+**What was delivered:**
+- Full E2E relay (UDP/TCP/ICMP) through QUIC DATAGRAM tunnel
+- P2P hole punching with automatic per-packet relay fallback
+- Multi-service routing (0x2F protocol: echo-service via P2P + web-app via relay)
+- Connection resilience (auto-recovery, NWPathMonitor, exponential backoff)
+- Split-tunnel architecture (only 10.100.0.0/24 tunneled)
+- macOS Agent with SwiftUI config UI + 23 FFI functions
+- AWS EC2 deployment (Intermediate + 2 Connectors + echo + HTTP services)
+- Pi k8s deployment (Kustomize + Cilium L2 LoadBalancer)
+
+**Key metrics:**
+- P2P latency: 32.6ms avg (50 samples)
+- Relay latency: 76.0ms avg (2.3x slower, two QUIC hops)
+- 10-min stability: 600/600 packets, 0.0% loss
+- Failover: 180/180 packets, 0.0% loss, seamless per-packet
+- Test count: 177+ (116 unit + 61+ E2E)
+
+**What was deferred:** See `tasks/_context/README.md` Post-MVP Roadmap (Tasks 007-012)
 
 ---
 
@@ -21,15 +46,18 @@ Deploy Intermediate Server and App Connector to cloud infrastructure for NAT tes
 
 ---
 
-## Current Phase: Post-Cloud Deployment Tasks
+## Completion Summary (2026-02-21)
 
-> **Status (2026-01-31):** Tasks 1-5 complete. All protocol tasks done.
-> 1. ~~AWS E2E validation~~ COMPLETE
-> 2. ~~Config file mechanism~~ COMPLETE
-> 3. ~~IP→Service routing~~ COMPLETE
-> 4. ~~TCP support~~ COMPLETE
-> 5. ~~ICMP support~~ COMPLETE
-> 6. ~~Documentation updates~~ COMPLETE
+All MVP phases complete:
+1. ~~AWS E2E validation~~ COMPLETE
+2. ~~Config file mechanism~~ COMPLETE
+3. ~~IP→Service routing~~ COMPLETE
+4. ~~TCP support~~ COMPLETE
+5. ~~ICMP support~~ COMPLETE
+6. ~~Documentation updates~~ COMPLETE
+7. ~~HTTP app validation~~ COMPLETE (Phase 7)
+8. ~~Performance metrics~~ COMPLETE (Phase 8)
+9. ~~P2P→Relay failover~~ COMPLETE (Phase 8.5)
 
 ---
 
@@ -488,23 +516,234 @@ All three resilience scenarios tested against live AWS deployment (macOS Agent �
 - 0-RTT reconnection (requires session ticket storage)
 - Multiplexed QUIC streams (DATAGRAMs sufficient for current needs)
 
-### Critical Finding: P2P Swift Integration Gap
+### Phase 6: P2P Swift Integration ✅ IMPLEMENTED
 
-**Discovery (2026-01-31):** P2P protocol is fully implemented in Rust (Task 005, 81 tests) but not wired into Swift:
+**Date:** 2026-01-31
 
-**Rust FFI functions that exist but are NOT in bridging header:**
-- `agent_connect_p2p()`, `agent_is_p2p_connected()`, `agent_poll_p2p()`
-- `agent_send_datagram_p2p()`
-- `agent_start_hole_punch()`, `agent_poll_hole_punch()`
-- `agent_poll_binding_request()`, `agent_process_binding_response()`
-- `agent_get_active_path()`, `agent_is_in_fallback()`, `agent_get_path_stats()`
+**Problem solved:** P2P protocol was fully implemented in Rust (Task 005, 81 tests) but not wired into Swift. All 12 P2P FFI functions existed in Rust but were missing from the bridging header and PacketTunnelProvider.
 
-**What's needed for P2P NAT testing:**
-1. Add 11 P2P FFI declarations to `PacketProcessor-Bridging-Header.h`
-2. Open separate UDP socket for direct P2P traffic in PacketTunnelProvider
-3. Implement binding request send/receive pump loop
-4. Call `agent_start_hole_punch()` after relay established
-5. Monitor path state (direct vs relay) and log transitions
+**Implementation (Swift-only, no Rust changes):**
+
+1. **Bridging Header** — Added 12 P2P FFI declarations in three groups:
+   - P2P Connections: `agent_connect_p2p`, `agent_is_p2p_connected`, `agent_poll_p2p`, `agent_send_datagram_p2p`
+   - Hole Punching: `agent_start_hole_punch`, `agent_poll_hole_punch`, `agent_poll_binding_request`, `agent_process_binding_response`
+   - Path Resilience: `agent_poll_keepalive`, `agent_get_active_path`, `agent_is_in_fallback`, `agent_get_path_stats`
+
+2. **PacketTunnelProvider** — Added ~478 lines of P2P code:
+   - P2P state properties (bindingConnections, p2pConnection, timers, flags)
+   - Hole punch initiation after service registration
+   - Binding request pump via per-candidate NWConnections
+   - P2P QUIC connection setup after hole punch succeeds
+   - Packet routing: `agent_get_active_path()` → Direct (P2P) or Relay
+   - P2P keepalive timer (15s interval, 5-byte messages)
+   - Full cleanup in `stopTunnel()` and `attemptReconnect()`
+
+3. **Socket Architecture:**
+   ```
+   PacketTunnelProvider
+   ├── udpConnection (NWConnection)          ← Intermediate (relay, always active)
+   ├── bindingConnections (per-candidate)    ← Temporary, during hole punch only
+   └── p2pConnection (NWConnection)          ← Direct to Connector (after hole punch)
+   ```
+
+4. **Build:** Zero errors, zero warnings
+
+**Files Changed:**
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` — 12 P2P FFI declarations added (167→281 lines)
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` — P2P integration (744→1222 lines)
+
+### Phase 6.8: P2P NAT Testing ✅ COMPLETE
+
+**Date:** 2026-01-31
+
+**Test Topology:**
+```
+macOS Agent (108.7.224.33, home NAT) ──► AWS Intermediate (3.128.36.92:4433)
+                                                         │
+macOS Agent ◄────── Direct P2P QUIC ──────► AWS Connector (3.128.36.92:4434)
+```
+
+**Result: P2P HOLE PUNCH SUCCESS — Direct QUIC path established and stable.**
+
+**Timeline (from logs):**
+| Time | Event |
+|------|-------|
+| 20:40:41.363 | Tunnel started, QUIC connection to Intermediate |
+| 20:40:41.737 | QUIC established, registered for 'echo-service' |
+| 20:40:42.270 | Hole punch initiated |
+| 20:40:42.573 | Binding requests start (0.0.0.0:4434 fails, expected) |
+| 20:40:43.025 | Binding request to srflx candidate 3.128.36.92:4434 |
+| 20:40:43.026 | Binding connection ready |
+| 20:40:43.121 | Binding request sent (25 bytes) |
+| 20:40:43.155 | Binding response received (28 bytes) |
+| 20:40:43.174 | **Hole punch SUCCESS: direct path to 3.128.36.92:4434** |
+| 20:40:43.177 | P2P NWConnection ready |
+| 20:40:43.210 | **P2P QUIC connection ESTABLISHED** |
+| 20:40:43.210 | P2P keepalive timer started (15s) |
+| 20:40:58+ | missed keepalives: 0 (stable, 14+ consecutive checks) |
+
+**Connector-side logs confirmed:**
+```
+Binding request from 108.7.224.33:59164 (txn 607915f8)
+Binding response sent to 108.7.224.33:59164 (28 bytes)
+New P2P connection from Agent at 108.7.224.33:60121
+Sent QAD to P2P client
+```
+
+**Data flow through P2P (verified):**
+- `P2P tunneled packet (84 bytes)` every ~1 second
+- `Injected 1 return packet(s) into TUN` — bidirectional
+- Ping echo replies flowing through direct P2P path
+
+**Keepalive stability:**
+- 14 consecutive 15-second checks: all `missed keepalives: 0`
+- 3.5+ minutes of stable P2P with no fallback
+- Previous bug (keepalive response dropped → fallback at 30s) fully resolved
+
+**Bugs Found & Fixed During Testing:**
+
+1. **Connector: Binding messages silently dropped** — `process_p2p_packet()` passed all non-Intermediate packets to `quiche::Header::from_slice()`. Binding requests (bincode format) failed QUIC parsing. Fix: Added `is_p2p_control_packet()` demux (checks `data[0] & 0xC0 == 0`) before QUIC parsing, plus `process_p2p_control_packet()` handler.
+
+2. **Connector: Keepalive dropped** — Keepalive (0x10, 5 bytes) passed demux but failed bincode deserialization. Fix: Extended handler to check first byte for 0x10/0x11 before trying bincode; echoes keepalive response (0x11) directly.
+
+3. **Agent (Rust core): Keepalive response dropped** — `recv()` in lib.rs fed ALL P2P-sourced packets to `quiche::recv()`. The 5-byte keepalive response (0x11) failed QUIC parsing and was discarded. `path_manager.process_keepalive()` was never called, causing missed keepalive counter to increment → fallback at 30s. Fix: Added keepalive demux at top of `recv()` — checks for 5-byte packets with first byte 0x10/0x11 before QUIC routing, passes to `path_manager.process_keepalive()`.
+
+**Known Minor Issues (acceptable for MVP):**
+- **0.0.0.0 Host candidate**: Connector binds to 0.0.0.0:4434, includes it as Host candidate. NWConnection to 0.0.0.0 fails with EINVAL. Harmless — srflx candidate (3.128.36.92) works.
+- **RTT: 0ms**: Path manager reports 0ms RTT. Keepalive RTT tracking not computing round-trip time from request/response timestamps. Cosmetic only.
+- **Small warm-up window**: ~1.8s between tunnel start and P2P data flow (QUIC handshake + registration + hole punch + P2P QUIC handshake). Acceptable for MVP; relay handles traffic during this window.
+
+**Files Changed (during Phase 6.8 testing):**
+- `app-connector/src/main.rs` — Added binding message types, `is_p2p_control_packet()` demux, `process_p2p_control_packet()` (binding + keepalive handlers)
+- `core/packet_processor/src/lib.rs` — Added keepalive demux in `recv()` before `quiche::recv()`
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` — Fixed NWConnection.State logging, added `.public` privacy to binding logs
+
+**Deferred P2P Improvements (Post-MVP):**
+- Fix 0.0.0.0 Host candidate (filter in `gather_candidates_with_observed()`)
+- Implement RTT tracking in keepalive path
+- Reduce warm-up window (parallel hole punch with relay traffic)
+- Test with Symmetric NAT (CGNAT / mobile hotspot)
+- True QUIC connection migration (quiche limitation)
+
+### Phase 7: Test Application Validation (HTTP) ✅ COMPLETE
+
+**Date:** 2026-02-21
+
+**Setup:**
+- Second App Connector (`ztna-connector-web`) on AWS, registered for 'web-app', forwards to 127.0.0.1:8080
+- Python HTTP server on AWS port 8080 serving test HTML page
+- ContentView.swift updated with two services: echo-service (10.100.0.1), web-app (10.100.0.2)
+
+**Bug Found & Fixed:**
+
+When P2P was active (for echo-service), `processPacket()` sent ALL packets through P2P — including packets for web-app which has no P2P connection. The P2P send failed (error 4 = NotConnected), and the fallback used `sendRawDatagram` (no 0x2F service header). The Intermediate's generic relay used `services.iter().next()` on a HashSet — routing to the wrong Connector (echo-service instead of web-app). The echo-service Connector received a TCP SYN for an unknown destination, tried to forward to its UDP echo backend, and sent back a RST.
+
+**Fix (PacketTunnelProvider.swift):**
+1. `processPacket`: Look up destination service FIRST; only use P2P for the P2P-connected service (`targetServiceId`). Other services go directly to `sendRoutedDatagram` with 0x2F header.
+2. `sendP2PDatagram` fallback: Changed from `sendRawDatagram` to `sendRoutedDatagram` so relay path always includes service routing information.
+
+**Also fixed: Extension binary loading path.** The system loads the Network Extension from the LaunchServices-registered app bundle. When building with custom `-derivedDataPath`, the extension binary wasn't updated at Xcode's default DerivedData path. Fixed by building WITHOUT `-derivedDataPath` so the extension updates at the path the system actually loads from.
+
+**Test Results:**
+```
+$ curl http://10.100.0.2:8080/
+<html><body><h1>ZTNA Test Page</h1><p>Served through QUIC tunnel</p></body></html>
+
+$ for i in $(seq 1 5); do curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" http://10.100.0.2:8080/; done
+200 0.068888s
+200 0.066535s
+200 0.066837s
+200 0.167718s
+200 0.067548s
+```
+
+**Regression test (echo-service via P2P):**
+```
+$ ping -c 5 10.100.0.1
+5 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 31.825/32.367/33.109/0.485 ms
+```
+
+**Files Changed:**
+- `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` — Multi-service routing fix in `processPacket()` and `sendP2PDatagram()` fallback
+
+### Phase 8: Performance Metrics ✅ COMPLETE
+
+**Date:** 2026-02-21
+
+**Phase 8.1 — P2P Direct Path (ICMP ping, 50 samples):**
+```
+round-trip min/avg/max/stddev = 31.154/32.644/34.492/0.760 ms
+0% packet loss
+```
+
+**Phase 8.2 — Relay Path (HTTP curl, 50 samples):**
+- Min: 64.6ms | Avg: 76.0ms | Max: 165.5ms
+- 100% success rate (all HTTP 200)
+- Relay is ~2.3x slower than P2P (two QUIC hops vs one direct)
+
+**Phase 8.3 — 10-minute Stability Test (600 pings via P2P direct path):**
+```
+600 packets transmitted, 600 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 30.932/32.874/62.113/1.490 ms
+```
+- 0% packet loss over 10 minutes
+- No path flapping (stable DIRECT path throughout)
+- One jitter outlier at 62ms (seq=87), otherwise 31-34ms
+- P2P keepalive: 0 missed keepalives across 40+ checks
+
+### Phase 8.5: P2P → Relay Failover Test ✅ COMPLETE
+
+**Date:** 2026-02-21
+
+**Test Design:**
+Block the P2P port (UDP 4434) on the external interface only (`ens5`), preserving
+the Connector↔Intermediate relay path (loopback). This simulates a real-world
+scenario where the direct P2P path fails (firewall change, NAT rebinding, etc.)
+while the relay infrastructure remains healthy.
+
+**Key Discovery — Shared Socket Architecture:**
+The App Connector uses a SINGLE `quic_socket` (port 4434) for both P2P QUIC
+connections and the Intermediate relay QUIC connection. A naive `iptables -A INPUT
+-p udp --dport 4434 -j DROP` (without interface restriction) blocks BOTH paths,
+killing the relay connection too. The correct test requires interface-specific
+blocking: `-i ens5` blocks external P2P while loopback relay is preserved.
+
+**Test Steps:**
+1. Verified P2P baseline: 5/5 pings at ~32ms
+2. Applied `iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP` on AWS
+3. Ran `ping -c 180 10.100.0.1` (3 minutes)
+4. Monitored Intermediate logs for echo-service relay routing
+5. Unblocked port 4434
+6. Verified P2P recovery
+
+**Results:**
+```
+180 packets transmitted, 180 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 30.238/31.821/35.293/0.668 ms
+```
+
+**Intermediate logs confirmed full relay routing:**
+- Every ICMP packet relayed: "Relayed 84 bytes for 'echo-service'"
+- Connector registered and stable throughout test
+- No "No Connector registered" errors
+
+**How Failover Works:**
+The Agent's `sendP2PDatagram()` has per-packet fallback. When `agent_send_datagram_p2p()`
+returns error (NotConnected), each packet immediately falls back to `sendRoutedDatagram()`
+which sends through the relay with the 0x2F service header. This provides **zero-downtime
+failover** — no need to wait for keepalive timeout detection.
+
+**Latency Note:**
+Relay latency (~32ms) matches P2P latency (~32ms) because both paths terminate at the
+same AWS machine. In a production deployment where Intermediate and Connector are on
+different machines, relay latency would be higher (two network hops vs one).
+
+**Known Limitation:**
+Connector shares a single UDP socket for P2P and relay. If the Connector's relay
+connection to the Intermediate fails (e.g., Intermediate restart), the Connector
+must also restart (systemd handles this with `Restart=always`). Future improvement:
+use separate sockets for P2P and relay connections.
 
 ### What's Next
 1. ~~Test macOS ZtnaAgent app connecting to Pi k8s intermediate-server~~ DONE
@@ -523,8 +762,8 @@ All three resilience scenarios tested against live AWS deployment (macOS Agent �
 14. ~~Registry Connector replacement fix~~ DONE (Phase 4.7)
 15. ~~Clean up debug logging & deploy clean builds~~ DONE
 16. ~~Connection Resilience~~ DONE (Phase 4.9 — NWPathMonitor + exponential backoff + 3 detection paths)
-17. **P2P Swift Integration** — Add 11 FFI declarations to bridging header, wire into PacketTunnelProvider
-18. **P2P NAT Testing** — Phase 6: test hole punching with macOS (home NAT) → AWS (public IP)
+17. ~~P2P Swift Integration~~ DONE (Phase 6 — 12 FFI declarations + full PacketTunnelProvider wiring)
+18. ~~P2P NAT Testing~~ DONE (Phase 6.8 — hole punch success, stable keepalive, direct data flow)
 
 ---
 

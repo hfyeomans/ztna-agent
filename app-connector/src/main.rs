@@ -83,6 +83,45 @@ const QUIC_SOCKET_TOKEN: Token = Token(0);
 const LOCAL_SOCKET_TOKEN: Token = Token(1);
 
 // ============================================================================
+// P2P Binding Messages (must match packet_processor::p2p::connectivity)
+// ============================================================================
+
+const TRANSACTION_ID_LEN: usize = 12;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BindingRequest {
+    transaction_id: [u8; TRANSACTION_ID_LEN],
+    priority: u64,
+    use_candidate: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BindingResponse {
+    transaction_id: [u8; TRANSACTION_ID_LEN],
+    success: bool,
+    mapped_address: Option<SocketAddr>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum BindingMessage {
+    Request(BindingRequest),
+    Response(BindingResponse),
+}
+
+/// P2P keepalive request type (must match resilience.rs)
+const KEEPALIVE_REQUEST: u8 = 0x10;
+/// P2P keepalive response type (must match resilience.rs)
+const KEEPALIVE_RESPONSE: u8 = 0x11;
+
+/// Returns true if this packet looks like a non-QUIC P2P message.
+/// QUIC long header: first byte & 0x80 != 0. QUIC short header: first byte & 0x40 != 0.
+/// Binding messages start with bincode enum index 0x00/0x01.
+/// Keepalive messages start with 0x10/0x11.
+fn is_p2p_control_packet(data: &[u8]) -> bool {
+    !data.is_empty() && (data[0] & 0xC0) == 0
+}
+
+// ============================================================================
 // P2P Client Connection
 // ============================================================================
 
@@ -188,6 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --p2p-cert <path>          TLS certificate for P2P server mode (overrides config)
     // --p2p-key <path>           TLS private key for P2P server mode (overrides config)
     // --p2p-listen-port <port>   Port for P2P connections (overrides config)
+    // --external-ip <ip>         Public IP for P2P candidates (for NAT/cloud environments)
 
     // Load config file if provided (or from default paths)
     let config = if let Some(config_path) = parse_arg(&args, "--config") {
@@ -236,6 +276,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .or_else(|| p2p_config.and_then(|p| p.port))
         .unwrap_or(DEFAULT_P2P_PORT);
+    let external_ip: Option<std::net::IpAddr> = parse_arg(&args, "--external-ip")
+        .and_then(|s| s.parse().ok());
 
     let server_addr: SocketAddr = server_addr.parse()
         .map_err(|_| "Invalid server address")?;
@@ -249,6 +291,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  P2P Port: {}", p2p_port);
     log::info!("  ALPN:    {:?}", std::str::from_utf8(ALPN_PROTOCOL));
     log::info!("  P2P:     {}", if p2p_cert.is_some() { "enabled" } else { "disabled" });
+    if let Some(ip) = external_ip {
+        log::info!("  External IP: {}", ip);
+    }
 
     // Create connector and run
     let mut connector = Connector::new(
@@ -258,6 +303,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p2p_cert.as_deref(),
         p2p_key.as_deref(),
         p2p_port,
+        external_ip,
     )?;
     connector.run()
 }
@@ -318,6 +364,8 @@ struct Connector {
     session_manager: P2PSessionManager,
     /// Last time we sent a keepalive PING to Intermediate
     last_keepalive: Instant,
+    /// External/public IP for P2P candidates (for NAT/cloud environments like AWS)
+    external_ip: Option<std::net::IpAddr>,
 }
 
 impl Connector {
@@ -328,6 +376,7 @@ impl Connector {
         p2p_cert_path: Option<&str>,
         p2p_key_path: Option<&str>,
         p2p_port: u16,
+        external_ip: Option<std::net::IpAddr>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create quiche client configuration (for connecting to Intermediate)
         let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -421,6 +470,7 @@ impl Connector {
             signaling_buffer: Vec::new(),
             session_manager: P2PSessionManager::new(),
             last_keepalive: Instant::now(),
+            external_ip,
         })
     }
 
@@ -598,6 +648,14 @@ impl Connector {
             return Ok(());
         }
 
+        // Demultiplex: P2P control messages vs QUIC packets.
+        // Binding messages start with bincode enum index (0x00/0x01),
+        // keepalive messages start with 0x10/0x11,
+        // QUIC packets have first byte with upper bits set (0x40 or 0x80).
+        if is_p2p_control_packet(pkt_buf) {
+            return self.process_p2p_control_packet(pkt_buf, from);
+        }
+
         // Parse QUIC header
         let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
             Ok(v) => v,
@@ -634,6 +692,58 @@ impl Connector {
             log::debug!("Non-Initial packet for unknown P2P connection from {}", from);
         }
 
+        Ok(())
+    }
+
+    fn process_p2p_control_packet(&mut self, data: &[u8], from: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        match data[0] {
+            KEEPALIVE_REQUEST => {
+                // Echo back with response type byte
+                if data.len() == 5 {
+                    let mut response = [0u8; 5];
+                    response[0] = KEEPALIVE_RESPONSE;
+                    response[1..].copy_from_slice(&data[1..]);
+                    self.quic_socket.send_to(&response, from)?;
+                    log::trace!("Keepalive response sent to {}", from);
+                }
+            }
+            KEEPALIVE_RESPONSE => {
+                log::trace!("Keepalive response from {}", from);
+            }
+            _ => {
+                // Try as binding message
+                match bincode::deserialize::<BindingMessage>(data) {
+                    Ok(BindingMessage::Request(request)) => {
+                        log::info!("Binding request from {} (txn {:02x}{:02x}{:02x}{:02x})",
+                            from,
+                            request.transaction_id[0], request.transaction_id[1],
+                            request.transaction_id[2], request.transaction_id[3]);
+
+                        let response = BindingMessage::Response(BindingResponse {
+                            transaction_id: request.transaction_id,
+                            success: true,
+                            mapped_address: Some(from),
+                        });
+
+                        if let Ok(encoded) = bincode::serialize(&response) {
+                            self.quic_socket.send_to(&encoded, from)?;
+                            log::info!("Binding response sent to {} ({} bytes)", from, encoded.len());
+                        }
+                    }
+                    Ok(BindingMessage::Response(response)) => {
+                        log::info!("Binding response from {} (success={})", from, response.success);
+                    }
+                    Err(e) => {
+                        log::debug!("Unknown P2P control message from {} (type=0x{:02x}, len={}): {}",
+                            from, data[0], data.len(), e);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1458,9 +1568,17 @@ impl Connector {
 
                 // Gather our candidates
                 let bind_addr = self.quic_socket.local_addr()?;
+                // When external_ip is set (e.g., AWS Elastic IP), override the
+                // observed address so the ServerReflexive candidate uses the
+                // publicly routable IP instead of a VPC-internal address.
+                let effective_observed = if let Some(ext_ip) = self.external_ip {
+                    Some(SocketAddr::new(ext_ip, bind_addr.port()))
+                } else {
+                    self.observed_addr
+                };
                 let local_candidates = gather_candidates_with_observed(
                     bind_addr,
-                    self.observed_addr,
+                    effective_observed,
                     Some(self.server_addr),
                 );
 

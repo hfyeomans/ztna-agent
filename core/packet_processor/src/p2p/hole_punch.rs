@@ -237,9 +237,13 @@ impl HolePunchCoordinator {
                 if !peer_candidates.is_empty() {
                     self.remote_candidates = peer_candidates;
                 }
-                // Schedule start time
-                self.check_start_time = Some(Instant::now() + Duration::from_millis(start_delay_ms));
-                self.state = HolePunchState::WaitingToStart;
+                // Only schedule start if we haven't already begun checking.
+                // CandidateAnswer may have already transitioned us to Checking
+                // before StartPunching arrives in the same message batch.
+                if self.state != HolePunchState::Checking && self.state != HolePunchState::Connected {
+                    self.check_start_time = Some(Instant::now() + Duration::from_millis(start_delay_ms));
+                    self.state = HolePunchState::WaitingToStart;
+                }
             }
             SignalingMessage::PunchingResult { session_id, success, working_address } => {
                 if session_id != self.session_id {
@@ -341,6 +345,17 @@ impl HolePunchCoordinator {
 
     /// Handle timeouts
     pub fn on_timeout(&mut self) {
+        // Transition WaitingToStart → Checking once the delay has elapsed.
+        // This handles the case where StartPunching arrives after (or with)
+        // CandidateAnswer and no further signaling messages trigger re-evaluation.
+        if self.state == HolePunchState::WaitingToStart {
+            if let Some(start) = self.check_start_time {
+                if Instant::now() >= start {
+                    self.start_checking();
+                }
+            }
+        }
+
         if self.state == HolePunchState::Checking {
             self.check_list.handle_timeouts();
 

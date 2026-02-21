@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-01-31 (Task 006 E2E complete: config, routing, TCP, ICMP, return-path)
+**Last Updated:** 2026-02-21 (Task 006 Phase 8.5: P2P→Relay failover validated, multi-service HTTP verified)
 
 ---
 
@@ -85,10 +85,30 @@
 - **No registration ACK**: Server doesn't acknowledge; treat as best-effort
 - **JSON config**: Supports CLI arg override for backwards compatibility
 
+**P2P Server Mode (Port 4434):**
+- Dual-mode: QUIC client (to Intermediate on 4433) + QUIC server (for Agents on 4434)
+- Packet demux on port 4434: QUIC packets (first byte & 0xC0 != 0) vs Control packets
+- Control packet types: Binding messages (bincode variant 0x00/0x01), Keepalive (0x10 request / 0x11 response)
+- `process_p2p_control_packet()` handles binding requests and keepalive echo
+- Keepalive protocol: raw UDP, 5 bytes: `[type_byte, sequence_u32_le]`
+
+**Multi-Service Architecture (Phase 7):**
+- Per-service routing requires separate Connector instances (each with own --forward-addr)
+- AWS deployment: `ztna-connector.service` (echo-service, port 4434, P2P enabled) + `ztna-connector-web.service` (web-app, port 4435, relay-only)
+- Agent registers for multiple services via providerConfiguration `services` array
+- Intermediate routes 0x2F datagrams to matching Connector by service ID
+
+**Shared Socket Architecture (Phase 8.5 Discovery):**
+- Connector uses SINGLE `quic_socket` on port 4434 for BOTH P2P QUIC and Intermediate relay QUIC
+- Blocking port 4434 globally (e.g., `iptables -A INPUT -p udp --dport 4434 -j DROP`) kills both P2P and relay paths
+- Interface-specific blocking (`iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP`) correctly isolates P2P while preserving loopback relay
+- Future improvement: use separate sockets for P2P and relay connections
+
 **Deferred to Post-MVP:**
-- Automatic reconnection
-- Per-service backend routing (currently single --forward address for all services)
-- TCP window flow control (currently simple ACK-per-segment)
+- Automatic reconnection (→ Task 008)
+- Per-service backend routing, currently single --forward address for all services (→ Task 009)
+- TCP window flow control, currently simple ACK-per-segment (→ Task 011)
+- Separate P2P and relay sockets in Connector (→ Task 011)
 
 ---
 
@@ -224,14 +244,14 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | SwiftUI App | ✅ Works | Start/Stop + auto-start/stop for testing |
 | VPNManager | ✅ Works | Retry logic for first-time config |
 | PacketTunnelProvider | ✅ Rewritten | Full QUIC integration via FFI |
-| Bridging Header | ✅ Basic done | P2P FFI deferred (post-MVP), resilience = Swift-only |
+| Bridging Header | ✅ Complete | 23 FFI functions: 11 relay/core + 12 P2P (connections, hole punch, path resilience) |
 | AgentWrapper.swift | ⏭️ Deferred | FFI used directly (acceptable) |
 
 **Status:**
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Phase 1: Bridging Header | ✅ Complete | Basic FFI (11 functions), P2P deferred |
+| Phase 1: Bridging Header | ✅ Complete | 23 FFI functions (11 core + 12 P2P) |
 | Phase 2: Swift Wrapper | ⏭️ Deferred | Using FFI directly instead |
 | Phase 3: PacketTunnelProvider | ✅ Complete | Full QUIC + UDP + timeout handling |
 | Phase 4: Build Configuration | ✅ Complete | Rust lib + Xcode build working |
@@ -240,7 +260,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 7: PR & Merge | ✅ Complete | PR #6 merged 2026-01-23 |
 
 **Key Files:**
-- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (basic set + `agent_register` + `agent_send_intermediate_keepalive` + `agent_recv_datagram`)
+- `ios-macos/Shared/PacketProcessor-Bridging-Header.h` - C FFI declarations (23 total: core lifecycle/connect/packet I/O/timeout + agent_register + keepalive + recv_datagram + 12 P2P: connections, hole punch, path resilience)
 - `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift` - Full QUIC integration with service registration, keepalive, and return-path TUN injection
 - `ios-macos/ZtnaAgent/ZtnaAgent/ContentView.swift` - SwiftUI + VPNManager + configuration UI
 
@@ -266,6 +286,24 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Three detection paths: NWConnection `.failed`, `updateAgentState()` transitions, keepalive `NotConnected`
 - `attemptReconnect()` reuses existing Agent — calls `agent_connect()` again (no destroy/recreate)
 - State transition tracking prevents duplicate reconnect scheduling
+- P2P state fully reset during reconnection (timers, connections, flags)
+
+**P2P Swift Integration (Added 2026-01-31):**
+- 12 P2P FFI functions wired into PacketTunnelProvider (hole punch, binding, P2P QUIC, routing, keepalive)
+- Three NWConnection types: relay (udpConnection), binding (per-candidate), P2P (direct to Connector)
+- Hole punch auto-starts after service registration
+- Packet routing via `agent_get_active_path()`: Direct (P2P) or Relay
+- P2P keepalive timer (15s interval, 5-byte messages via `agent_poll_keepalive`)
+- Fallback detection via `agent_is_in_fallback()`
+- Path stats logging via `agent_get_path_stats()`
+
+**P2P NAT Testing Results (2026-01-31):**
+- Direct P2P QUIC path achieved: macOS (home NAT) → AWS Connector (port 4434)
+- Hole punch succeeds via server-reflexive candidate (3.128.36.92:4434)
+- 0.0.0.0:4434 candidate fails as expected (non-routable)
+- P2P keepalive stable for 3.5+ minutes (14 consecutive checks, zero missed)
+- ~1.8s warm-up window from tunnel start to P2P data flow (relay handles traffic during)
+- **Bug fix:** Rust `recv()` added keepalive demux — raw 5-byte keepalive (0x10/0x11) intercepted before `quiche::recv()` which would reject non-QUIC data
 
 **Deferred QUIC Enhancements (Post-MVP):**
 - True QUIC connection migration (quiche doesn't support — full reconnect instead)
@@ -283,7 +321,7 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 
 ---
 
-### 006: Cloud Deployment 🔄 IN PROGRESS
+### 006: Cloud Deployment ✅ COMPLETE (MVP)
 
 **Location:** `deploy/docker-nat-sim/`, `deploy/k8s/` + Cloud infrastructure
 
@@ -313,8 +351,12 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 | Phase 4.6: Return-Path (DATAGRAM→TUN) | ✅ Done | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` + `writePackets()` |
 | Phase 4.7: Registry Connector Replacement Fix | ✅ Done | `unregister()` guard prevents clobbering new registrations |
 | Phase 4.9: Connection Resilience | ✅ Done | Auto-recovery, NWPathMonitor, exponential backoff |
-| Phase 3: TLS & Security | 🔲 Pending | Self-signed → Let's Encrypt |
-| **Phase 6: P2P NAT Testing** | 🔲 **NOT DONE** | Requires Agent behind real NAT, Connector on different network |
+| Phase 3: TLS & Security | → Task 007 | Self-signed → Let's Encrypt |
+| Phase 6: P2P Swift Integration | ✅ Done | 12 P2P FFI wired into PacketTunnelProvider (hole punch, binding, P2P QUIC, routing, keepalive) |
+| **Phase 6.8: P2P NAT Testing** | ✅ **DONE** | Direct P2P path achieved: macOS (home NAT) → AWS Connector. Keepalive stable 3.5+ min. |
+| **Phase 7: HTTP App Validation** | ✅ **DONE** | HTTP through tunnel via second connector (web-app, 10.100.0.2). Multi-service routing verified. |
+| **Phase 8: Performance Metrics** | ✅ **DONE** | P2P 32.6ms vs Relay 76ms (2.3x faster). 10-min stability: 600/600, 0% loss. |
+| **Phase 8.5: P2P→Relay Failover** | ✅ **DONE** | Interface-specific iptables test: 180/180, 0% loss, seamless per-packet failover. |
 
 **Phase 0 Completed (Docker NAT Simulation):**
 
@@ -486,9 +528,17 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
                                 ▼
                     ┌─────────────────────────┐
                     │  006: Cloud Deployment  │
-                    │  🔄 IN PROGRESS         │
-                    │  (NAT testing, prod)    │
-                    └─────────────────────────┘
+                    │  ✅ COMPLETE (MVP)      │
+                    └───────────┬─────────────┘
+                                │
+                     ┌──────────┼──────────────────┐
+                     ▼          ▼                   ▼
+               007 (Security) 009 (Multi-Svc)  011 (Protocol)
+               P1             P2               P3
+                     │          │
+                     ▼          ▼
+               008 (Prod Ops) 010 (Dashboard)  012 (Multi-Env)
+               P2             P3               P3
 ```
 
 ---
@@ -508,11 +558,23 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 - ✅ All of above + 005a: Swift Agent Integration (done - macOS Agent + QUIC working)
 
 **Path to production deployment:**
-- 🔄 All of above + **006: Cloud Deployment** (IN PROGRESS)
+- ✅ All of above + **006: Cloud Deployment** (COMPLETE — MVP)
   - ✅ Config files, multi-service routing, TCP/ICMP support
   - ✅ Return-path DATAGRAM→TUN injection (Agent side) - ICMP ping works E2E
   - ✅ Registry Connector replacement bug fix
-  - 🔲 P2P NAT testing, TLS, production readiness
+  - ✅ P2P Swift Integration (12 FFI functions wired into PacketTunnelProvider)
+  - ✅ P2P NAT Testing — direct path achieved, keepalive stable, Rust `recv()` keepalive demux fix
+  - ✅ HTTP app validation — multi-service (echo + web-app) through tunnel
+  - ✅ Performance metrics — P2P 32.6ms vs Relay 76ms, 10-min 0% loss
+  - ✅ P2P→Relay failover — seamless per-packet fallback, 180/180 0% loss
+
+**Path to production (post-MVP):**
+- 🔲 Task 007: Security Hardening (P1) — TLS certs, client auth, rate limiting
+- 🔲 Task 008: Production Operations (P2) — Monitoring, CI/CD, automation
+- 🔲 Task 009: Multi-Service Architecture (P2) — Per-service backends, discovery
+- 🔲 Task 010: Admin Dashboard (P3) — Web UI for management
+- 🔲 Task 011: Protocol Improvements (P3) — IPv6, TCP flow, QUIC migration
+- 🔲 Task 012: Multi-Environment Testing (P3) — DO, multi-region, NAT diversity
 
 ---
 
@@ -522,7 +584,7 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 |------|----|----------|------|
 | Agent | Intermediate | QUIC/UDP | 4433 |
 | Connector | Intermediate | QUIC/UDP | 4433 |
-| Agent | Connector (P2P) | QUIC/UDP | dynamic |
+| Agent | Connector (P2P) | QUIC/UDP | 4434 (Connector P2P listen port) |
 | Connector | Local App | TCP/UDP | configurable |
 
 ---
@@ -636,11 +698,28 @@ The App Connector handles three IP protocols from tunneled packets:
 
 **Rust (`core/packet_processor/src/lib.rs`):**
 ```rust
-const REG_TYPE_AGENT: u8 = 0x10;
-
+// Relay / Core FFI
 pub unsafe extern "C" fn agent_register(agent: *mut Agent, service_id: *const c_char) -> AgentResult;
 pub unsafe extern "C" fn agent_send_datagram(agent: *mut Agent, buf: *const u8, len: usize) -> AgentResult;
 pub unsafe extern "C" fn agent_recv_datagram(agent: *mut Agent, out_data: *mut u8, out_len: *mut usize) -> AgentResult;
+
+// P2P Connection FFI
+pub unsafe extern "C" fn agent_connect_p2p(agent: *mut Agent, host: *const c_char, port: u16) -> AgentResult;
+pub unsafe extern "C" fn agent_is_p2p_connected(agent: *const Agent, host: *const c_char, port: u16) -> bool;
+pub unsafe extern "C" fn agent_poll_p2p(agent: *mut Agent, out_data: *mut u8, out_len: *mut usize, out_ip: *mut u8, out_port: *mut u16) -> AgentResult;
+pub unsafe extern "C" fn agent_send_datagram_p2p(agent: *mut Agent, data: *const u8, len: usize, dest_ip: *const u8, dest_port: u16) -> AgentResult;
+
+// Hole Punching FFI
+pub unsafe extern "C" fn agent_start_hole_punch(agent: *mut Agent, service_id: *const c_char) -> AgentResult;
+pub unsafe extern "C" fn agent_poll_hole_punch(agent: *mut Agent, out_ip: *mut u8, out_port: *mut u16, out_complete: *mut u8) -> AgentResult;
+pub unsafe extern "C" fn agent_poll_binding_request(agent: *mut Agent, out_data: *mut u8, out_len: *mut usize, out_ip: *mut u8, out_port: *mut u16) -> AgentResult;
+pub unsafe extern "C" fn agent_process_binding_response(agent: *mut Agent, data: *const u8, len: usize, from_ip: *const u8, from_port: u16) -> AgentResult;
+
+// Path Resilience FFI
+pub unsafe extern "C" fn agent_poll_keepalive(agent: *mut Agent, out_ip: *mut u8, out_port: *mut u16, out_data: *mut u8) -> AgentResult;
+pub unsafe extern "C" fn agent_get_active_path(agent: *const Agent) -> u8;  // 0=Direct, 1=Relay, 2=None
+pub unsafe extern "C" fn agent_is_in_fallback(agent: *const Agent) -> bool;
+pub unsafe extern "C" fn agent_get_path_stats(agent: *const Agent, out_missed: *mut u32, out_rtt: *mut u64, out_fallback: *mut u8) -> AgentResult;
 ```
 
 **Swift (`PacketTunnelProvider.swift`):**
@@ -653,6 +732,13 @@ for serviceId in serviceIds {
 // Route table lookup + 0x2F wrapper for outgoing packets
 if let serviceId = routeTable[destIp] {
     sendRoutedDatagram(agent: agent, serviceId: serviceId, packet: data)
+}
+
+// P2P packet routing (checks active path before sending)
+if isP2PActive, agent_get_active_path(agent) == 0 {  // 0 = Direct
+    sendP2PDatagram(agent: agent, packet: data)       // via agent_send_datagram_p2p
+} else {
+    sendRoutedDatagram(agent: agent, ...)              // via relay
 }
 ```
 

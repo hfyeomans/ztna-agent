@@ -76,6 +76,53 @@ pub enum AgentResult {
     NoData = 6,
     QuicError = 7,
     PanicCaught = 8,
+    // Specific QUIC error codes for debugging (10+)
+    QuicDone = 10,
+    QuicBufferTooShort = 11,
+    QuicUnknownVersion = 12,
+    QuicInvalidFrame = 13,
+    QuicInvalidPacket = 14,
+    QuicInvalidState = 15,
+    QuicInvalidStreamState = 16,
+    QuicInvalidTransportParam = 17,
+    QuicCryptoFail = 18,
+    QuicTlsFail = 19,
+    QuicFlowControl = 20,
+    QuicStreamLimit = 21,
+    QuicStreamStopped = 22,
+    QuicStreamReset = 23,
+    QuicFinalSize = 24,
+    QuicCongestionControl = 25,
+    QuicIdLimit = 26,
+    QuicOutOfIdentifiers = 27,
+    QuicKeyUpdate = 28,
+}
+
+impl AgentResult {
+    fn from_quiche_error(e: &quiche::Error) -> Self {
+        match e {
+            quiche::Error::Done => AgentResult::QuicDone,
+            quiche::Error::BufferTooShort => AgentResult::QuicBufferTooShort,
+            quiche::Error::UnknownVersion => AgentResult::QuicUnknownVersion,
+            quiche::Error::InvalidFrame => AgentResult::QuicInvalidFrame,
+            quiche::Error::InvalidPacket => AgentResult::QuicInvalidPacket,
+            quiche::Error::InvalidState => AgentResult::QuicInvalidState,
+            quiche::Error::InvalidStreamState(..) => AgentResult::QuicInvalidStreamState,
+            quiche::Error::InvalidTransportParam => AgentResult::QuicInvalidTransportParam,
+            quiche::Error::CryptoFail => AgentResult::QuicCryptoFail,
+            quiche::Error::TlsFail => AgentResult::QuicTlsFail,
+            quiche::Error::FlowControl => AgentResult::QuicFlowControl,
+            quiche::Error::StreamLimit => AgentResult::QuicStreamLimit,
+            quiche::Error::StreamStopped(..) => AgentResult::QuicStreamStopped,
+            quiche::Error::StreamReset(..) => AgentResult::QuicStreamReset,
+            quiche::Error::FinalSize => AgentResult::QuicFinalSize,
+            quiche::Error::CongestionControl => AgentResult::QuicCongestionControl,
+            quiche::Error::IdLimit => AgentResult::QuicIdLimit,
+            quiche::Error::OutOfIdentifiers => AgentResult::QuicOutOfIdentifiers,
+            quiche::Error::KeyUpdate => AgentResult::QuicKeyUpdate,
+            _ => AgentResult::QuicError,
+        }
+    }
 }
 
 // ============================================================================
@@ -231,6 +278,19 @@ impl Agent {
     ///
     /// Routes the packet to the correct connection based on source address.
     fn recv(&mut self, data: &[u8], from: SocketAddr) -> Result<(), quiche::Error> {
+        // Raw P2P keepalive messages (5 bytes, not QUIC-encapsulated) must be
+        // intercepted before QUIC parsing. The Connector echoes keepalive
+        // responses as raw UDP; passing them to quiche::recv() would fail.
+        if data.len() == 5
+            && (data[0] == p2p::KEEPALIVE_REQUEST || data[0] == p2p::KEEPALIVE_RESPONSE)
+        {
+            if let Some(p2p) = self.p2p_conns.get_mut(&from) {
+                p2p.last_activity = Instant::now();
+            }
+            let _ = self.path_manager.process_keepalive(from, data);
+            return Ok(());
+        }
+
         // Create recv info
         let recv_info = quiche::RecvInfo {
             from,
@@ -555,12 +615,15 @@ impl Agent {
             coordinator.set_observed_addr(addr);
         }
 
-        // Gather local candidates
-        let local_addrs: Vec<SocketAddr> = self
-            .local_addr
-            .iter()
-            .cloned()
-            .collect();
+        // Gather local candidates — use stored local_addr if available,
+        // otherwise enumerate network interfaces via getifaddrs.
+        // Use the QAD observed port if available (matches the NAT mapping).
+        let observed_port = self.observed_address.map(|a| a.port()).unwrap_or(0);
+        let local_addrs: Vec<SocketAddr> = if let Some(addr) = self.local_addr {
+            vec![addr]
+        } else {
+            p2p::enumerate_local_addresses(observed_port)
+        };
 
         if local_addrs.is_empty() {
             return Err("No local address available".to_string());
@@ -862,6 +925,38 @@ pub unsafe extern "C" fn agent_connect(
     result.unwrap_or(AgentResult::PanicCaught)
 }
 
+/// Set the local UDP address (used as RecvInfo.to for quiche)
+///
+/// Call this after the NWConnection reports its local endpoint.
+/// Without this, RecvInfo.to defaults to 0.0.0.0:0 which can cause
+/// quiche path validation issues.
+#[no_mangle]
+pub unsafe extern "C" fn agent_set_local_addr(
+    agent: *mut Agent,
+    ip: *const u8,
+    port: u16,
+) -> AgentResult {
+    if agent.is_null() || ip.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let agent = &mut *agent;
+        let ip_bytes = slice::from_raw_parts(ip, 4);
+        let addr = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3],
+            )),
+            port,
+        );
+        agent.local_addr = Some(addr);
+        eprintln!("[agent] local_addr set to {}", addr);
+        AgentResult::Ok
+    }));
+
+    result.unwrap_or(AgentResult::PanicCaught)
+}
+
 /// Check if the agent is connected
 #[no_mangle]
 pub unsafe extern "C" fn agent_is_connected(agent: *const Agent) -> bool {
@@ -976,7 +1071,7 @@ pub unsafe extern "C" fn agent_recv(
 
         match agent.recv(data, from) {
             Ok(()) => AgentResult::Ok,
-            Err(_) => AgentResult::QuicError,
+            Err(e) => AgentResult::from_quiche_error(&e),
         }
     }));
 

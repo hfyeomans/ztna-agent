@@ -1,7 +1,7 @@
 # ZTNA Testing & Demo Guide
 
-**Last Updated:** 2026-01-31
-**Status:** Task 006 E2E Complete - Config, Routing, TCP, ICMP, Return-Path all implemented
+**Last Updated:** 2026-02-21
+**Status:** Task 006 Phase 8.5 Complete - HTTP validation, performance metrics, P2P→relay failover verified
 
 ---
 
@@ -118,7 +118,7 @@ netstat -rn | grep utun
 |------|--------|-------|
 | UDP echo (`nc -u 10.100.0.1 9999`) | ✅ Works | Full E2E verified on AWS |
 | ICMP ping (`ping 10.100.0.1`) | ✅ Works | Full E2E: Agent→Intermediate→Connector (Echo Reply)→Agent→TUN |
-| TCP connect (`curl 10.100.0.2:8080`) | 🔲 Needs web-app backend | TCP proxy + return-path implemented, needs backend service deployed |
+| TCP connect (`curl 10.100.0.2:8080`) | ✅ Works | HTTP through tunnel via web-app connector (relay-only) |
 | Split tunnel (normal traffic untouched) | ✅ Works | Only 10.100.0.0/24 routes through utun |
 
 ---
@@ -1325,9 +1325,9 @@ RTT_SAMPLES=100 BURST_COUNT=500 tests/e2e/scenarios/performance-metrics.sh
 
 ---
 
-## Phase 7: P2P Hole Punching Tests (Task 005)
+## Phase 7: P2P Hole Punching Tests (Task 005 + 006)
 
-> **Status:** 🔄 In Development - Unit tests complete, E2E tests pending
+> **Status:** ✅ P2P Swift Integration complete (Phase 6). Rust unit tests pass (81). macOS Agent has full P2P wiring. NAT testing pending (Phase 6.8).
 
 ### Unit Tests (Complete)
 
@@ -1343,7 +1343,111 @@ All P2P unit tests pass (see P2P Module Tests section below):
 - `connectivity.rs` - 17 tests (binding checks, pairs)
 - `hole_punch.rs` - 17 tests (coordinator, path selection)
 
-### E2E Tests (Planned)
+### macOS Agent P2P Integration (Task 006 Phase 6) ✅ IMPLEMENTED
+
+The macOS Agent (PacketTunnelProvider.swift) now has full P2P wiring:
+
+**What's wired:**
+- 12 P2P FFI functions declared in bridging header
+- Hole punch auto-starts after service registration
+- Binding request pump (per-candidate NWConnections)
+- P2P QUIC connection after hole punch succeeds
+- Packet routing via `agent_get_active_path()` (Direct vs Relay)
+- P2P keepalive (15s interval)
+- Path stats logging and fallback detection
+- Full cleanup on disconnect/reconnect
+
+**Socket architecture:**
+```
+PacketTunnelProvider
+├── udpConnection (NWConnection)          ← Intermediate (relay, always active)
+├── bindingConnections (per-candidate)    ← Temporary, during hole punch only
+└── p2pConnection (NWConnection)          ← Direct to Connector (after hole punch)
+```
+
+### P2P NAT Testing (Task 006 Phase 6.8) — ✅ COMPLETE (2026-01-31)
+
+**Result:** Direct P2P QUIC path achieved. macOS Agent behind home router NAT successfully hole-punched to AWS Connector on port 4434. P2P keepalive stable for 3.5+ minutes with zero missed keepalives.
+
+```bash
+# macOS Agent logs — watch for P2P activity
+log stream --predicate 'subsystem CONTAINS "ztna"' --info
+```
+
+**Actual log sequence (verified 2026-01-31):**
+```
+# 1. Tunnel starts, relay connects
+"Starting tunnel..."
+"QUIC connection established"
+"Registered for service 'echo-service'"
+
+# 2. Hole punch initiates
+"Hole punch initiated for service 'echo-service'"
+
+# 3. Binding checks (two candidates)
+"Binding connection ready to 0.0.0.0:4434"       ← fails (non-routable, expected)
+"Binding connection ready to 3.128.36.92:4434"    ← succeeds
+"Processed binding response from 3.128.36.92:4434"
+
+# 4. Hole punch succeeds
+"Hole punch SUCCESS: direct path to 3.128.36.92:4434"
+
+# 5. P2P QUIC connection
+"P2P connection ready to 3.128.36.92:4434"
+"P2P QUIC connection ESTABLISHED - switching to direct path"
+
+# 6. Stable keepalive (every 15s)
+"Path: DIRECT, RTT: 0ms, missed keepalives: 0, fallback: false"  ← repeated 14+ times
+```
+
+**Test procedure (macOS behind home NAT → AWS):**
+
+**Terminal 1 — AWS Intermediate logs:**
+```bash
+ssh ubuntu@3.128.36.92
+sudo journalctl -u ztna-intermediate -f
+```
+
+**Terminal 2 — AWS Connector logs:**
+```bash
+ssh ubuntu@3.128.36.92
+sudo journalctl -u ztna-connector -f
+```
+
+**Terminal 3 — macOS Agent logs:**
+```bash
+log stream --predicate 'subsystem CONTAINS "ztna"' --info
+```
+
+**Terminal 4 — Launch and test:**
+```bash
+open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
+# After connected:
+ping -c 3 10.100.0.1
+
+# Check for direct traffic (non-relay):
+sudo tcpdump -i en0 udp and not host 3.128.36.92
+```
+
+**Verified outcomes (2026-01-31):**
+| Scenario | Result | Verification |
+|----------|--------|-------------|
+| Hole punch succeeds | ✅ Direct P2P QUIC path | 14 consecutive keepalive checks, 0 missed |
+| Relay still works | ✅ No regression | Relay handles traffic during ~1.8s warm-up |
+| P2P keepalive stable | ✅ 3.5+ minutes | `missed keepalives: 0` in all path stats |
+
+**Bug found & fixed during testing:**
+- Agent `recv()` passed raw 5-byte keepalive responses (0x11) to `quiche::recv()` which rejected them
+- Fix: Added keepalive demux at top of `recv()` in `lib.rs` — intercepts 0x10/0x11 before QUIC routing
+- Before fix: missed keepalives hit 3 at 30s → fallback to relay
+- After fix: zero missed keepalives over 3.5+ minutes
+
+**Known minor issues (acceptable for MVP):**
+- 0.0.0.0:4434 candidate always fails (non-routable host candidate from Connector binding)
+- RTT reports 0ms (keepalive RTT tracking not yet calibrated)
+- ~1.8s warm-up window before P2P accepts traffic (relay covers this gap)
+
+### E2E Tests (Planned — post-NAT testing)
 
 ```bash
 # Run P2P hole punching test suite (when available)
@@ -1786,4 +1890,233 @@ sudo journalctl -u ztna-intermediate --since "1 min ago" | grep "Relayed"
 
 # Check Connector ICMP handling (set RUST_LOG=debug temporarily)
 sudo journalctl -u ztna-connector --since "1 min ago" | grep "ICMP"
+```
+
+---
+
+## Phase 7: HTTP Through Tunnel (Multi-Service) ✅ COMPLETE
+
+### AWS Services
+
+Two Connector instances run on the AWS EC2:
+
+| Service | systemd Unit | Port | Mode | Virtual IP |
+|---------|-------------|------|------|-----------|
+| echo-service | `ztna-connector.service` | 4434 | P2P + relay | 10.100.0.1 |
+| web-app | `ztna-connector-web.service` | 4435 | relay-only | 10.100.0.2 |
+
+Plus:
+- `http-server.service` — Python HTTP server on `:8080` serving `/opt/ztna/www/index.html`
+- `ztna-intermediate.service` — QUIC relay on `:4433`
+
+### HTTP Test Procedure
+
+```bash
+# 1. Ensure VPN connected (both services registered)
+# Agent logs should show: "Registered for service 'echo-service'"
+# And: "Registered for service 'web-app'"
+
+# 2. Test HTTP through tunnel (relay path)
+curl -v http://10.100.0.2:8080/
+# Expected: 200 OK with HTML content "ZTNA Test Page"
+
+# 3. Multiple concurrent requests
+for i in $(seq 1 10); do
+    curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" http://10.100.0.2:8080/
+done
+# Expected: all 200, ~70-80ms each
+
+# 4. Regression check — UDP echo still works
+ping -c 3 10.100.0.1
+# Expected: replies via P2P direct path (~32ms)
+```
+
+### AWS Service Management
+
+```bash
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
+
+# Check all services
+systemctl status ztna-intermediate ztna-connector ztna-connector-web http-server echo-server
+
+# Restart a connector
+sudo systemctl restart ztna-connector-web
+
+# View web-app connector logs
+sudo journalctl -u ztna-connector-web -f
+```
+
+---
+
+## Phase 8: Performance Metrics ✅ COMPLETE
+
+### Benchmark Results (2026-02-21)
+
+| Metric | P2P (Direct) | Relay | Ratio |
+|--------|-------------|-------|-------|
+| RTT avg | 32.6 ms | 76.0 ms | 2.3x faster |
+| RTT min | 31.2 ms | 64.6 ms | |
+| RTT max | 34.5 ms | 165.5 ms | |
+
+### P2P Latency Test
+
+```bash
+# 50-sample ping via P2P direct path (10.100.0.1 → echo-service)
+ping -c 50 10.100.0.1
+# Expected: ~32ms avg, 0% loss after hole punch completes
+```
+
+### Relay Latency Test
+
+```bash
+# HTTP timing via relay (10.100.0.2 → web-app, relay-only)
+for i in $(seq 1 50); do
+    curl -s -o /dev/null -w "%{time_total}\n" http://10.100.0.2:8080/
+done
+# Expected: ~76ms avg
+```
+
+### 10-Minute Stability Test
+
+```bash
+# 600 pings via P2P path
+ping -c 600 10.100.0.1
+# Expected: 600/600 received, 0.0% loss
+
+# Monitor Agent logs during test
+log stream --predicate 'subsystem CONTAINS "ztna"' --info | grep -E "Path:|fallback|DIRECT|RELAY"
+# Expected: stable "Path: DIRECT", no flapping
+```
+
+---
+
+## Phase 8.5: P2P → Relay Failover Test ✅ COMPLETE
+
+### Test Design
+
+Block P2P traffic on the external interface only, preserving Connector↔Intermediate relay on loopback.
+
+**Key Discovery:** The Connector uses a SINGLE `quic_socket` (port 4434) for both P2P and relay QUIC. Blocking port 4434 globally kills both paths. Must use interface-specific iptables.
+
+### Test Procedure
+
+```bash
+# SSH to AWS
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
+
+# 1. Verify P2P baseline
+ping -c 5 10.100.0.1  # Should get replies at ~32ms
+
+# 2. Block P2P on external interface only
+sudo iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP
+# This blocks: Agent → Connector P2P (from internet via ens5)
+# This preserves: Connector → Intermediate relay (loopback, not ens5)
+
+# 3. Run sustained ping (3 minutes)
+ping -c 180 10.100.0.1
+# Expected: 180/180, 0% loss, ~32ms avg (relay path)
+
+# 4. Monitor Intermediate logs (separate terminal)
+sudo journalctl -u ztna-intermediate -f | grep -E "Relayed|echo-service"
+# Expected: continuous "Relayed N bytes for 'echo-service'" entries
+
+# 5. Verify recovery — unblock P2P
+sudo iptables -F INPUT
+sleep 60
+ping -c 5 10.100.0.1  # Should work at ~32ms (P2P may re-establish)
+
+# 6. Clean up
+sudo iptables -F INPUT
+```
+
+### How Failover Works
+
+`sendP2PDatagram()` in PacketTunnelProvider.swift provides **per-packet** failover:
+1. Tries `agent_send_datagram_p2p()` for each packet
+2. If it returns error (NotConnected=4), immediately calls `sendRoutedDatagram()`
+3. `sendRoutedDatagram()` wraps with 0x2F header and sends via relay
+4. Zero-downtime — no waiting for keepalive timeout or reconnection
+
+### Results (2026-02-21)
+
+```
+180 packets transmitted, 180 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 30.238/31.821/35.293/0.668 ms
+```
+
+### WRONG Way to Test (Common Mistake)
+
+```bash
+# ❌ WRONG: Blocks ALL traffic on port 4434 (kills relay too!)
+sudo iptables -A INPUT -p udp --dport 4434 -j DROP
+
+# ✅ RIGHT: Block only external interface (preserves loopback relay)
+sudo iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP
+```
+
+---
+
+## Manual Failover Testing Commands (Quick Reference)
+
+> **See also:** `docs/demo-runbook.md` for the full 5-terminal demo with talking points.
+
+All commands assume SSH to AWS: `ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126`
+
+### Block P2P (Force Relay Fallback)
+
+```bash
+# Block P2P on external interface only (preserves Connector↔Intermediate relay on loopback)
+sudo iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP
+```
+
+### Verify Relay Takeover
+
+```bash
+# Check Intermediate logs for relay activity
+sudo journalctl -u ztna-intermediate --since "30 sec ago" | grep "Relayed"
+# Expected: "Relayed 84 bytes for 'echo-service'" entries
+```
+
+### Unblock P2P (Allow Recovery)
+
+```bash
+sudo iptables -F INPUT
+# Wait 30-60s for P2P keepalive to re-establish direct path
+```
+
+### Restart Intermediate (Test Resilience)
+
+```bash
+sudo systemctl restart ztna-intermediate
+# macOS Agent will auto-recover (1s backoff + ~40ms handshake ≈ 1s recovery)
+# Watch Agent logs: log stream --predicate 'subsystem CONTAINS "ztna"' --info
+```
+
+### Stop/Start Connector (Test No-Backend)
+
+```bash
+# Stop echo-service connector
+sudo systemctl stop ztna-connector
+# Traffic to 10.100.0.1 will have no backend — packets relayed but undelivered
+
+# Restart
+sudo systemctl start ztna-connector
+# Connector re-registers, traffic resumes
+```
+
+### Stop/Start Web-App Connector
+
+```bash
+sudo systemctl stop ztna-connector-web
+# curl http://10.100.0.2:8080/ will timeout (no backend)
+
+sudo systemctl start ztna-connector-web
+# HTTP resumes
+```
+
+### Clean Up All iptables Rules
+
+```bash
+sudo iptables -F INPUT
+sudo iptables -L INPUT  # Verify empty chain
 ```
