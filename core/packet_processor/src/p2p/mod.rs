@@ -34,6 +34,16 @@ pub mod hole_punch;
 pub mod resilience;
 pub mod signaling;
 
+// ============================================================================
+// Protocol Constants (shared across all P2P modules and app-connector)
+// ============================================================================
+
+/// Magic byte prefix for all P2P control messages (ASCII 'Z' for ZTNA).
+/// Distinguishes P2P control traffic from QUIC packets unambiguously:
+/// QUIC long headers have bit 7 set (0x80), short headers have bit 6 set (0x40).
+/// 0x5A (0b01011010) has bit 6 set, but we check for the exact byte, not a bit pattern.
+pub const ZTNA_MAGIC: u8 = 0x5A;
+
 // Re-export commonly used types
 pub use candidate::{
     calculate_priority, enumerate_local_addresses, gather_host_candidates,
@@ -60,5 +70,5 @@ pub use hole_punch::{
 pub use resilience::{
     decode_keepalive, encode_keepalive_request, encode_keepalive_response, ActivePath, PathInfo,
     PathManager, PathState, PathStats, FALLBACK_COOLDOWN, KEEPALIVE_INTERVAL, KEEPALIVE_REQUEST,
-    KEEPALIVE_RESPONSE, KEEPALIVE_TIMEOUT, MISSED_KEEPALIVES_THRESHOLD,
+    KEEPALIVE_RESPONSE, KEEPALIVE_SIZE, KEEPALIVE_TIMEOUT, MISSED_KEEPALIVES_THRESHOLD,
 };

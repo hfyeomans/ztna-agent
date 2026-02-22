@@ -58,8 +58,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     /// Route table: destination IPv4 (as UInt32 in network byte order) → service ID
     private var routeTable: [UInt32: String] = [:]
 
-    /// Track if we've already registered to avoid duplicate registrations
-    private var hasRegistered = false
+    /// Track per-service registration state (L8: replaces boolean hasRegistered)
+    private var registeredServices: Set<String> = []
+
+    // C1: TLS configuration (loaded from providerConfiguration)
+    /// Whether to verify the server's TLS certificate (default: false for dev self-signed certs)
+    private var verifyPeer: Bool = false
+    /// Path to CA certificate PEM file for server verification (nil = system CA store)
+    private var caCertPath: String?
 
     /// Buffer for receiving UDP packets
     private var recvBuffer = [UInt8](repeating: 0, count: 1500)
@@ -142,7 +148,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             self.logger.info("Tunnel settings applied successfully")
 
             // Create QUIC agent (thread-safe via AgentFFI)
-            guard self.agentFFI.create() != nil else {
+            guard self.agentFFI.create(caCertPath: self.caCertPath, verifyPeer: self.verifyPeer) != nil else {
                 self.logger.error("Failed to create QUIC agent")
                 completionHandler(
                     NSError(domain: "ZtnaAgent", code: 1,
@@ -166,7 +172,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
         // 1. Atomically signal all entry points to stop (visible to all queues)
         isRunning = false
-        hasRegistered = false
+        registeredServices.removeAll()
 
         // 2. Cancel all timers (prevents new timer callbacks from firing)
         timeoutTask?.cancel()
@@ -217,7 +223,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         guard let tunnelProtocol = protocolConfiguration as? NETunnelProviderProtocol,
               let config = tunnelProtocol.providerConfiguration else {
             logger.warning("No provider configuration found, using defaults")
-            serverIPBytes = parseIPv4(serverHost)
+            serverIPBytes = parseIPv4(serverHost) ?? [0, 0, 0, 0]
             return
         }
 
@@ -250,22 +256,29 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             logger.info("Loaded \(self.services.count) service routes")
         }
 
-        serverIPBytes = parseIPv4(serverHost)
-        logger.info("Configuration loaded: \(self.serverHost):\(self.serverPort), service=\(self.targetServiceId), routes=\(self.routeTable.count)")
+        // C1: TLS peer verification config
+        if let verify = config["verifyPeer"] as? Bool {
+            verifyPeer = verify
+        }
+        if let caPath = config["caCertPath"] as? String, !caPath.isEmpty {
+            caCertPath = caPath
+        }
+
+        serverIPBytes = parseIPv4(serverHost) ?? [0, 0, 0, 0]
+        logger.info("Configuration loaded: \(self.serverHost):\(self.serverPort), service=\(self.targetServiceId), routes=\(self.routeTable.count), verifyPeer=\(self.verifyPeer)")
     }
 
-    private func parseIPv4(_ host: String) -> [UInt8] {
+    private func parseIPv4(_ host: String) -> [UInt8]? {
         let components = host.split(separator: ".").compactMap { UInt8($0) }
         guard components.count == 4 else {
             logger.error("Invalid IPv4 address format: \(host)")
-            return [0, 0, 0, 0]
+            return nil
         }
         return components
     }
 
     private func ipv4ToUInt32(_ host: String) -> UInt32? {
-        let bytes = parseIPv4(host)
-        guard bytes != [0, 0, 0, 0] || host == "0.0.0.0" else { return nil }
+        guard let bytes = parseIPv4(host) else { return nil }
         return UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16 | UInt32(bytes[2]) << 8 | UInt32(bytes[3])
     }
 
@@ -426,7 +439,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         udpConnection?.cancel()
         udpConnection = nil
 
-        hasRegistered = false
+        registeredServices.removeAll()
 
         setupUdpConnection()
 
@@ -439,10 +452,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         if case .hostPort(let host, let port) = connection.currentPath?.localEndpoint {
             let portValue = port.rawValue
             let hostStr = "\(host)"
-            let ipBytes = parseIPv4(hostStr)
-            if ipBytes != [0, 0, 0, 0] {
-                var ip = ipBytes
-                let result = agent_set_local_addr(agent, &ip, portValue)
+            if var ip = parseIPv4(hostStr) {
+                let result = agent_set_local_addr(agent, &ip, ip.count, portValue)
                 logger.info("Set local address: \(hostStr):\(portValue) → \(result.rawValue)")
             } else {
                 logger.warning("Could not parse local endpoint: \(hostStr)")
@@ -651,6 +662,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             logger.debug("Keepalive PING sent")
             // Pump outbound to actually send the PING frame
             pumpOutbound()
+
+            // L8: Retry failed registrations on keepalive cycles
+            let expectedCount = services.isEmpty ? 1 : services.count
+            if registeredServices.count < expectedCount {
+                logger.info("Retrying registration for unregistered services (\(registeredServices.count)/\(expectedCount))")
+                registerForService()
+            }
         } else if result == AgentResultNotConnected {
             logger.warning("Keepalive failed: not connected")
             keepaliveTask?.cancel()
@@ -718,11 +736,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     }
 
     private func registerForService() {
-        let currentHasRegistered = self.hasRegistered
         let hasAgent = agentFFI.isAlive
-        logger.info("registerForService() called, hasRegistered=\(currentHasRegistered)")
-        guard let agent = agentFFI.agent, !hasRegistered else {
-            logger.info("registerForService() guard failed: agent=\(hasAgent), hasRegistered=\(currentHasRegistered)")
+        guard let agent = agentFFI.agent else {
+            logger.info("registerForService() guard failed: agent=\(hasAgent)")
             return
         }
 
@@ -732,8 +748,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             serviceIds = [targetServiceId]
         }
 
-        var anySuccess = false
-        for serviceId in serviceIds {
+        // L8: Only attempt registration for services not yet registered
+        let unregistered = serviceIds.filter { !registeredServices.contains($0) }
+        guard !unregistered.isEmpty else {
+            logger.info("registerForService(): all \(serviceIds.count) services already registered")
+            return
+        }
+
+        logger.info("registerForService(): \(unregistered.count) unregistered service(s) to register")
+
+        var anyNewSuccess = false
+        for serviceId in unregistered {
             logger.info("Calling agent_register for '\(serviceId)'")
             let result = serviceId.withCString { servicePtr in
                 agent_register(agent, servicePtr)
@@ -741,25 +766,31 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             logger.info("agent_register returned: \(result.rawValue)")
 
             if result == AgentResultOk {
-                anySuccess = true
+                registeredServices.insert(serviceId)
+                anyNewSuccess = true
                 logger.info("Registered for service '\(serviceId)'")
             } else {
-                logger.warning("Failed to register for service '\(serviceId)': result=\(result.rawValue)")
+                logger.warning("Failed to register for service '\(serviceId)': result=\(result.rawValue) — will retry on next keepalive")
             }
         }
 
-        if anySuccess {
-            hasRegistered = true
+        let allRegistered = registeredServices.count == serviceIds.count
+        logger.info("Registration state: \(registeredServices.count)/\(serviceIds.count) services registered")
+
+        if anyNewSuccess {
             // Pump outbound to send registration DATAGRAMs
             networkQueue.async { [weak self] in
                 self?.pumpOutbound()
             }
-            // Start keepalive timer to prevent 30s idle timeout
-            startKeepaliveTimer()
-            // Initiate P2P hole punching after a short delay to allow
-            // QAD observed address DATAGRAM to arrive and be processed
-            networkQueue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
-                self?.startHolePunching()
+            // Start keepalive timer if not already running
+            if keepaliveTask == nil {
+                startKeepaliveTimer()
+            }
+            // Initiate P2P hole punching after a short delay (only when all registered)
+            if allRegistered {
+                networkQueue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+                    self?.startHolePunching()
+                }
             }
         }
     }
@@ -1074,8 +1105,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             if let data, !data.isEmpty, let agent = self.agentFFI.agent {
                 // Parse key to get source IP/port
                 let parts = key.split(separator: ":")
-                if parts.count == 2 {
-                    var fromIp = self.parseIPv4(String(parts[0]))
+                if parts.count == 2, var fromIp = self.parseIPv4(String(parts[0])) {
                     let fromPort = UInt16(parts[1]) ?? 0
 
                     data.withUnsafeBytes { buffer in
@@ -1273,7 +1303,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
         var ipBytes: [UInt8] = [0, 0, 0, 0]
         var port: UInt16 = 0
-        var keepaliveData = [UInt8](repeating: 0, count: 5)
+        var keepaliveData = [UInt8](repeating: 0, count: 6)
 
         let result = agent_poll_keepalive(agent, &ipBytes, &port, &keepaliveData)
 

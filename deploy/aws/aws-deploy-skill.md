@@ -138,12 +138,17 @@ ssh -i ~/.ssh/hfymba.aws.pem ubuntu@3.128.36.92
 ### SSH Tips
 
 ```bash
-# Skip host key verification (useful after instance restart)
-ssh -i ~/.ssh/hfymba.aws.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@10.0.2.126
+# After instance restart, update known hosts with ssh-keyscan
+ssh-keyscan -H 10.0.2.126 >> ~/.ssh/known_hosts 2>/dev/null
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
 
 # With keepalive for long sessions
 ssh -i ~/.ssh/hfymba.aws.pem -o ServerAliveInterval=60 ubuntu@10.0.2.126
 ```
+
+> **Security warning:** Avoid using `StrictHostKeyChecking=no` as it disables
+> host key verification and is vulnerable to man-in-the-middle attacks. Use
+> `ssh-keyscan` to update known hosts after instance restarts instead.
 
 ---
 

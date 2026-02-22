@@ -1,7 +1,8 @@
 {
   "port": 4433,
   "bind_addr": "0.0.0.0",
-  "external_ip": "3.128.36.92",
+  "external_ip": "0.0.0.0",
+  "_comment_external_ip": "Set via environment or config file — must be configured before use",
   "cert_path": "/etc/ztna/certs/intermediate.crt",
   "key_path": "/etc/ztna/certs/intermediate.key"
 }

@@ -1,6 +1,7 @@
 {
   "intermediate_server": {
-    "host": "3.128.36.92",
+    "host": "0.0.0.0",
+    "_comment_host": "Set via environment or config file — must be configured before use",
     "port": 4433
   },
   "services": [

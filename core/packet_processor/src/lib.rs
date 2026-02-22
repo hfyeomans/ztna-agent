@@ -186,13 +186,28 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Create a new agent with default configuration
-    fn new() -> Result<Self, quiche::Error> {
+    /// Create a new agent with TLS configuration
+    ///
+    /// - `ca_cert_path`: Path to CA certificate for server verification. If `None`
+    ///   and `verify_peer` is true, the system CA store is used.
+    /// - `verify_peer`: Whether to verify the server's TLS certificate. Should be
+    ///   `true` in production. Pass `false` only for development with self-signed certs.
+    fn new(ca_cert_path: Option<&str>, verify_peer: bool) -> Result<Self, quiche::Error> {
         let mut config = Config::new(quiche::PROTOCOL_VERSION)?;
 
-        // TLS configuration - for MVP, disable certificate verification
-        // In production, this should verify server certificates
-        config.verify_peer(false);
+        // C1: TLS peer verification — enabled by default for production security.
+        // When disabled, the agent is vulnerable to MITM attacks on the QUIC tunnel.
+        config.verify_peer(verify_peer);
+        if verify_peer {
+            if let Some(ca_path) = ca_cert_path {
+                config.load_verify_locations_from_file(ca_path)?;
+                log::info!("[agent] Loaded CA certificate from {}", ca_path);
+            } else {
+                log::info!("[agent] verify_peer enabled, using system CA store");
+            }
+        } else {
+            log::warn!("[agent] TLS peer verification DISABLED — do not use in production");
+        }
 
         // Set ALPN protocol
         config.set_application_protos(&[ALPN_PROTOCOL])?;
@@ -292,11 +307,13 @@ impl Agent {
     ///
     /// Routes the packet to the correct connection based on source address.
     fn recv(&mut self, data: &[u8], from: SocketAddr) -> Result<(), quiche::Error> {
-        // Raw P2P keepalive messages (5 bytes, not QUIC-encapsulated) must be
-        // intercepted before QUIC parsing. The Connector echoes keepalive
+        // Raw P2P keepalive messages (6 bytes with magic prefix, not QUIC-encapsulated)
+        // must be intercepted before QUIC parsing. The Connector echoes keepalive
         // responses as raw UDP; passing them to quiche::recv() would fail.
-        if data.len() == 5
-            && (data[0] == p2p::KEEPALIVE_REQUEST || data[0] == p2p::KEEPALIVE_RESPONSE)
+        // Wire format: [ZTNA_MAGIC(0x5A), type(0x10/0x11), sequence(4 bytes)]
+        if data.len() == p2p::KEEPALIVE_SIZE
+            && data[0] == p2p::ZTNA_MAGIC
+            && (data[1] == p2p::KEEPALIVE_REQUEST || data[1] == p2p::KEEPALIVE_RESPONSE)
         {
             if let Some(p2p) = self.p2p_conns.get_mut(&from) {
                 p2p.last_activity = Instant::now();
@@ -604,9 +621,10 @@ impl Agent {
                 continue;
             }
 
-            // Check for keepalive message
-            if data.len() >= 5
-                && (data[0] == p2p::KEEPALIVE_REQUEST || data[0] == p2p::KEEPALIVE_RESPONSE)
+            // Check for keepalive message (magic-prefixed)
+            if data.len() >= p2p::KEEPALIVE_SIZE
+                && data[0] == p2p::ZTNA_MAGIC
+                && (data[1] == p2p::KEEPALIVE_REQUEST || data[1] == p2p::KEEPALIVE_RESPONSE)
             {
                 if let Some(response) = self.path_manager.process_keepalive(*connector_addr, &data)
                 {
@@ -814,7 +832,7 @@ impl Agent {
     /// Poll for keepalive messages to send
     ///
     /// Returns (remote_address, keepalive_message) if a keepalive should be sent.
-    fn poll_keepalive(&mut self) -> Option<(SocketAddr, [u8; 5])> {
+    fn poll_keepalive(&mut self) -> Option<(SocketAddr, [u8; p2p::KEEPALIVE_SIZE])> {
         self.path_manager.poll_keepalive()
     }
 
@@ -877,15 +895,36 @@ impl log::Log for NullLogger {
 // FFI Functions - Agent Lifecycle
 // ============================================================================
 
-/// Create a new agent instance
+/// Create a new agent instance with TLS configuration
+///
+/// - `ca_cert_path`: Null-terminated C string path to CA certificate PEM file.
+///   Pass null to use the system CA store (or skip CA loading if verify_peer is false).
+/// - `verify_peer`: If true, verify the server's TLS certificate. Should be true
+///   in production. Pass false only for development with self-signed certificates.
 ///
 /// Returns a pointer to the agent, or null on failure.
 /// The caller is responsible for calling `agent_destroy` when done.
 #[no_mangle]
-pub extern "C" fn agent_create() -> *mut Agent {
+pub unsafe extern "C" fn agent_create(
+    ca_cert_path: *const std::os::raw::c_char,
+    verify_peer: bool,
+) -> *mut Agent {
     init_logging();
 
-    let result = panic::catch_unwind(|| Agent::new().ok().map(Box::new));
+    let ca_path: Option<String> = if ca_cert_path.is_null() {
+        None
+    } else {
+        match std::ffi::CStr::from_ptr(ca_cert_path).to_str() {
+            Ok(s) if !s.is_empty() => Some(s.to_string()),
+            _ => None,
+        }
+    };
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        Agent::new(ca_path.as_deref(), verify_peer)
+            .ok()
+            .map(Box::new)
+    }));
 
     match result {
         Ok(Some(agent)) => Box::into_raw(agent),
@@ -975,13 +1014,25 @@ pub unsafe extern "C" fn agent_connect(
 /// Call this after the NWConnection reports its local endpoint.
 /// Without this, RecvInfo.to defaults to 0.0.0.0:0 which can cause
 /// quiche path validation issues.
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `ip` - Pointer to IPv4 address bytes (4 bytes)
+/// * `ip_len` - Length of the IP buffer (must be >= 4 for IPv4)
+/// * `port` - Local port number
 #[no_mangle]
 pub unsafe extern "C" fn agent_set_local_addr(
     agent: *mut Agent,
     ip: *const u8,
+    ip_len: usize,
     port: u16,
 ) -> AgentResult {
     if agent.is_null() || ip.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    // Validate ip_len before creating a slice from the raw pointer
+    if ip_len < 4 {
         return AgentResult::InvalidPointer;
     }
 
@@ -1678,7 +1729,7 @@ pub unsafe extern "C" fn agent_process_binding_response(
 /// * `agent` - Agent pointer
 /// * `out_ip` - Buffer for destination IP (4 bytes)
 /// * `out_port` - Output destination port
-/// * `out_data` - Buffer for keepalive message (5 bytes minimum)
+/// * `out_data` - Buffer for keepalive message (6 bytes minimum: ZTNA_MAGIC + type + 4-byte seq)
 ///
 /// # Returns
 /// `AgentResult::Ok` if a keepalive should be sent, `AgentResult::NoData` otherwise.
@@ -1702,7 +1753,7 @@ pub unsafe extern "C" fn agent_poll_keepalive(
                     std::ptr::copy_nonoverlapping(v4.ip().octets().as_ptr(), out_ip, 4);
                 }
                 *out_port = addr.port();
-                std::ptr::copy_nonoverlapping(msg.as_ptr(), out_data, 5);
+                std::ptr::copy_nonoverlapping(msg.as_ptr(), out_data, p2p::KEEPALIVE_SIZE);
                 AgentResult::Ok
             }
             None => AgentResult::NoData,
@@ -1827,10 +1878,10 @@ mod tests {
 
     #[test]
     fn test_agent_create_destroy() {
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let state = agent_get_state(agent);
             assert_eq!(state, AgentState::Disconnected);
 
@@ -1840,10 +1891,10 @@ mod tests {
 
     #[test]
     fn test_agent_connect() {
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let host = std::ffi::CString::new("127.0.0.1").unwrap();
             let result = agent_connect(agent, host.as_ptr(), 4433);
             assert_eq!(result, AgentResult::Ok);
@@ -1857,10 +1908,10 @@ mod tests {
 
     #[test]
     fn test_agent_connect_p2p() {
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             // First connect to Intermediate
             let server = std::ffi::CString::new("127.0.0.1").unwrap();
             let result = agent_connect(agent, server.as_ptr(), 4433);
@@ -1881,10 +1932,10 @@ mod tests {
     #[test]
     fn test_agent_multi_connection() {
         // Test that Agent can manage multiple P2P connections
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let agent_ref = &mut *agent;
 
             // Connect to Intermediate
@@ -1913,10 +1964,10 @@ mod tests {
     #[test]
     fn test_agent_hole_punch_not_connected() {
         // Hole punching requires connection to Intermediate
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let agent_ref = &mut *agent;
 
             // Should fail because not connected
@@ -2032,14 +2083,16 @@ mod tests {
         assert!(keepalive.is_some());
         let (addr, msg) = keepalive.unwrap();
         assert_eq!(addr, direct_addr);
-        assert_eq!(msg[0], crate::p2p::KEEPALIVE_REQUEST);
+        assert_eq!(msg[0], crate::p2p::ZTNA_MAGIC);
+        assert_eq!(msg[1], crate::p2p::KEEPALIVE_REQUEST);
 
         // Test keepalive response processing
         let request = crate::p2p::encode_keepalive_request(42);
         let response = manager.process_keepalive(direct_addr, &request);
         assert!(response.is_some());
         let resp = response.unwrap();
-        assert_eq!(resp[0], crate::p2p::KEEPALIVE_RESPONSE);
+        assert_eq!(resp[0], crate::p2p::ZTNA_MAGIC);
+        assert_eq!(resp[1], crate::p2p::KEEPALIVE_RESPONSE);
 
         // Verify path stats
         let stats = manager.stats();
@@ -2050,7 +2103,7 @@ mod tests {
 
     #[test]
     fn test_agent_path_manager_setup() {
-        let agent = Agent::new().unwrap();
+        let agent = Agent::new(None, false).unwrap();
 
         // Initially relay path type is None
         assert_eq!(agent.active_path(), crate::p2p::ActivePath::None);
@@ -2064,10 +2117,10 @@ mod tests {
     #[test]
     fn test_agent_register_not_connected() {
         // Registration should fail if not connected
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let service = std::ffi::CString::new("test-service").unwrap();
             let result = agent_register(agent, service.as_ptr());
             // Should fail because not connected
@@ -2080,7 +2133,7 @@ mod tests {
     #[test]
     fn test_agent_register_message_format() {
         // Test that the registration message is correctly formatted
-        let mut agent = Agent::new().unwrap();
+        let mut agent = Agent::new(None, false).unwrap();
 
         // Connect first (won't actually handshake but sets up the connection)
         let server_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
@@ -2104,7 +2157,7 @@ mod tests {
 
     #[test]
     fn test_agent_recv_datagram_queue() {
-        let mut agent = Agent::new().unwrap();
+        let mut agent = Agent::new(None, false).unwrap();
 
         // Queue should start empty
         let mut buf = [0u8; 1500];
@@ -2130,7 +2183,7 @@ mod tests {
 
     #[test]
     fn test_agent_recv_datagram_buffer_too_small() {
-        let mut agent = Agent::new().unwrap();
+        let mut agent = Agent::new(None, false).unwrap();
 
         // Queue an oversized packet followed by a normal packet
         let big_pkt = vec![0x45; 100];

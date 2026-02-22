@@ -72,6 +72,8 @@ struct ServerConfig {
     external_ip: Option<String>,
     cert_path: Option<String>,
     key_path: Option<String>,
+    ca_cert_path: Option<String>,
+    verify_peer: Option<bool>,
 }
 
 fn load_config(path: &str) -> Result<ServerConfig, Box<dyn std::error::Error>> {
@@ -151,6 +153,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| args.get(5).filter(|a| !a.starts_with("--")).cloned())
         .or(config.external_ip);
 
+    let ca_cert_path = parse_arg(&args, "--ca-cert").or(config.ca_cert_path);
+
+    // C1: TLS peer verification enabled by default. Use --no-verify-peer for dev only.
+    let verify_peer = if args.iter().any(|a| a == "--no-verify-peer") {
+        false
+    } else {
+        config.verify_peer.unwrap_or(true)
+    };
+
+    // L2: Validate cert/key paths exist at startup
+    if !Path::new(&cert_path).exists() {
+        log::error!("Certificate file not found: {}", cert_path);
+        return Err(format!("Certificate file not found: {}", cert_path).into());
+    }
+    if !Path::new(&key_path).exists() {
+        log::error!("Private key file not found: {}", key_path);
+        return Err(format!("Private key file not found: {}", key_path).into());
+    }
+
     log::info!("ZTNA Intermediate Server starting...");
     log::info!("  Port: {}", port);
     log::info!("  Bind: {}", bind_addr);
@@ -160,6 +181,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  Cert: {}", cert_path);
     log::info!("  Key:  {}", key_path);
     log::info!("  ALPN: {:?}", std::str::from_utf8(ALPN_PROTOCOL));
+    log::info!("  Verify peer: {}", verify_peer);
+    if !verify_peer {
+        log::warn!("TLS peer verification DISABLED — do not use in production");
+    }
 
     // Create server and run
     let mut server = Server::new(
@@ -168,6 +193,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         external_ip.as_deref(),
         &cert_path,
         &key_path,
+        ca_cert_path.as_deref(),
+        verify_peer,
     )?;
     server.run()
 }
@@ -209,6 +236,8 @@ impl Server {
         external_ip: Option<&str>,
         cert_path: &str,
         key_path: &str,
+        ca_cert_path: Option<&str>,
+        verify_peer: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Parse external address if provided (for NAT environments like AWS Elastic IP)
         let external_addr: Option<SocketAddr> = if let Some(ext_ip) = external_ip {
@@ -240,8 +269,14 @@ impl Server {
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
 
-        // Disable client certificate verification (for MVP)
-        config.verify_peer(false);
+        // C1: TLS peer verification — enabled by default for production
+        config.verify_peer(verify_peer);
+        if verify_peer {
+            if let Some(ca_path) = ca_cert_path {
+                config.load_verify_locations_from_file(ca_path)?;
+                log::info!("Loaded CA certificate from {}", ca_path);
+            }
+        }
 
         // Create mio poll and UDP socket
         let poll = Poll::new()?;
@@ -508,7 +543,7 @@ impl Server {
                 }
                 _ => {
                     // Raw IP packet - relay to paired connection (implicit routing)
-                    log::info!("Received {} bytes to relay from {:?}", dgram.len(), conn_id);
+                    log::debug!("Received {} bytes to relay from {:?}", dgram.len(), conn_id);
                     self.relay_datagram(conn_id, &dgram)?;
                 }
             }
@@ -539,7 +574,17 @@ impl Server {
             return Ok(());
         }
 
-        let service_id = String::from_utf8_lossy(&dgram[2..2 + id_len]).to_string();
+        let service_id = match String::from_utf8(dgram[2..2 + id_len].to_vec()) {
+            Ok(id) => id,
+            Err(e) => {
+                log::warn!(
+                    "Rejecting registration with invalid UTF-8 service ID from {:?}: {}",
+                    conn_id,
+                    e
+                );
+                return Ok(());
+            }
+        };
 
         log::info!(
             "Registration: {:?} for service '{}' (conn={:?})",
@@ -569,7 +614,7 @@ impl Server {
         // Find destination connection
         let dest_conn_id = match self.registry.find_destination(from_conn_id) {
             Some(id) => {
-                log::info!("Found destination {:?} for {:?}", id, from_conn_id);
+                log::debug!("Found destination {:?} for {:?}", id, from_conn_id);
                 id
             }
             None => {
@@ -580,13 +625,13 @@ impl Server {
 
         // Forward the datagram
         if let Some(dest_client) = self.clients.get_mut(&dest_conn_id) {
-            log::info!(
+            log::debug!(
                 "Destination connection established: {}",
                 dest_client.conn.is_established()
             );
             match dest_client.conn.dgram_send(dgram) {
                 Ok(_) => {
-                    log::info!(
+                    log::debug!(
                         "Relayed {} bytes from {:?} to {:?}",
                         dgram.len(),
                         from_conn_id,
@@ -624,10 +669,20 @@ impl Server {
             return Ok(());
         }
 
-        let service_id = String::from_utf8_lossy(&dgram[2..2 + id_len]).to_string();
+        let service_id = match String::from_utf8(dgram[2..2 + id_len].to_vec()) {
+            Ok(id) => id,
+            Err(e) => {
+                log::warn!(
+                    "Rejecting service-routed datagram with invalid UTF-8 service ID from {:?}: {}",
+                    from_conn_id,
+                    e
+                );
+                return Ok(());
+            }
+        };
         let ip_packet = &dgram[2 + id_len..];
 
-        log::info!(
+        log::debug!(
             "Service-routed datagram: {} bytes for '{}' from {:?}",
             ip_packet.len(),
             service_id,
@@ -637,7 +692,7 @@ impl Server {
         // Find Connector for this service
         let dest_conn_id = match self.registry.find_connector_for_service(&service_id) {
             Some(id) => {
-                log::info!("Routing to Connector {:?} for service '{}'", id, service_id);
+                log::debug!("Routing to Connector {:?} for service '{}'", id, service_id);
                 id
             }
             None => {
@@ -650,7 +705,7 @@ impl Server {
         if let Some(dest_client) = self.clients.get_mut(&dest_conn_id) {
             match dest_client.conn.dgram_send(ip_packet) {
                 Ok(_) => {
-                    log::info!(
+                    log::debug!(
                         "Relayed {} bytes for '{}' from {:?} to {:?}",
                         ip_packet.len(),
                         service_id,

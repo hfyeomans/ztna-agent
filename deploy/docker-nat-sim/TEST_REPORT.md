@@ -29,7 +29,7 @@ Docker Desktop installed at: /Applications/Docker.app
 
 ### Certificate Verification
 ```
-/Users/hank/dev/src/agent-driver/ztna-agent/certs/
+<project-root>/certs/
 ├── cert.pem (1.1K) - Server certificate
 ├── key.pem (1.7K) - Server private key
 ├── connector-cert.pem (1.2K) - Connector certificate
