@@ -120,7 +120,7 @@ Both NAT gateways (nat-agent, nat-connector) use:
 
 ### Expected Build Process
 ```bash
-cd /Users/hank/dev/src/agent-driver/ztna-agent/deploy/docker-nat-sim
+cd deploy/docker-nat-sim
 docker compose build
 ```
 
@@ -168,7 +168,7 @@ docker info
 
 ### Step 2: Build Images
 ```bash
-cd /Users/hank/dev/src/agent-driver/ztna-agent/deploy/docker-nat-sim
+cd deploy/docker-nat-sim
 docker compose build --no-cache
 ```
 
@@ -361,7 +361,7 @@ The repository includes `test-nat-simulation.sh` for automated testing:
 
 ```bash
 # Full automated test suite
-cd /Users/hank/dev/src/agent-driver/ztna-agent/deploy/docker-nat-sim
+cd deploy/docker-nat-sim
 ./test-nat-simulation.sh --build
 
 # Verbose output

@@ -682,6 +682,19 @@ impl Server {
         };
         let ip_packet = &dgram[2 + id_len..];
 
+        // M3: Verify sender is a registered Agent for this service before relaying
+        if !self
+            .registry
+            .is_agent_for_service(from_conn_id, &service_id)
+        {
+            log::warn!(
+                "Unauthorized service datagram: {:?} is not registered for '{}'",
+                from_conn_id,
+                service_id
+            );
+            return Ok(());
+        }
+
         log::debug!(
             "Service-routed datagram: {} bytes for '{}' from {:?}",
             ip_packet.len(),

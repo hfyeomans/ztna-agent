@@ -67,7 +67,7 @@ struct VPNManagerStateTests {
         UserDefaults.standard.removeObject(forKey: "ztnaServiceId")
 
         let manager = VPNManager()
-        #expect(manager.serverHost == "3.128.36.92")
+        #expect(manager.serverHost == "0.0.0.0")
         #expect(manager.serverPort == 4433)
         #expect(manager.serviceId == "echo-service")
     }
