@@ -706,12 +706,22 @@ impl Server {
             None
         };
 
-        // Generate new connection ID
-        let mut scid = [0u8; quiche::MAX_CONN_ID_LEN];
-        self.rng
-            .fill(&mut scid)
-            .map_err(|_| "Failed to generate connection ID")?;
-        let scid = quiche::ConnectionId::from_ref(&scid);
+        // Generate connection ID for accept.
+        // When retry is active, we MUST reuse hdr.dcid (which is the Retry SCID
+        // the client received) so quiche's retry_source_connection_id transport
+        // parameter matches what the client expects. Using a fresh random SCID
+        // causes a transport parameter mismatch → CONNECTION_CLOSE err=0x08.
+        let scid = if odcid.is_some() {
+            // Retry path: reuse the Retry SCID (= client's dcid in retried Initial)
+            hdr.dcid.clone()
+        } else {
+            // Normal path: generate fresh random SCID
+            let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+            self.rng
+                .fill(&mut scid_bytes)
+                .map_err(|_| "Failed to generate connection ID")?;
+            quiche::ConnectionId::from_vec(scid_bytes.to_vec())
+        };
 
         // Accept the connection with optional odcid from retry token
         let quic_local_addr = self.external_addr.unwrap_or(self.socket.local_addr()?);
@@ -732,13 +742,19 @@ impl Server {
         // Store the connection (use our generated scid)
         self.clients.insert(scid_owned.clone(), client);
 
-        // Process the Initial packet
+        // Feed the Initial packet to the new connection so the handshake
+        // can proceed. quiche::accept() creates the connection but does not
+        // process the packet data — that requires an explicit recv() call.
         if let Some(client) = self.clients.get_mut(&scid_owned) {
             let recv_info = quiche::RecvInfo {
                 from,
                 to: quic_local_addr,
             };
-            client.conn.recv(pkt_buf, recv_info)?;
+            match client.conn.recv(pkt_buf, recv_info) {
+                Ok(_) => {}
+                Err(quiche::Error::Done) => {}
+                Err(e) => log::debug!("Initial packet recv after accept: {:?}", e),
+            }
         }
 
         Ok(())
