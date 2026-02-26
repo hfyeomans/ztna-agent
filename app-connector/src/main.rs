@@ -146,14 +146,30 @@ const KEEPALIVE_SIZE: usize = 6;
 
 /// Returns true if this packet looks like a P2P control message (not QUIC).
 ///
-/// P2P control messages: `[ZTNA_MAGIC(0x5A), type, nonce(4)]` = exactly 6 bytes.
-/// QUIC short-header first bytes are header-protected and can legitimately be 0x5A,
-/// so we discriminate using both magic byte AND exact size + valid type field.
-/// This prevents misclassifying QUIC packets as control traffic.
+/// P2P control messages are prefixed with ZTNA_MAGIC (0x5A) and come in two forms:
+/// - Keepalive: `[0x5A, type(0x10|0x11), nonce(4)]` = exactly 6 bytes
+/// - Binding:   `[0x5A, bincode_data...]` = variable length, second byte is bincode enum index
+///
+/// QUIC short-header first bytes are header-protected and can be 0x5A, but QUIC
+/// packets have the fixed bit set (bit 6 = 1), so byte[1] has bit 6 set (0x40+).
+/// Our control messages have byte[1] in {0x00, 0x01, 0x10, 0x11} — all below 0x40.
+/// This discriminates reliably without false positives.
 fn is_p2p_control_packet(data: &[u8]) -> bool {
-    data.len() == KEEPALIVE_SIZE
-        && data[0] == ZTNA_MAGIC
+    if data.len() < 2 || data[0] != ZTNA_MAGIC {
+        return false;
+    }
+    // Keepalive: exact size + valid type
+    if data.len() == KEEPALIVE_SIZE
         && (data[1] == KEEPALIVE_REQUEST || data[1] == KEEPALIVE_RESPONSE)
+    {
+        return true;
+    }
+    // Binding messages: magic prefix + second byte is bincode enum index (0x00 or 0x01)
+    // QUIC short-header byte[1] always has fixed bit set (>= 0x40), so this is safe
+    if data[1] < 0x40 {
+        return true;
+    }
+    false
 }
 
 // ============================================================================

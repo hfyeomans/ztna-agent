@@ -289,6 +289,10 @@ impl Agent {
         self.state = AgentState::Connecting;
         self.last_activity = Instant::now();
 
+        // Clear registration state — new connection requires fresh registration
+        self.registered_services.clear();
+        self.pending_registrations.clear();
+
         // Set relay address in path manager
         self.path_manager.set_relay(server_addr);
 
@@ -787,10 +791,11 @@ impl Agent {
             None => return,
         };
 
-        // 8A.5: Collect registration ACK/NACK events to process after the loop
+        // 8A.5: Collect ALL registration ACK/NACK events to process after the loop
         // (avoids borrow conflict with self.scratch_buffer)
-        let mut reg_ack_service: Option<String> = None;
-        let mut reg_nack: Option<(u8, String)> = None;
+        // Use Vec to handle multiple ACKs/NACKs in a single poll cycle
+        let mut reg_acks: Vec<String> = Vec::new();
+        let mut reg_nacks: Vec<(u8, String)> = Vec::new();
 
         while let Ok(len) = conn.dgram_recv(&mut self.scratch_buffer) {
             let data = &self.scratch_buffer[..len];
@@ -817,7 +822,7 @@ impl Agent {
                         let id_len = data[2] as usize;
                         if len >= 3 + id_len {
                             if let Ok(sid) = String::from_utf8(data[3..3 + id_len].to_vec()) {
-                                reg_ack_service = Some(sid);
+                                reg_acks.push(sid);
                             }
                         }
                     }
@@ -830,7 +835,7 @@ impl Agent {
                         let id_len = data[2] as usize;
                         if len >= 3 + id_len {
                             if let Ok(sid) = String::from_utf8(data[3..3 + id_len].to_vec()) {
-                                reg_nack = Some((status, sid));
+                                reg_nacks.push((status, sid));
                             }
                         }
                     }
@@ -846,8 +851,8 @@ impl Agent {
             }
         }
 
-        // Process registration ACK/NACK outside the borrow scope
-        if let Some(service_id) = reg_ack_service {
+        // Process all registration ACKs/NACKs outside the borrow scope
+        for service_id in reg_acks {
             log::info!(
                 "[agent] Registration ACK received for service '{}'",
                 service_id
@@ -855,7 +860,7 @@ impl Agent {
             self.registered_services.insert(service_id.clone());
             self.pending_registrations.remove(&service_id);
         }
-        if let Some((status, service_id)) = reg_nack {
+        for (status, service_id) in reg_nacks {
             log::warn!(
                 "[agent] Registration NACK for service '{}' (status=0x{:02x})",
                 service_id,
