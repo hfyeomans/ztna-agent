@@ -1,0 +1,35 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: ztna-letsencrypt-prod
+  namespace: ztna
+spec:
+  acme:
+    # Production Let's Encrypt endpoint
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: REPLACE_WITH_EMAIL
+    privateKeySecretRef:
+      name: ztna-letsencrypt-account-key
+    solvers:
+      - dns01:
+          route53:
+            region: us-east-2
+            # Uses IRSA (IAM Roles for Service Accounts) or node instance profile
+            # For IRSA: annotate cert-manager ServiceAccount with IAM role ARN
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: ztna-letsencrypt-staging
+  namespace: ztna
+spec:
+  acme:
+    # Staging endpoint for testing (higher rate limits, untrusted certs)
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: REPLACE_WITH_EMAIL
+    privateKeySecretRef:
+      name: ztna-letsencrypt-staging-account-key
+    solvers:
+      - dns01:
+          route53:
+            region: us-east-2

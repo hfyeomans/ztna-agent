@@ -1,0 +1,9 @@
+[Unit]
+Description=Renew ZTNA TLS certificates via certbot and reload intermediate-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Renew certificates; --deploy-hook runs only if cert was actually renewed
+ExecStart=/usr/bin/certbot renew --quiet --deploy-hook "systemctl kill -s SIGHUP ztna-intermediate"

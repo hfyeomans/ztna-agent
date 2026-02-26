@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ztna-intermediate-tls
+  namespace: ztna
+spec:
+  # Secret that will contain the issued cert + key
+  secretName: ztna-intermediate-tls
+  issuerRef:
+    name: ztna-letsencrypt-prod
+    kind: Issuer
+  # Domain name(s) for the intermediate server
+  dnsNames:
+    - REPLACE_WITH_DOMAIN
+  # Renewal settings
+  duration: 2160h    # 90 days
+  renewBefore: 720h  # 30 days before expiry
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - server auth
+    - client auth
