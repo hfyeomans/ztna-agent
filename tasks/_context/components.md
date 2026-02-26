@@ -40,6 +40,13 @@
 - DATAGRAM relay between agent/connector pairs
 - Client registry for routing (connection-based)
 - Integration test (handshake + QAD verified)
+- **Task 007 additions:**
+  - TLS peer verification (`verify_peer(true)`) with CA cert loading
+  - mTLS client authentication (`auth.rs`, `--require-client-cert` flag)
+  - Stateless retry tokens (AEAD AES-256-GCM, `quiche::retry()`)
+  - Registration ACK/NACK (0x12/0x13) with sender authorization
+  - CID rotation (5-min timer, `cid_aliases` HashMap)
+  - SIGHUP cert hot-reload (re-creates `quiche::Config`)
 
 **Critical Compatibility:**
 - ALPN: `b"ztna-v1"` (matches Agent)
@@ -82,15 +89,22 @@
 - **mio over tokio**: Matches Intermediate Server's sans-IO model
 - **Userspace TCP proxy**: Session-based tracking avoids TUN/TAP requirement
 - **Connector-local ICMP**: Echo Reply generated at Connector, not forwarded to backend
-- **No registration ACK**: Server doesn't acknowledge; treat as best-effort
+- **Registration ACK**: Server sends 0x12 ACK / 0x13 NACK; Connector tracks `RegistrationState` with retry (Task 007)
 - **JSON config**: Supports CLI arg override for backwards compatibility
+- **Task 007 additions:**
+  - Non-blocking TCP via `mio::net::TcpStream::connect()` (event-driven, no event loop blocking)
+  - TLS peer verification + CA cert loading
+  - Per-IP TCP SYN rate limiting (`MAX_SYN_PER_SOURCE_PER_SECOND = 10`)
+  - TCP half-close draining (`TCP_DRAIN_TIMEOUT_SECS = 5`)
+  - CID rotation (5-min timer, client-side)
+  - P2P keepalive: 6-byte wire format `[ZTNA_MAGIC(0x5A), type, 4-byte nonce]`
 
 **P2P Server Mode (Port 4434):**
 - Dual-mode: QUIC client (to Intermediate on 4433) + QUIC server (for Agents on 4434)
 - Packet demux on port 4434: QUIC packets (first byte & 0xC0 != 0) vs Control packets
 - Control packet types: Binding messages (bincode variant 0x00/0x01), Keepalive (0x10 request / 0x11 response)
 - `process_p2p_control_packet()` handles binding requests and keepalive echo
-- Keepalive protocol: raw UDP, 5 bytes: `[type_byte, sequence_u32_le]`
+- Keepalive protocol: raw UDP, 6 bytes: `[ZTNA_MAGIC(0x5A), type_byte, nonce_u32_be]`
 
 **Multi-Service Architecture (Phase 7):**
 - Per-service routing requires separate Connector instances (each with own --forward-addr)
@@ -739,7 +753,10 @@ The Intermediate reads the 0x2F header, finds the Connector for "echo-service", 
 **Type Byte Values:**
 - `0x10` = Agent registration (targeting a service)
 - `0x11` = Connector registration (providing a service)
+- `0x12` = Registration ACK (server → client, Task 007 Phase 8A)
+- `0x13` = Registration NACK (server → client, Task 007 Phase 8A)
 - `0x2F` = Service-routed datagram (per-packet routing)
+- `0x5A` = ZTNA_MAGIC prefix for P2P keepalive messages (Task 007 Phase 4)
 
 **Example:**
 ```
@@ -814,10 +831,11 @@ if isP2PActive, agent_get_active_path(agent) == 0 {  // 0 = Direct
 ### Important Notes
 
 1. **Service ID must match**: Agent's target service ID must exactly match a registered Connector's service ID
-2. **No ACK**: Registration is fire-and-forget; server doesn't acknowledge
-3. **Re-register on reconnect**: Registration is connection-scoped; lost on disconnect
-4. **Multi-service**: Agent can register for multiple services per connection (0x2F routing)
+2. **Registration ACK/NACK** (Task 007): Server sends 0x12 ACK or 0x13 NACK after registration. Clients retry (2s timeout, 3 max attempts). NACK is terminal — no retry on explicit denial.
+3. **Re-register on reconnect**: Registration is connection-scoped; Agent clears `registered_services` on new `connect()`
+4. **Multi-service**: Agent can register for multiple services per connection (0x2F routing), with per-service ACK tracking
 5. **Backward compatible**: Non-0x2F datagrams still use implicit single-service routing
+6. **mTLS** (Task 007): When `--require-client-cert` is enabled, server validates client X.509 certs and authorizes service registration via SAN entries (`DNS:agent.<service>.ztna`)
 
 ---
 

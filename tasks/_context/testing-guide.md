@@ -1171,7 +1171,10 @@ CERT_DIR="$PROJECT_ROOT/certs"
 | `IDLE_TIMEOUT_MS` | 30000 | 30 seconds |
 | `Agent Registration` | `0x10` | `[0x10][len][service_id]` |
 | `Connector Registration` | `0x11` | `[0x11][len][service_id]` |
+| `Registration ACK` | `0x12` | `[0x12][status][len][service_id]` (Task 007) |
+| `Registration NACK` | `0x13` | `[0x13][status][len][service_id]` (Task 007) |
 | `Service-Routed Datagram` | `0x2F` | `[0x2F][len][service_id][ip_packet]` |
+| `ZTNA_MAGIC` | `0x5A` | P2P keepalive prefix (Task 007) |
 | `QAD Observed Address` | `0x01` | `[0x01][4 bytes IP][2 bytes port]` |
 
 ---
@@ -1478,7 +1481,7 @@ sudo tcpdump -i en0 udp and not host 3.128.36.92
 | P2P keepalive stable | ✅ 3.5+ minutes | `missed keepalives: 0` in all path stats |
 
 **Bug found & fixed during testing:**
-- Agent `recv()` passed raw 5-byte keepalive responses (0x11) to `quiche::recv()` which rejected them
+- Agent `recv()` passed raw keepalive responses (0x5A-prefixed, 6 bytes) to `quiche::recv()` which rejected them
 - Fix: Added keepalive demux at top of `recv()` in `lib.rs` — intercepts 0x10/0x11 before QUIC routing
 - Before fix: missed keepalives hit 3 at 30s → fallback to relay
 - After fix: zero missed keepalives over 3.5+ minutes

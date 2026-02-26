@@ -114,7 +114,9 @@ git push -u origin feature/XXX-task-name
 │  │ (configurable │  │     │  - 0x2F svc routing  │     │  - UDP/TCP/ICMP     │
 │  │  host/port/   │  │     │  - Relay (fallback)  │     │  - JSON config      │
 │  │  service)     │  │     │  - Signaling (P2P)   │     │  - Keepalive        │
-│  └───────┬───────┘  │     │  - JSON config       │     │  - P2P server mode  │
+│  └───────┬───────┘  │     │  - mTLS + cert reload│     │  - P2P server mode  │
+│          │          │     │  - Stateless retry   │     │  - Non-blocking TCP │
+│          │          │     │  - Reg ACK/NACK      │     │  - Rate limiting    │
 │          │          │     └──────────▲───────────┘     └──────────▲──────────┘
 │  ┌───────▼───────┐  │                │                            │
 │  │ NEPacketTun.  │  │                │    QUIC Tunnel             │
@@ -342,15 +344,23 @@ tail -f tests/e2e/artifacts/logs/*.log
 | **Service Registration** | Protocol for Agents/Connectors to register with Intermediate for routing |
 | **0x2F Datagram** | Service-routed datagram: `[0x2F, id_len, service_id, ip_packet]` |
 | **Split Tunnel** | Only configured virtual IPs (10.100.0.0/24) go through QUIC tunnel |
+| **mTLS** | Mutual TLS — server validates client certificates for identity + service authorization (Task 007) |
+| **Stateless Retry** | QUIC anti-amplification: server sends Retry with AEAD token before accepting (Task 007) |
+| **Registration ACK** | Server confirms registration with 0x12 ACK or 0x13 NACK; clients retry with backoff (Task 007) |
+| **CID Rotation** | Periodic QUIC Connection ID rotation for privacy (Task 007) |
+| **ZTNA_MAGIC** | `0x5A` prefix byte distinguishing P2P control messages from QUIC packets (Task 007) |
 
 ### Registration & Routing Protocol
 
 Both Agents and Connectors register with a service ID to enable relay routing:
 - **Agent (0x10)**: "I want to reach service X" (can register multiple)
 - **Connector (0x11)**: "I provide service X"
+- **Registration ACK (0x12)**: Server confirms successful registration
+- **Registration NACK (0x13)**: Server denies registration (auth failure or invalid)
 - **Service-Routed Datagram (0x2F)**: Per-packet routing with embedded service ID
 
 Registration format: `[type_byte, service_id_length, service_id_bytes...]`
+ACK/NACK format: `[type_byte, status, service_id_length, service_id_bytes...]`
 Routed datagram: `[0x2F, service_id_length, service_id_bytes..., ip_packet_bytes...]`
 
 The Intermediate strips the 0x2F wrapper before forwarding to the Connector.
