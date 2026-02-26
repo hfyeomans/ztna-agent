@@ -17,7 +17,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 const MAX_DATAGRAM_SIZE: usize = 1350;
 const IDLE_TIMEOUT_MS: u64 = 30_000;
 const ALPN_PROTOCOL: &[u8] = b"ztna-v1";
-const SERVER_PORT: u16 = 4434; // Use different port for testing
+const SERVER_PORT: u16 = 4436; // Use different port for testing (avoid 4433 default, 4435 intermediate-server tests)
+const SERVER_PORT_P2P: u16 = 4437; // Separate port for P2P test to avoid parallel conflict
 const CONNECTOR_P2P_PORT: u16 = 5500; // Port for P2P testing
 const REG_TYPE_CONNECTOR: u8 = 0x11;
 const QAD_OBSERVED_ADDRESS: u8 = 0x01;
@@ -29,7 +30,7 @@ struct ServerProcess {
 }
 
 impl ServerProcess {
-    fn start() -> Result<Self, Box<dyn std::error::Error>> {
+    fn start(port: u16) -> Result<Self, Box<dyn std::error::Error>> {
         // Build the intermediate server first
         let status = Command::new("cargo")
             .args(["build", "--release"])
@@ -40,15 +41,16 @@ impl ServerProcess {
             return Err("Failed to build intermediate server".into());
         }
 
-        // Start the server
+        // Start the server (--disable-retry for basic connectivity tests)
         let child = Command::new("cargo")
             .args([
                 "run",
                 "--release",
                 "--",
-                &SERVER_PORT.to_string(),
+                &port.to_string(),
                 "certs/cert.pem",
                 "certs/key.pem",
+                "--disable-retry",
             ])
             .current_dir("../intermediate-server")
             .env("RUST_LOG", "info")
@@ -95,7 +97,7 @@ fn create_quic_client_config() -> Result<quiche::Config, Box<dyn std::error::Err
 #[test]
 fn test_connector_handshake_and_qad() {
     // Start the intermediate server
-    let _server = match ServerProcess::start() {
+    let _server = match ServerProcess::start(SERVER_PORT) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -314,8 +316,8 @@ impl Drop for ConnectorProcess {
 /// which will be added in the Agent multi-connection implementation phase.
 #[test]
 fn test_connector_p2p_mode_starts() {
-    // Start the intermediate server
-    let _server = match ServerProcess::start() {
+    // Start the intermediate server on a separate port to avoid parallel test conflicts
+    let _server = match ServerProcess::start(SERVER_PORT_P2P) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -327,7 +329,7 @@ fn test_connector_p2p_mode_starts() {
     };
 
     // Start connector with P2P mode enabled
-    let _connector = match ConnectorProcess::start_with_p2p(SERVER_PORT, CONNECTOR_P2P_PORT) {
+    let _connector = match ConnectorProcess::start_with_p2p(SERVER_PORT_P2P, CONNECTOR_P2P_PORT) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to start connector with P2P mode: {}", e);
