@@ -45,6 +45,21 @@ const ALPN_PROTOCOL: &[u8] = b"ztna-v1";
 /// Registration message type for Agent (matches intermediate-server)
 const REG_TYPE_AGENT: u8 = 0x10;
 
+/// 8A.1: Registration ACK — server confirms successful registration
+const REG_TYPE_ACK: u8 = 0x12;
+
+/// 8A.1: Registration NACK — server denies registration (auth failure or invalid)
+const REG_TYPE_NACK: u8 = 0x13;
+
+/// 8A.3: Registration retry timeout in seconds
+const REG_RETRY_TIMEOUT_SECS: u64 = 2;
+
+/// 8A.3: Maximum registration retry attempts before giving up
+const REG_MAX_RETRIES: u32 = 3;
+
+/// 8B.3: Connection ID rotation interval in seconds (default: 5 minutes)
+const CID_ROTATION_INTERVAL_SECS: u64 = 300;
+
 /// QAD observed address message type
 const QAD_OBSERVED_ADDRESS: u8 = 0x01;
 
@@ -183,6 +198,13 @@ pub struct Agent {
     path_manager: p2p::PathManager,
     /// Queue of received IP packets from tunnel (for Swift to read via agent_recv_datagram)
     received_datagrams: VecDeque<Vec<u8>>,
+    /// 8A.3: Pending registration — (service_id, attempts, last_sent_time)
+    /// None = no registration pending, Some = waiting for ACK
+    pending_registration: Option<(String, u32, Instant)>,
+    /// 8A.3: Set of service IDs for which we have received ACK
+    registered_services: std::collections::HashSet<String>,
+    /// 8B.3: Last time CID rotation was performed on connections
+    last_cid_rotation: Instant,
 }
 
 impl Agent {
@@ -241,6 +263,9 @@ impl Agent {
             hole_punch: None,
             path_manager: p2p::PathManager::new(),
             received_datagrams: VecDeque::new(),
+            pending_registration: None,
+            registered_services: std::collections::HashSet::new(),
+            last_cid_rotation: Instant::now(),
         })
     }
 
@@ -441,8 +466,17 @@ impl Agent {
     /// which service this Agent wants to reach. The server uses this to route
     /// relay traffic between the Agent and the Connector for that service.
     ///
+    /// 8A.3: Registration is now tracked — the Agent waits for an ACK from the
+    /// server and retries up to REG_MAX_RETRIES times with REG_RETRY_TIMEOUT_SECS.
+    ///
     /// Message format: [0x10, service_id_len, service_id_bytes...]
     fn register(&mut self, service_id: &str) -> Result<(), quiche::Error> {
+        // If already registered for this service, skip
+        if self.registered_services.contains(service_id) {
+            log::debug!("[agent] Already registered for service '{}'", service_id);
+            return Ok(());
+        }
+
         let conn = self
             .intermediate_conn
             .as_mut()
@@ -466,7 +500,87 @@ impl Agent {
         conn.dgram_send(&msg)?;
         self.last_activity = Instant::now();
 
+        // 8A.3: Track pending registration for retry
+        self.pending_registration = Some((service_id.to_string(), 1, Instant::now()));
+        log::debug!(
+            "[agent] Registration sent for '{}' (attempt 1/{})",
+            service_id,
+            REG_MAX_RETRIES
+        );
+
         Ok(())
+    }
+
+    /// 8A.3: Check if a pending registration needs to be retried (called from tick)
+    fn check_registration_retry(&mut self) {
+        let (service_id, attempts, last_time) = match self.pending_registration.take() {
+            Some(state) => state,
+            None => return,
+        };
+
+        // Already registered (ACK arrived between checks)
+        if self.registered_services.contains(&service_id) {
+            return;
+        }
+
+        let elapsed = Instant::now().duration_since(last_time);
+        if elapsed < Duration::from_secs(REG_RETRY_TIMEOUT_SECS) {
+            // Not yet time to retry — put state back
+            self.pending_registration = Some((service_id, attempts, last_time));
+            return;
+        }
+
+        if attempts >= REG_MAX_RETRIES {
+            log::warn!(
+                "[agent] Registration for '{}' failed after {} attempts, giving up",
+                service_id,
+                attempts
+            );
+            return; // Don't put state back — give up
+        }
+
+        // Retry: send registration again
+        let conn = match self.intermediate_conn.as_mut() {
+            Some(c) if c.is_established() => c,
+            _ => {
+                // Connection lost — restore state so we retry when reconnected
+                log::debug!("[agent] Cannot retry registration: not connected, will retry later");
+                self.pending_registration = Some((service_id, attempts, last_time));
+                return;
+            }
+        };
+
+        let id_bytes = service_id.as_bytes();
+        if id_bytes.len() > 255 {
+            log::error!(
+                "[agent] Service ID '{}' exceeds 255 bytes, cannot register",
+                service_id
+            );
+            return;
+        }
+        let mut msg = Vec::with_capacity(2 + id_bytes.len());
+        msg.push(REG_TYPE_AGENT);
+        msg.push(id_bytes.len() as u8);
+        msg.extend_from_slice(id_bytes);
+
+        match conn.dgram_send(&msg) {
+            Ok(_) => {
+                let next_attempt = attempts + 1;
+                log::info!(
+                    "[agent] Registration retry for '{}' (attempt {}/{})",
+                    service_id,
+                    next_attempt,
+                    REG_MAX_RETRIES
+                );
+                self.pending_registration = Some((service_id, next_attempt, Instant::now()));
+                self.last_activity = Instant::now();
+            }
+            Err(e) => {
+                log::debug!("[agent] Registration retry send failed: {:?}", e);
+                // Put state back to try again later
+                self.pending_registration = Some((service_id, attempts, last_time));
+            }
+        }
     }
 
     /// Send a keepalive PING on the Intermediate connection to prevent idle timeout.
@@ -531,6 +645,66 @@ impl Agent {
 
         // Attempt recovery on failed paths after cooldown
         self.path_manager.attempt_recovery();
+
+        // 8A.3: Check if pending registration needs retry
+        self.check_registration_retry();
+
+        // 8B.3: Periodic CID rotation for privacy
+        if self.last_cid_rotation.elapsed() >= Duration::from_secs(CID_ROTATION_INTERVAL_SECS) {
+            self.rotate_connection_ids();
+            self.last_cid_rotation = Instant::now();
+        }
+    }
+
+    /// 8B.3: Rotate connection IDs on all established connections for privacy.
+    ///
+    /// Generates a new random source CID for the Intermediate connection and
+    /// each P2P connection via `conn.new_scid()`. This makes traffic analysis
+    /// harder by periodically changing the CIDs visible on the wire.
+    fn rotate_connection_ids(&mut self) {
+        let rng = SystemRandom::new();
+
+        // Rotate Intermediate connection CID
+        if let Some(conn) = self.intermediate_conn.as_mut() {
+            if conn.is_established() && conn.scids_left() > 0 {
+                let new_scid_bytes = rand_connection_id();
+                let new_scid = ConnectionId::from_ref(&new_scid_bytes);
+
+                let mut reset_token_bytes = [0u8; 16];
+                if rng.fill(&mut reset_token_bytes).is_ok() {
+                    let reset_token = u128::from_be_bytes(reset_token_bytes);
+                    match conn.new_scid(&new_scid, reset_token, true) {
+                        Ok(seq) => {
+                            log::debug!("[agent] Rotated intermediate CID (seq={})", seq);
+                        }
+                        Err(e) => {
+                            log::debug!("[agent] Intermediate CID rotation failed: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Rotate P2P connection CIDs
+        for (addr, p2p) in self.p2p_conns.iter_mut() {
+            if p2p.conn.is_established() && p2p.conn.scids_left() > 0 {
+                let new_scid_bytes = rand_connection_id();
+                let new_scid = ConnectionId::from_ref(&new_scid_bytes);
+
+                let mut reset_token_bytes = [0u8; 16];
+                if rng.fill(&mut reset_token_bytes).is_ok() {
+                    let reset_token = u128::from_be_bytes(reset_token_bytes);
+                    match p2p.conn.new_scid(&new_scid, reset_token, true) {
+                        Ok(seq) => {
+                            log::debug!("[agent] Rotated P2P CID for {} (seq={})", addr, seq);
+                        }
+                        Err(e) => {
+                            log::debug!("[agent] P2P CID rotation failed for {}: {:?}", addr, e);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Get time until next timeout event (minimum across all connections)
@@ -578,25 +752,90 @@ impl Agent {
             None => return,
         };
 
+        // 8A.5: Collect registration ACK/NACK events to process after the loop
+        // (avoids borrow conflict with self.scratch_buffer)
+        let mut reg_ack_service: Option<String> = None;
+        let mut reg_nack: Option<(u8, String)> = None;
+
         while let Ok(len) = conn.dgram_recv(&mut self.scratch_buffer) {
             let data = &self.scratch_buffer[..len];
 
-            // Check for QAD message (simple protocol: first byte = message type)
-            if !data.is_empty() && data[0] == QAD_OBSERVED_ADDRESS {
-                // QAD OBSERVED_ADDRESS message
-                // Format: 0x01 | 4 bytes IPv4 | 2 bytes port (big endian)
-                if len >= 7 {
-                    let ip = std::net::Ipv4Addr::new(data[1], data[2], data[3], data[4]);
-                    let port = u16::from_be_bytes([data[5], data[6]]);
-                    self.observed_address = Some(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+            if data.is_empty() {
+                continue;
+            }
+
+            match data[0] {
+                QAD_OBSERVED_ADDRESS => {
+                    // QAD OBSERVED_ADDRESS message
+                    // Format: 0x01 | 4 bytes IPv4 | 2 bytes port (big endian)
+                    if len >= 7 {
+                        let ip = std::net::Ipv4Addr::new(data[1], data[2], data[3], data[4]);
+                        let port = u16::from_be_bytes([data[5], data[6]]);
+                        self.observed_address =
+                            Some(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+                    }
                 }
-            } else if len > 0 {
-                // Tunneled IP packet — queue for Swift to read via agent_recv_datagram()
-                // Enforce queue bounds to prevent OOM in Network Extension (~50MB limit)
-                if self.received_datagrams.len() >= MAX_QUEUED_DATAGRAMS {
-                    self.received_datagrams.pop_front(); // drop oldest
+                REG_TYPE_ACK => {
+                    // 8A.5: Registration ACK from server
+                    // Format: [0x12, status, id_len, service_id_bytes...]
+                    if len >= 3 {
+                        let id_len = data[2] as usize;
+                        if len >= 3 + id_len {
+                            if let Ok(sid) = String::from_utf8(data[3..3 + id_len].to_vec()) {
+                                reg_ack_service = Some(sid);
+                            }
+                        }
+                    }
                 }
-                self.received_datagrams.push_back(data.to_vec());
+                REG_TYPE_NACK => {
+                    // 8A.5: Registration NACK from server
+                    // Format: [0x13, status, id_len, service_id_bytes...]
+                    if len >= 3 {
+                        let status = data[1];
+                        let id_len = data[2] as usize;
+                        if len >= 3 + id_len {
+                            if let Ok(sid) = String::from_utf8(data[3..3 + id_len].to_vec()) {
+                                reg_nack = Some((status, sid));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Tunneled IP packet — queue for Swift to read via agent_recv_datagram()
+                    // Enforce queue bounds to prevent OOM in Network Extension (~50MB limit)
+                    if self.received_datagrams.len() >= MAX_QUEUED_DATAGRAMS {
+                        self.received_datagrams.pop_front(); // drop oldest
+                    }
+                    self.received_datagrams.push_back(data.to_vec());
+                }
+            }
+        }
+
+        // Process registration ACK/NACK outside the borrow scope
+        if let Some(service_id) = reg_ack_service {
+            log::info!(
+                "[agent] Registration ACK received for service '{}'",
+                service_id
+            );
+            self.registered_services.insert(service_id.clone());
+            // Clear pending if it matches
+            if let Some((ref pending_sid, _, _)) = self.pending_registration {
+                if *pending_sid == service_id {
+                    self.pending_registration = None;
+                }
+            }
+        }
+        if let Some((status, service_id)) = reg_nack {
+            log::warn!(
+                "[agent] Registration NACK for service '{}' (status=0x{:02x})",
+                service_id,
+                status
+            );
+            // Clear pending — don't retry on explicit denial
+            if let Some((ref pending_sid, _, _)) = self.pending_registration {
+                if *pending_sid == service_id {
+                    self.pending_registration = None;
+                }
             }
         }
     }
