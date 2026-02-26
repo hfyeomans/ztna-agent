@@ -198,9 +198,8 @@ pub struct Agent {
     path_manager: p2p::PathManager,
     /// Queue of received IP packets from tunnel (for Swift to read via agent_recv_datagram)
     received_datagrams: VecDeque<Vec<u8>>,
-    /// 8A.3: Pending registration — (service_id, attempts, last_sent_time)
-    /// None = no registration pending, Some = waiting for ACK
-    pending_registration: Option<(String, u32, Instant)>,
+    /// 8A.3: Pending registrations per service — tracks ACK/retry state for each service
+    pending_registrations: std::collections::HashMap<String, (u32, Instant)>,
     /// 8A.3: Set of service IDs for which we have received ACK
     registered_services: std::collections::HashSet<String>,
     /// 8B.3: Last time CID rotation was performed on connections
@@ -263,7 +262,7 @@ impl Agent {
             hole_punch: None,
             path_manager: p2p::PathManager::new(),
             received_datagrams: VecDeque::new(),
-            pending_registration: None,
+            pending_registrations: std::collections::HashMap::new(),
             registered_services: std::collections::HashSet::new(),
             last_cid_rotation: Instant::now(),
         })
@@ -500,8 +499,9 @@ impl Agent {
         conn.dgram_send(&msg)?;
         self.last_activity = Instant::now();
 
-        // 8A.3: Track pending registration for retry
-        self.pending_registration = Some((service_id.to_string(), 1, Instant::now()));
+        // 8A.3: Track pending registration per service for retry
+        self.pending_registrations
+            .insert(service_id.to_string(), (1, Instant::now()));
         log::debug!(
             "[agent] Registration sent for '{}' (attempt 1/{})",
             service_id,
@@ -513,72 +513,107 @@ impl Agent {
 
     /// 8A.3: Check if a pending registration needs to be retried (called from tick)
     fn check_registration_retry(&mut self) {
-        let (service_id, attempts, last_time) = match self.pending_registration.take() {
-            Some(state) => state,
+        if self.pending_registrations.is_empty() {
+            return;
+        }
+
+        let conn_established = self
+            .intermediate_conn
+            .as_ref()
+            .map(|c| c.is_established())
+            .unwrap_or(false);
+
+        // Collect services that need retry (can't borrow self mutably in loop)
+        let now = Instant::now();
+        let mut to_retry: Vec<String> = Vec::new();
+        let mut to_remove: Vec<String> = Vec::new();
+
+        for (service_id, (attempts, last_time)) in &self.pending_registrations {
+            // Already registered (ACK arrived between checks)
+            if self.registered_services.contains(service_id) {
+                to_remove.push(service_id.clone());
+                continue;
+            }
+
+            let elapsed = now.duration_since(*last_time);
+            if elapsed < Duration::from_secs(REG_RETRY_TIMEOUT_SECS) {
+                continue; // Not yet time to retry
+            }
+
+            if *attempts >= REG_MAX_RETRIES {
+                log::warn!(
+                    "[agent] Registration for '{}' failed after {} attempts, giving up",
+                    service_id,
+                    attempts
+                );
+                to_remove.push(service_id.clone());
+                continue;
+            }
+
+            if conn_established {
+                to_retry.push(service_id.clone());
+            }
+            // If not connected, leave in map — will retry when reconnected
+        }
+
+        for sid in &to_remove {
+            self.pending_registrations.remove(sid);
+        }
+
+        if !conn_established && !to_retry.is_empty() {
+            log::debug!(
+                "[agent] Cannot retry {} registrations: not connected, will retry later",
+                to_retry.len()
+            );
+            return;
+        }
+
+        let conn = match self.intermediate_conn.as_mut() {
+            Some(c) => c,
             None => return,
         };
 
-        // Already registered (ACK arrived between checks)
-        if self.registered_services.contains(&service_id) {
-            return;
-        }
-
-        let elapsed = Instant::now().duration_since(last_time);
-        if elapsed < Duration::from_secs(REG_RETRY_TIMEOUT_SECS) {
-            // Not yet time to retry — put state back
-            self.pending_registration = Some((service_id, attempts, last_time));
-            return;
-        }
-
-        if attempts >= REG_MAX_RETRIES {
-            log::warn!(
-                "[agent] Registration for '{}' failed after {} attempts, giving up",
-                service_id,
-                attempts
-            );
-            return; // Don't put state back — give up
-        }
-
-        // Retry: send registration again
-        let conn = match self.intermediate_conn.as_mut() {
-            Some(c) if c.is_established() => c,
-            _ => {
-                // Connection lost — restore state so we retry when reconnected
-                log::debug!("[agent] Cannot retry registration: not connected, will retry later");
-                self.pending_registration = Some((service_id, attempts, last_time));
-                return;
-            }
-        };
-
-        let id_bytes = service_id.as_bytes();
-        if id_bytes.len() > 255 {
-            log::error!(
-                "[agent] Service ID '{}' exceeds 255 bytes, cannot register",
-                service_id
-            );
-            return;
-        }
-        let mut msg = Vec::with_capacity(2 + id_bytes.len());
-        msg.push(REG_TYPE_AGENT);
-        msg.push(id_bytes.len() as u8);
-        msg.extend_from_slice(id_bytes);
-
-        match conn.dgram_send(&msg) {
-            Ok(_) => {
-                let next_attempt = attempts + 1;
-                log::info!(
-                    "[agent] Registration retry for '{}' (attempt {}/{})",
-                    service_id,
-                    next_attempt,
-                    REG_MAX_RETRIES
+        for service_id in to_retry {
+            let id_bytes = service_id.as_bytes();
+            if id_bytes.len() > 255 {
+                log::error!(
+                    "[agent] Service ID '{}' exceeds 255 bytes, cannot register",
+                    service_id
                 );
-                self.pending_registration = Some((service_id, next_attempt, Instant::now()));
-                self.last_activity = Instant::now();
+                self.pending_registrations.remove(&service_id);
+                continue;
             }
-            Err(e) => {
-                log::debug!("[agent] Registration retry send failed: {:?}", e);
-                // Put state back to try again later
-                self.pending_registration = Some((service_id, attempts, last_time));
+            let mut msg = Vec::with_capacity(2 + id_bytes.len());
+            msg.push(REG_TYPE_AGENT);
+            msg.push(id_bytes.len() as u8);
+            msg.extend_from_slice(id_bytes);
+
+            match conn.dgram_send(&msg) {
+                Ok(_) => {
+                    let (attempts, _) = self
+                        .pending_registrations
+                        .get(&service_id)
+                        .copied()
+                        .unwrap_or((0, now));
+                    let next_attempt = attempts + 1;
+                    log::info!(
+                        "[agent] Registration retry for '{}' (attempt {}/{})",
+                        service_id,
+                        next_attempt,
+                        REG_MAX_RETRIES
+                    );
+                    self.pending_registrations
+                        .insert(service_id, (next_attempt, Instant::now()));
+                    self.last_activity = Instant::now();
+                }
+                Err(e) => {
+                    log::debug!(
+                        "[agent] Registration retry send failed for '{}': {:?}",
+                        service_id,
+                        e
+                    );
+                    // Leave in map — will retry on next tick
+                }
             }
         }
     }
@@ -818,12 +853,7 @@ impl Agent {
                 service_id
             );
             self.registered_services.insert(service_id.clone());
-            // Clear pending if it matches
-            if let Some((ref pending_sid, _, _)) = self.pending_registration {
-                if *pending_sid == service_id {
-                    self.pending_registration = None;
-                }
-            }
+            self.pending_registrations.remove(&service_id);
         }
         if let Some((status, service_id)) = reg_nack {
             log::warn!(
@@ -831,12 +861,8 @@ impl Agent {
                 service_id,
                 status
             );
-            // Clear pending — don't retry on explicit denial
-            if let Some((ref pending_sid, _, _)) = self.pending_registration {
-                if *pending_sid == service_id {
-                    self.pending_registration = None;
-                }
-            }
+            // Explicit denial — remove from pending, don't retry
+            self.pending_registrations.remove(&service_id);
         }
     }
 

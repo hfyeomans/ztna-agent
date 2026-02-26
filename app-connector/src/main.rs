@@ -145,9 +145,15 @@ const KEEPALIVE_RESPONSE: u8 = 0x11;
 const KEEPALIVE_SIZE: usize = 6;
 
 /// Returns true if this packet looks like a P2P control message (not QUIC).
-/// All P2P control messages are prefixed with ZTNA_MAGIC (0x5A).
+///
+/// P2P control messages: `[ZTNA_MAGIC(0x5A), type, nonce(4)]` = exactly 6 bytes.
+/// QUIC short-header first bytes are header-protected and can legitimately be 0x5A,
+/// so we discriminate using both magic byte AND exact size + valid type field.
+/// This prevents misclassifying QUIC packets as control traffic.
 fn is_p2p_control_packet(data: &[u8]) -> bool {
-    !data.is_empty() && data[0] == ZTNA_MAGIC
+    data.len() == KEEPALIVE_SIZE
+        && data[0] == ZTNA_MAGIC
+        && (data[1] == KEEPALIVE_REQUEST || data[1] == KEEPALIVE_RESPONSE)
 }
 
 // ============================================================================
@@ -163,6 +169,9 @@ enum RegistrationState {
     Pending { attempts: u32, last_sent: Instant },
     /// Server confirmed registration with ACK
     Registered,
+    /// Server explicitly denied registration (NACK) — do not retry
+    #[allow(dead_code)]
+    Denied { status: u8 },
 }
 
 // ============================================================================
@@ -1081,8 +1090,8 @@ impl Connector {
                                     sid,
                                     status
                                 );
-                                // Explicit denial — stop retrying
-                                self.reg_state = RegistrationState::NotRegistered;
+                                // Explicit denial — terminal state, no retry
+                                self.reg_state = RegistrationState::Denied { status };
                             }
                         }
                     }
@@ -2012,6 +2021,7 @@ impl Connector {
 
         match self.reg_state {
             RegistrationState::Registered => return Ok(()),
+            RegistrationState::Denied { .. } => return Ok(()), // Server denied — don't retry
             RegistrationState::Pending {
                 attempts,
                 last_sent,
