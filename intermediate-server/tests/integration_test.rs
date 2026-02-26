@@ -29,7 +29,7 @@ impl ServerProcess {
             return Err("Failed to build intermediate server".into());
         }
 
-        // Start the server
+        // Start the server (--disable-retry for basic connectivity tests)
         let child = Command::new("cargo")
             .args([
                 "run",
@@ -38,6 +38,7 @@ impl ServerProcess {
                 &port.to_string(),
                 "certs/cert.pem",
                 "certs/key.pem",
+                "--disable-retry",
             ])
             .env("RUST_LOG", "info")
             .spawn()?;

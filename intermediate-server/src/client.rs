@@ -1,6 +1,6 @@
 //! Client management for the ZTNA Intermediate Server
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 // ============================================================================
@@ -34,6 +34,10 @@ pub struct Client {
     pub qad_sent: bool,
     /// Buffer for accumulating signaling stream data (per stream ID)
     pub signaling_buffers: HashMap<u64, Vec<u8>>,
+    /// Authenticated identity from mTLS client certificate (CN)
+    pub authenticated_identity: Option<String>,
+    /// Services this client is authorized for (from SAN entries). None = allow all (backward compat)
+    pub authenticated_services: Option<HashSet<String>>,
 }
 
 impl Client {
@@ -46,6 +50,8 @@ impl Client {
             registered_id: None,
             qad_sent: false,
             signaling_buffers: HashMap::new(),
+            authenticated_identity: None,
+            authenticated_services: None,
         }
     }
 
