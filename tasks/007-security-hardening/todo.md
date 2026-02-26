@@ -1,11 +1,11 @@
 # TODO: Security Hardening
 
 **Task ID:** 007-security-hardening
-**Status:** Complete (core fixes shipped, deferred items tracked below)
+**Status:** Phases 1-5 Complete, Phases 6-8 In Progress
 **Priority:** P1
 **Depends On:** None (006 MVP complete)
 **Branch:** `feature/007-security-hardening`
-**Last Updated:** 2026-02-22
+**Last Updated:** 2026-02-25
 
 ---
 
@@ -20,71 +20,11 @@
 - [x] **H4:** Remove placeholder certs from `secrets.yaml` (replaced with instructions template)
 - [x] **H4:** Add pre-deploy validation script (`validate-secrets.sh`) for k8s secrets
 
-### Deferred — Certificate Operations (Future Task)
-
-- [ ] **Let's Encrypt ACME with QUIC/UDP**: QUIC uses UDP so HTTP-01 challenge won't work. Need DNS-01 challenge (e.g., via `certbot` with Route53 plugin or `lego` CLI). The Intermediate Server and App Connector both need valid TLS certs for `verify_peer(true)` to work in production without `--no-verify-peer`.
-  - **Files:** `intermediate-server/src/main.rs` (load certs at startup), systemd service unit
-  - **Approach:** Run certbot/lego as a sidecar or cron job, reload certs via SIGHUP or periodic file watch
-  - **Complexity:** Medium — requires DNS provider integration, cert reload without dropping QUIC connections
-
-- [ ] **Cert auto-renewal on Intermediate Server**: Currently certs are static files loaded at startup. Need graceful cert rotation — either restart the process (simplest, brief downtime) or implement hot-reload (watch cert file mtime, re-create `quiche::Config` when changed).
-  - **Files:** `intermediate-server/src/main.rs` (Server struct, config creation)
-  - **Approach:** Start with process restart via systemd `ExecReload`; hot-reload is a stretch goal
-  - **Complexity:** Low (restart) / High (hot-reload without connection drops)
-
-- [ ] **Update Connector TLS configuration for production certs**: Connector needs its own cert for P2P server mode. Currently uses self-signed certs from `certs/` directory.
-  - **Files:** `app-connector/src/main.rs` (P2P server config), deploy configs
-  - **Approach:** Same cert provisioning as Intermediate, or separate certs per Connector
-
-- [ ] **Update macOS Agent trust chain**: Agent currently uses `--no-verify-peer` for dev. In production, it needs the CA cert bundled or pointed to via `providerConfiguration["caCertPath"]`.
-  - **Files:** `ios-macos/ZtnaAgent/Extension/PacketTunnelProvider.swift`, app bundle resources
-  - **Approach:** Bundle CA cert in app, or download from config server on first launch
-
-- [ ] **Test certificate rotation without connection drops**: Verify that cert renewal doesn't break established QUIC connections (QUIC connections survive cert changes since TLS handshake is per-connection, but new connections need the new cert).
-
-- [ ] **cert-manager or sealed-secrets for k8s**: Replace manual `kubectl create secret tls` with automated cert management. cert-manager can auto-provision from Let's Encrypt; sealed-secrets encrypts secrets for safe git storage.
-  - **Files:** `deploy/k8s/base/`, new cert-manager CRDs
-  - **Approach:** Add cert-manager Issuer + Certificate CRDs to kustomize overlay
-  - **Complexity:** Medium — requires cert-manager installation on cluster
-
-## Phase 2: Client Authentication & Authorization (H2, M3) — DONE (Partial)
+## Phase 2: Client Authentication & Authorization (H2, M3) — DONE
 
 - [x] **H2:** Log warning on Connector registration replacement (`registry.rs`)
 - [x] **M3:** Add sender authorization check in `relay_service_datagram` (verify Agent registered for service)
 - [x] **M3:** Add `is_agent_for_service()` method to Registry with unit tests
-
-### Deferred — Full Client Authentication (Future Task)
-
-- [ ] **Design auth approach — mTLS vs token-based**: Two viable options:
-  1. **mTLS (mutual TLS)**: Each Agent/Connector gets a client certificate signed by the ZTNA CA. The Intermediate Server validates client certs during QUIC handshake. Service authorization embedded in cert Subject/SAN (e.g., `CN=agent-web-app` restricts to `web-app` service). quiche supports this via `config.verify_peer(true)` + `config.load_verify_locations_from_file()` on the server side.
-     - **Pros:** Zero-trust, no token management, cert rotation via CA
-     - **Cons:** Certificate provisioning complexity, revocation (CRL/OCSP needed)
-  2. **Token-based (JWT/PASETO)**: Agent/Connector authenticates with a signed token in the first QUIC stream message after handshake. Token contains `{client_type, service_ids[], exp}` signed by a shared secret or asymmetric key.
-     - **Pros:** Simpler provisioning (API key → token), easy revocation (short TTL)
-     - **Cons:** Token replay window, need token refresh mechanism
-  - **Recommendation:** Start with mTLS (aligns with existing TLS infrastructure from Phase 1)
-  - **Files:** `intermediate-server/src/main.rs` (connection accept), `intermediate-server/src/client.rs`, new `auth` module
-
-- [ ] **Implement client authentication on Intermediate Server connection accept**: After QUIC handshake completes, extract client certificate from the connection and validate it. Reject connections without valid client certs.
-  - **Files:** `intermediate-server/src/main.rs` (`handle_new_connection`), quiche peer cert API
-  - **quiche API:** `conn.peer_cert()` returns DER-encoded peer certificate after handshake
-  - **Approach:** Parse cert, extract CN/SAN, store as `client.authenticated_identity`
-
-- [ ] **Implement service registration authorization**: When a client sends a 0x10/0x11 registration message, verify the authenticated identity is authorized for the requested service ID.
-  - **Files:** `intermediate-server/src/main.rs` (`handle_registration`), `registry.rs`
-  - **Approach:** Compare `service_id` against allowed services from client cert SAN or an ACL config file
-
-- [ ] **Credential provisioning for Agents**: How Agents get their client certificates.
-  - **Options:** Manual cert distribution, SCEP/EST protocol, admin API that generates certs
-  - **Files:** New provisioning service or script, Agent configuration UI
-  - **Complexity:** High — requires PKI infrastructure or a credential management service
-
-- [ ] **Credential provisioning for Connectors**: Same as Agents but for Connector deployments.
-  - **Files:** Deploy configs, systemd services, Docker entrypoints
-  - **Approach:** Mount client cert as k8s secret or Docker volume
-
-- [ ] **Test unauthorized client rejection**: Integration test that connects without valid cert and verifies rejection.
-  - **Files:** `intermediate-server/tests/integration_test.rs`
 
 ## Phase 3: Rate Limiting & DoS Protection (H1, H3, L6, L7) — DONE
 
@@ -93,52 +33,11 @@
 - [x] **H3:** Add rate limiting on new TCP session creation per source IP (`MAX_SYN_PER_SOURCE_PER_SECOND = 10`)
 - [x] **L6:** Implement TCP half-close: drain backend stream on FIN before removing session (`TCP_DRAIN_TIMEOUT_SECS = 5`)
 
-### Deferred — Advanced Rate Limiting (Future Task)
-
-- [ ] **Migrate TCP proxy to non-blocking mio TcpStream**: Currently uses `StdTcpStream::connect_timeout(500ms)` which blocks the single-threaded mio event loop. Under SYN floods to unreachable backends, this stalls all QUIC processing for up to 500ms per connection attempt.
-  - **Files:** `app-connector/src/main.rs` (TCP session creation, `handle_tcp_packet`)
-  - **Approach:** Replace `StdTcpStream::connect_timeout` with `mio::net::TcpStream::connect()` (non-blocking), register with mio Poll, handle `WRITABLE` event as connect completion
-  - **Complexity:** High — requires restructuring TCP session state machine, integrating TCP fds into the mio event loop alongside QUIC UDP socket
-  - **Also resolves:** L7 (TCP backends polled manually instead of mio-integrated)
-
-- [ ] **Per-IP connection rate limiting on Intermediate Server**: Limit how many QUIC connections a single source IP can establish per time window. Prevents connection-exhaustion DoS.
-  - **Files:** `intermediate-server/src/main.rs` (`handle_new_connection`)
-  - **Approach:** `HashMap<IpAddr, (Instant, u32)>` with sliding window, similar to TCP SYN rate limiter in Connector
-
-- [ ] **Registration flood protection**: Rate-limit 0x10/0x11 registration messages per connection to prevent registry churn.
-  - **Files:** `intermediate-server/src/main.rs` (`handle_registration`), `client.rs`
-
-- [ ] **DATAGRAM throughput limits per connection**: Cap bytes-per-second or datagrams-per-second per QUIC connection to prevent a single client from monopolizing bandwidth.
-  - **Files:** `intermediate-server/src/main.rs` (`process_datagrams`)
-
-- [ ] **Load testing**: Test all rate limiting under simulated load (e.g., using `quic-test-client` with concurrent connections).
-
 ## Phase 4: Protocol Hardening (M2, M5, M6) — DONE
 
 - [x] **M2/M6:** Add ZTNA_MAGIC `0x5A` prefix to keepalive messages (avoids QUIC header collision)
 - [x] **M2/M6:** Validate magic bytes on keepalive receive
 - [x] **M5:** Add `ip_len` parameter to `agent_set_local_addr` FFI, validate `>= 4` before dereference
-
-### Deferred — Advanced Protocol Features (Future Task)
-
-- [ ] **Stateless retry tokens (QUIC anti-amplification)**: Without retry, the Intermediate Server is vulnerable to amplification attacks — an attacker spoofs source IP and the server sends back more data than it received. quiche supports `retry()` but we don't use it.
-  - **Files:** `intermediate-server/src/main.rs` (`handle_new_connection`)
-  - **quiche API:** `quiche::retry()` generates a Retry packet; client resends Initial with token
-  - **Approach:** On first Initial packet, send Retry with token. Only accept connections with valid retry token.
-  - **Complexity:** Medium — need token generation/validation, affects connection setup latency
-
-- [ ] **Registration ACK protocol**: Currently registration (0x10/0x11 datagrams) is fire-and-forget. The Agent/Connector has no confirmation that registration succeeded. Silently fails if Intermediate drops the message.
-  - **Files:** `intermediate-server/src/main.rs` (`handle_registration`), `core/packet_processor/src/lib.rs`, `app-connector/src/main.rs`
-  - **Approach:** Define new 0x12 ACK datagram type. Server sends ACK with service_id after successful registration. Client retries if no ACK within timeout.
-  - **Complexity:** Medium — new message type, retry logic, timeout handling
-
-- [ ] **Connection ID rotation**: QUIC supports connection migration via new connection IDs. Without rotation, a connection is trackable across network changes by its static connection ID.
-  - **Files:** All QUIC components
-  - **quiche API:** `conn.new_source_cid()`, `conn.retire_destination_cid()`
-  - **Complexity:** Low-Medium — quiche handles most of the mechanics
-
-- [ ] **Update quic-test-client for auth testing**: Add `--ca-cert` and `--no-verify-peer` flags to the e2e test client.
-  - **Files:** `tests/e2e/fixtures/quic-client/src/main.rs`
 
 ## Phase 5: Configuration & Operational Security — DONE
 
@@ -156,3 +55,53 @@
 - [x] **I2:** Verified `certs/` is in `.gitignore`, removed `!**/certs/*.pem` exception
 - [x] **I3:** Redact local filesystem paths in `TEST_REPORT.md` (→ relative paths)
 - [x] **I4:** Verified build-push.sh defaults already aligned (`ghcr.io`, `hfyeomans`)
+
+## Phase 6A: mTLS Client Authentication — DONE
+
+- [x] **6A.1:** Add `x509-parser = "0.16"` and `signal-hook = "0.3"` to `intermediate-server/Cargo.toml`
+- [x] **6A.2:** Create `intermediate-server/src/auth.rs` — `ClientIdentity` struct, `extract_identity(der_cert)`, `is_authorized_for_service()`
+- [x] **6A.3:** Add `authenticated_identity` + `authenticated_services` fields to Client struct (`intermediate-server/src/client.rs`)
+- [x] **6A.4:** Extract peer cert after handshake — `conn.peer_cert()` when `is_established()`, parse with auth module (`intermediate-server/src/main.rs`)
+- [x] **6A.5:** Authorize service registration — check `authenticated_services` in `handle_registration()` (`intermediate-server/src/main.rs`)
+- [x] **6A.6:** Add `--require-client-cert` CLI flag + `ServerConfig` field, default false (`intermediate-server/src/main.rs`)
+- [x] **6A.7:** Create cert generation script — CA + Agent/Connector client certs with SAN authorization (`scripts/generate-client-certs.sh`)
+- [x] **6A.8:** Unit tests for auth module — cert parsing, SAN extraction, authorization, invalid cert handling (`intermediate-server/src/auth.rs`)
+- [x] **6A.9:** Add `--client-cert` and `--client-key` flags to quic-test-client (`tests/e2e/fixtures/quic-client/src/main.rs`)
+
+## Phase 6B: Certificate Auto-Renewal — DONE
+
+- [x] **6B.1:** SIGHUP handler for cert hot-reload — `signal-hook` AtomicBool, re-create `quiche::Config` on signal (`intermediate-server/src/main.rs`)
+- [x] **6B.2:** AWS certbot setup script — Route53 DNS-01 plugin (`deploy/aws/setup-certbot.sh`)
+- [x] **6B.3:** Systemd timer for cert renewal with SIGHUP deploy-hook (`deploy/aws/ztna-cert-renew.{service,timer}`)
+- [x] **6B.4:** K8s cert-manager CRDs — Issuer + Certificate in kustomize overlay (`deploy/k8s/overlays/cert-manager/`)
+
+## Phase 7A: Non-Blocking TCP Proxy / mio Integration — DONE
+
+- [x] **7A.1:** Add `TcpConnState` enum + update `TcpSession` for `mio::net::TcpStream`, `mio_token`, `conn_state`, `connect_started` (`app-connector/src/main.rs`)
+- [x] **7A.2:** Add token allocator — `next_tcp_token: usize` (starts at 2), `token_to_flow: HashMap<Token, FlowKey>` (`app-connector/src/main.rs`)
+- [x] **7A.3:** Replace `StdTcpStream::connect_timeout(500ms)` with `mio::net::TcpStream::connect()`, register with mio Poll (`app-connector/src/main.rs`)
+- [x] **7A.4:** Handle mio events for TCP tokens — WRITABLE=connect complete, READABLE=data. Send SYN-ACK after connect (`app-connector/src/main.rs`)
+- [x] **7A.5:** Migrate `process_tcp_sessions()` to event-driven — I/O in `process_tcp_event()`, keep timeout/drain in sweep (`app-connector/src/main.rs`)
+- [x] **7A.6:** Session cleanup — deregister from mio Poll, remove token_to_flow entry (`app-connector/src/main.rs`)
+- [x] **7A.7:** Non-blocking connect timeout — 5s checked in periodic sweep, send RST on timeout (`app-connector/src/main.rs`)
+
+## Phase 7B: Stateless Retry Tokens — DONE
+
+- [x] **7B.1:** Generate AEAD token encryption key at startup — `ring::aead::AES_256_GCM` (`intermediate-server/src/main.rs`)
+- [x] **7B.2:** Token generation/validation — encrypt `[addr, dcid, timestamp]`, validate addr + freshness (<60s) (`intermediate-server/src/main.rs`)
+- [x] **7B.3:** Modify `handle_new_connection()` — no token → Retry, valid token → accept with odcid (`intermediate-server/src/main.rs`)
+- [x] **7B.4:** Add `--disable-retry` CLI flag for dev/testing (`intermediate-server/src/main.rs`)
+
+## Phase 8A: Registration ACK Protocol — DONE
+
+- [x] **8A.1:** Define `REG_TYPE_ACK = 0x12` and `REG_TYPE_NACK = 0x13` constants in all 3 crates
+- [x] **8A.2:** Server sends ACK `[0x12, status, id_len, service_id...]` after `registry.register()`, NACK on denial (`intermediate-server/src/main.rs`)
+- [x] **8A.3:** Agent retry logic — `pending_registration` tuple, 2s timeout, 3 retries max (`core/packet_processor/src/lib.rs`)
+- [x] **8A.4:** Connector retry logic — `RegistrationState` enum replacing `registered: bool` (`app-connector/src/main.rs`)
+- [x] **8A.5:** Handle 0x12/0x13 in client datagram processing (`core/packet_processor/src/lib.rs`, `app-connector/src/main.rs`)
+
+## Phase 8B: Connection ID Rotation — DONE
+
+- [x] **8B.1:** Add CID rotation timer (5-min default) and `cid_aliases` HashMap to Server (`intermediate-server/src/main.rs`)
+- [x] **8B.2:** `rotate_connection_ids()` — `conn.new_scid()`, update aliases, cleanup on close (`intermediate-server/src/main.rs`)
+- [x] **8B.3:** Client-side CID rotation in Agent (FFI tick) and Connector (`core/packet_processor/src/lib.rs`, `app-connector/src/main.rs`)

@@ -1,11 +1,11 @@
 # Plan: Security Hardening
 
 **Task ID:** 007-security-hardening
-**Status:** Not Started
+**Status:** Phases 1-5 Complete, Phases 6-8 In Progress
 **Priority:** P1
 **Depends On:** None (006 MVP complete)
-**Branch:** (not yet created)
-**Last Updated:** 2026-02-21
+**Branch:** `feature/007-security-hardening`
+**Last Updated:** 2026-02-25
 
 ---
 
@@ -109,15 +109,91 @@ Clean up hardcoded values, excessive permissions, and operational hygiene.
 
 ---
 
+## Phase 6: mTLS & Certificate Infrastructure — HIGH priority
+
+### Phase 6A: mTLS Client Authentication (2-3 days)
+
+Intermediate Server validates client certificates during QUIC handshake, extracts identity from cert SAN, and authorizes service registration.
+
+**SAN convention:** `DNS:agent.<service>.ztna` / `DNS:connector.<service>.ztna` / `DNS:agent.*.ztna` (wildcard). No ZTNA SAN = allow all (backward compat).
+
+- Add `x509-parser` + `signal-hook` dependencies to intermediate-server
+- Create `auth.rs` module — `ClientIdentity`, `extract_identity()`, `is_authorized_for_service()`
+- Add `authenticated_identity` + `authenticated_services` fields to Client struct
+- Extract peer cert after handshake via `conn.peer_cert()`, parse with auth module
+- Authorize service registration in `handle_registration()`
+- Add `--require-client-cert` CLI flag (default: false)
+- Create cert generation script (`scripts/generate-client-certs.sh`)
+- Unit tests for auth module
+- Add `--client-cert`/`--client-key` to quic-test-client
+
+### Phase 6B: Certificate Auto-Renewal (1-2 days)
+
+- SIGHUP handler for cert hot-reload (re-create `quiche::Config`)
+- AWS certbot setup script (Route53 DNS-01)
+- Systemd timer for renewal with SIGHUP deploy-hook
+- K8s cert-manager CRDs (Issuer + Certificate)
+
+## Phase 7: Network Hardening — MEDIUM priority (parallelizes with Phase 6)
+
+### Phase 7A: Non-Blocking TCP Proxy / mio Integration (2-3 days)
+
+Replace `StdTcpStream::connect_timeout(500ms)` with non-blocking `mio::net::TcpStream::connect()`. Eliminates event loop blocking under SYN floods to unreachable backends.
+
+- Add `TcpConnState` enum + update `TcpSession` struct for mio::net::TcpStream
+- Implement token allocator for TCP sockets (Token(2+))
+- Replace blocking connect with non-blocking mio connect
+- Handle WRITABLE (connect completion) and READABLE (data) events
+- Migrate `process_tcp_sessions()` to event-driven model
+- Session cleanup with mio deregistration
+- Non-blocking connect timeout (5s, checked in periodic sweep)
+
+### Phase 7B: Stateless Retry Tokens (1 day)
+
+QUIC anti-amplification via `quiche::retry()`.
+
+- Generate AEAD token encryption key at startup (ring AES-256-GCM)
+- Token generation/validation (encrypted addr + dcid + timestamp)
+- Modify `handle_new_connection()` for retry flow
+- Add `--disable-retry` flag
+
+## Phase 8: Protocol Completeness — LOW priority
+
+### Phase 8A: Registration ACK Protocol (1 day)
+
+Replace fire-and-forget 0x10/0x11 with acknowledged registration.
+
+- Define `REG_TYPE_ACK = 0x12`, `REG_TYPE_NACK = 0x13` in all 3 crates
+- Server sends ACK/NACK after registration
+- Agent retry logic (2s timeout, 3 retries max)
+- Connector retry logic (RegistrationState enum)
+
+### Phase 8B: Connection ID Rotation (0.5 days)
+
+Periodic CID rotation for privacy.
+
+- CID rotation timer (5-min default) with `cid_aliases` HashMap
+- Server-side `rotate_connection_ids()` via `conn.new_source_cid()`
+- Client-side rotation in Agent (FFI tick) and Connector
+
+---
+
 ## Success Criteria
 
-- [ ] All QUIC connections verify peer TLS certificates
-- [ ] No self-signed certificates in production deployment
-- [ ] Unauthorized clients cannot register for services
-- [ ] Agents can only route to services they're registered for
-- [ ] `received_datagrams` queue is bounded
-- [ ] TCP proxy validates destination IP
-- [ ] No hardcoded infrastructure IPs in source code
-- [ ] P2P control and keepalive messages have distinctive prefixes
-- [ ] FFI functions validate buffer lengths
-- [ ] Pre-deploy script validates k8s secrets exist
+**Phases 1-5 (COMPLETE):**
+- [x] All QUIC connections verify peer TLS certificates
+- [x] Agents can only route to services they're registered for
+- [x] `received_datagrams` queue is bounded
+- [x] TCP proxy validates destination IP
+- [x] No hardcoded infrastructure IPs in source code
+- [x] P2P control and keepalive messages have distinctive prefixes
+- [x] FFI functions validate buffer lengths
+- [x] Pre-deploy script validates k8s secrets exist
+
+**Phases 6-8 (IN PROGRESS):**
+- [ ] mTLS: Client certificates validated, service authorization from cert SAN
+- [ ] Cert auto-renewal: SIGHUP hot-reload, certbot/cert-manager integration
+- [ ] Non-blocking TCP: No event loop blocking on backend connect
+- [ ] Stateless retry: Amplification attack prevention
+- [ ] Registration ACK: Clients get confirmation of registration success/failure
+- [ ] CID rotation: Connection IDs rotated periodically for privacy
