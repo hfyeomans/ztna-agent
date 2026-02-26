@@ -26,9 +26,23 @@ log() {
     echo "[NAT-SETUP] $(date '+%Y-%m-%d %H:%M:%S') $*"
 }
 
+# Validate interface name (alphanumeric only, prevents path injection)
+validate_iface() {
+    local iface="$1"
+    if ! echo "$iface" | grep -qE '^[a-zA-Z0-9]+$'; then
+        log "ERROR: Invalid interface name: '$iface' (must be alphanumeric)"
+        exit 1
+    fi
+}
+
 # Enable IP forwarding
 enable_forwarding() {
     log "Enabling IP forwarding..."
+
+    # L4: Validate interface names before using in /proc paths
+    validate_iface "${PRIVATE_IFACE}"
+    validate_iface "${PUBLIC_IFACE}"
+
     echo 1 > /proc/sys/net/ipv4/ip_forward
 
     # Disable reverse path filtering (needed for asymmetric routing)

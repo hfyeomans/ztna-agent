@@ -82,6 +82,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
+    // Phase 6A: mTLS client certificate options
+    let client_cert_path = parse_arg(&args, "--client-cert");
+    let client_key_path = parse_arg(&args, "--client-key");
+    let ca_cert_path = parse_arg(&args, "--ca-cert");
+
     // Phase 6: Performance metrics options
     let measure_rtt = args.iter().any(|a| a == "--measure-rtt");
     let rtt_count: usize = parse_arg(&args, "--rtt-count")
@@ -113,7 +118,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::info!("  Mode: Expecting connection to FAIL (negative test)");
     }
 
-    let mut client = QuicTestClient::new(server_addr, &alpn_bytes)?;
+    if let Some(ref cert) = client_cert_path {
+        log::info!("  Client cert: {}", cert);
+    }
+    if let Some(ref key) = client_key_path {
+        log::info!("  Client key:  {}", key);
+    }
+    if let Some(ref ca) = ca_cert_path {
+        log::info!("  CA cert:     {}", ca);
+    }
+
+    let mut client = QuicTestClient::new(
+        server_addr,
+        &alpn_bytes,
+        client_cert_path.as_deref(),
+        client_key_path.as_deref(),
+        ca_cert_path.as_deref(),
+    )?;
 
     // Connect and establish QUIC session (with optional handshake timing)
     let handshake_start = Instant::now();
@@ -479,6 +500,11 @@ fn print_usage() {
     eprintln!("Phase 3.5 - Programmatic DATAGRAM Sizing:");
     eprintln!("  --query-max-size   Print MAX_DGRAM_SIZE and MAX_UDP_PAYLOAD after connection");
     eprintln!();
+    eprintln!("Phase 6A - mTLS Client Authentication:");
+    eprintln!("  --client-cert PATH Client certificate PEM file for mTLS");
+    eprintln!("  --client-key PATH  Client private key PEM file for mTLS");
+    eprintln!("  --ca-cert PATH     CA certificate PEM file for server verification");
+    eprintln!();
     eprintln!("Phase 4 - Advanced Testing:");
     eprintln!("  --payload-pattern P  Payload pattern: zeros, ones, sequential, random");
     eprintln!("  --repeat N           Send N packets (default: 1)");
@@ -531,7 +557,7 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("Hex string must have even length".into());
     }
 
@@ -722,7 +748,13 @@ struct QuicTestClient {
 }
 
 impl QuicTestClient {
-    fn new(server_addr: SocketAddr, alpn: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        server_addr: SocketAddr,
+        alpn: &[u8],
+        client_cert: Option<&str>,
+        client_key: Option<&str>,
+        ca_cert: Option<&str>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create quiche client configuration
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
@@ -742,8 +774,22 @@ impl QuicTestClient {
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
 
-        // Disable certificate verification (for testing with self-signed certs)
-        config.verify_peer(false);
+        // 6A.9: Load client certificate and key for mTLS
+        if let (Some(cert_path), Some(key_path)) = (client_cert, client_key) {
+            config.load_cert_chain_from_pem_file(cert_path)?;
+            config.load_priv_key_from_pem_file(key_path)?;
+            log::info!("Loaded client certificate for mTLS");
+        }
+
+        // Load CA certificate for server verification
+        if let Some(ca_path) = ca_cert {
+            config.load_verify_locations_from_file(ca_path)?;
+            config.verify_peer(true);
+            log::info!("Loaded CA certificate, peer verification enabled");
+        } else {
+            // Disable certificate verification (for testing with self-signed certs)
+            config.verify_peer(false);
+        }
 
         // Create poll and socket
         let poll = Poll::new()?;

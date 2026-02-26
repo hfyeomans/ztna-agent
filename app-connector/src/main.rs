@@ -10,13 +10,13 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read as _, Write as _};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream as StdTcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use mio::net::UdpSocket;
+use mio::net::{TcpStream as MioTcpStream, UdpSocket};
 use mio::{Events, Interest, Poll, Token};
 use ring::rand::{SecureRandom, SystemRandom};
 
@@ -56,6 +56,21 @@ const DEFAULT_P2P_PORT: u16 = 4434;
 /// Registration message type for Connector
 const REG_TYPE_CONNECTOR: u8 = 0x11;
 
+/// 8A.1: Registration ACK — server confirms successful registration
+const REG_TYPE_ACK: u8 = 0x12;
+
+/// 8A.1: Registration NACK — server denies registration (auth failure or invalid)
+const REG_TYPE_NACK: u8 = 0x13;
+
+/// 8A.4: Registration retry timeout in seconds
+const REG_RETRY_TIMEOUT_SECS: u64 = 2;
+
+/// 8A.4: Maximum registration retry attempts before giving up
+const REG_MAX_RETRIES: u32 = 3;
+
+/// 8B.3: Connection ID rotation interval in seconds (default: 5 minutes)
+const CID_ROTATION_INTERVAL_SECS: u64 = 300;
+
 /// QAD message type (OBSERVED_ADDRESS)
 const QAD_OBSERVED_ADDRESS: u8 = 0x01;
 
@@ -78,6 +93,12 @@ const TCP_SESSION_TIMEOUT_SECS: u64 = 120;
 
 /// Maximum concurrent TCP proxy sessions (prevents fd exhaustion)
 const MAX_TCP_SESSIONS: usize = 256;
+
+/// H3: Maximum TCP SYN packets per source IP per second (rate limiting)
+const MAX_SYN_PER_SOURCE_PER_SECOND: u32 = 10;
+
+/// L6: TCP half-close drain timeout in seconds
+const TCP_DRAIN_TIMEOUT_SECS: u64 = 5;
 
 /// mio token for QUIC socket
 const QUIC_SOCKET_TOKEN: Token = Token(0);
@@ -111,18 +132,62 @@ enum BindingMessage {
     Response(BindingResponse),
 }
 
+/// Magic byte prefix for all P2P control messages (must match packet_processor::p2p::ZTNA_MAGIC).
+/// ASCII 'Z' for ZTNA. Distinguishes P2P control traffic from QUIC packets unambiguously:
+/// QUIC long headers have bit 7 set (0x80), short headers have bit 6 set (0x40).
+const ZTNA_MAGIC: u8 = 0x5A;
+
 /// P2P keepalive request type (must match resilience.rs)
 const KEEPALIVE_REQUEST: u8 = 0x10;
 /// P2P keepalive response type (must match resilience.rs)
 const KEEPALIVE_RESPONSE: u8 = 0x11;
+/// Keepalive message size: [ZTNA_MAGIC, type, 4-byte nonce] = 6 bytes
+const KEEPALIVE_SIZE: usize = 6;
 
-/// Returns true if this packet looks like a non-QUIC P2P message.
-/// B5: Heuristic P2P control packet demux — relies on first byte bit pattern.
-/// Wire format: QUIC long header has bit 7 set (0x80), short header has bit 6 set (0x40).
-/// Control packets (binding 0x00/0x01, keepalive 0x10/0x11) have both bits clear.
-/// Post-MVP (Task 007): add explicit magic byte to avoid collision with future protocols.
+/// Returns true if this packet looks like a P2P control message (not QUIC).
+///
+/// P2P control messages are prefixed with ZTNA_MAGIC (0x5A) and come in two forms:
+/// - Keepalive: `[0x5A, type(0x10|0x11), nonce(4)]` = exactly 6 bytes
+/// - Binding:   `[0x5A, bincode_data...]` = variable length, second byte is bincode enum index
+///
+/// QUIC short-header first bytes are header-protected and can be 0x5A, but QUIC
+/// packets have the fixed bit set (bit 6 = 1), so byte[1] has bit 6 set (0x40+).
+/// Our control messages have byte[1] in {0x00, 0x01, 0x10, 0x11} — all below 0x40.
+/// This discriminates reliably without false positives.
 fn is_p2p_control_packet(data: &[u8]) -> bool {
-    !data.is_empty() && (data[0] & 0xC0) == 0
+    if data.len() < 2 || data[0] != ZTNA_MAGIC {
+        return false;
+    }
+    // Keepalive: exact size + valid type
+    if data.len() == KEEPALIVE_SIZE
+        && (data[1] == KEEPALIVE_REQUEST || data[1] == KEEPALIVE_RESPONSE)
+    {
+        return true;
+    }
+    // Binding messages: magic prefix + second byte is bincode enum index (0x00 or 0x01)
+    // QUIC short-header byte[1] always has fixed bit set (>= 0x40), so this is safe
+    if data[1] < 0x40 {
+        return true;
+    }
+    false
+}
+
+// ============================================================================
+// Registration State (8A.4)
+// ============================================================================
+
+/// 8A.4: Registration state machine replacing `registered: bool`
+#[derive(Debug, Clone)]
+enum RegistrationState {
+    /// Not registered — need to send registration
+    NotRegistered,
+    /// Registration sent, waiting for ACK — (attempts, last_sent_time)
+    Pending { attempts: u32, last_sent: Instant },
+    /// Server confirmed registration with ACK
+    Registered,
+    /// Server explicitly denied registration (NACK) — do not retry
+    #[allow(dead_code)]
+    Denied { status: u8 },
 }
 
 // ============================================================================
@@ -149,10 +214,28 @@ impl P2PClient {
     }
 }
 
+/// TCP flow key: (src_ip, src_port, dst_ip, dst_port)
+type FlowKey = (Ipv4Addr, u16, Ipv4Addr, u16);
+
+/// 7A.1: TCP backend connection state for non-blocking connect
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TcpConnState {
+    /// Non-blocking connect() in progress, waiting for WRITABLE event
+    Connecting,
+    /// Backend TCP connection established
+    Connected,
+}
+
 /// Represents a proxied TCP connection through the ZTNA tunnel
 struct TcpSession {
-    /// Non-blocking TCP connection to the backend service
-    stream: StdTcpStream,
+    /// Non-blocking TCP connection to the backend service (mio-managed)
+    stream: MioTcpStream,
+    /// mio token for this TCP socket (for event dispatch)
+    mio_token: Token,
+    /// 7A.1: Connection state (Connecting or Connected)
+    conn_state: TcpConnState,
+    /// 7A.7: When the non-blocking connect was initiated (for timeout)
+    connect_started: Instant,
     /// Our (Connector-side) next sequence number
     our_seq: u32,
     /// Agent's next expected sequence number
@@ -167,8 +250,12 @@ struct TcpSession {
     service_port: u16,
     /// Last activity time for session cleanup
     last_active: Instant,
-    /// Whether the TCP 3-way handshake is complete
+    /// Whether the TCP 3-way handshake is complete (SYN-ACK sent to Agent)
     established: bool,
+    /// L6: Whether the agent has sent FIN and we are draining backend data
+    draining: bool,
+    /// L6: Deadline for draining to complete (after which session is forcefully removed)
+    drain_deadline: Option<Instant>,
 }
 
 // ============================================================================
@@ -180,6 +267,8 @@ struct ConnectorConfig {
     intermediate_server: Option<IntermediateServerConfig>,
     services: Option<Vec<ServiceConfig>>,
     p2p: Option<P2PConfig>,
+    ca_cert: Option<String>,
+    verify_peer: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -281,11 +370,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(DEFAULT_P2P_PORT);
     let external_ip: Option<std::net::IpAddr> =
         parse_arg(&args, "--external-ip").and_then(|s| s.parse().ok());
+    let service_virtual_ip: Option<Ipv4Addr> =
+        parse_arg(&args, "--service-ip").and_then(|s| s.parse().ok());
+
+    // C1: TLS peer verification — enabled by default. Use --no-verify-peer for dev.
+    let ca_cert = parse_arg(&args, "--ca-cert").or(config.ca_cert);
+    let verify_peer = if args.iter().any(|a| a == "--no-verify-peer") {
+        false
+    } else {
+        config.verify_peer.unwrap_or(true)
+    };
 
     let server_addr: SocketAddr = server_addr.parse().map_err(|_| "Invalid server address")?;
     let forward_addr: SocketAddr = forward_addr
         .parse()
         .map_err(|_| "Invalid forward address")?;
+
+    // L2: Validate cert/key paths exist at startup (if P2P is configured)
+    // Reject partial P2P TLS config — both cert and key are required together
+    if p2p_cert.is_some() != p2p_key.is_some() {
+        return Err("P2P TLS requires both --p2p-cert and --p2p-key (got only one)".into());
+    }
+    if let Some(ref cert) = p2p_cert {
+        if !Path::new(cert).exists() {
+            log::error!("P2P certificate file not found: {}", cert);
+            return Err(format!("P2P certificate file not found: {}", cert).into());
+        }
+    }
+    if let Some(ref key) = p2p_key {
+        if !Path::new(key).exists() {
+            log::error!("P2P private key file not found: {}", key);
+            return Err(format!("P2P private key file not found: {}", key).into());
+        }
+    }
 
     log::info!("ZTNA App Connector starting...");
     log::info!("  Server:  {}", server_addr);
@@ -304,6 +421,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ip) = external_ip {
         log::info!("  External IP: {}", ip);
     }
+    if let Some(ip) = service_virtual_ip {
+        log::info!(
+            "  Service Virtual IP: {} (TCP destination validation enabled)",
+            ip
+        );
+    }
+    log::info!("  Verify peer: {}", verify_peer);
+    if !verify_peer {
+        log::warn!("TLS peer verification DISABLED — do not use in production");
+    }
 
     // Create connector and run
     let mut connector = Connector::new(
@@ -314,6 +441,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p2p_key.as_deref(),
         p2p_port,
         external_ip,
+        service_virtual_ip,
+        ca_cert.as_deref(),
+        verify_peer,
     )?;
     connector.run()
 }
@@ -361,7 +491,8 @@ struct Connector {
     /// Stream read buffer
     stream_buf: Vec<u8>,
     /// Whether registration has been sent to Intermediate
-    registered: bool,
+    /// 8A.4: Registration state (replaces old `registered: bool`)
+    reg_state: RegistrationState,
     /// Observed public address from QAD
     observed_addr: Option<SocketAddr>,
     /// Mapping from local response source to original agent request
@@ -369,7 +500,11 @@ struct Connector {
     /// Value: timestamp for cleanup
     flow_map: HashMap<(Ipv4Addr, u16, u16), Instant>,
     /// Active TCP proxy sessions, keyed by (src_ip, src_port, dst_ip, dst_port)
-    tcp_sessions: HashMap<(Ipv4Addr, u16, Ipv4Addr, u16), TcpSession>,
+    tcp_sessions: HashMap<FlowKey, TcpSession>,
+    /// 7A.2: Next mio token to allocate for TCP backend sockets (starts at 2)
+    next_tcp_token: usize,
+    /// 7A.2: Reverse map from mio Token to FlowKey for event dispatch
+    token_to_flow: HashMap<Token, FlowKey>,
     /// Buffer for accumulating signaling stream data
     signaling_buffer: Vec<u8>,
     /// P2P session manager
@@ -378,9 +513,17 @@ struct Connector {
     last_keepalive: Instant,
     /// External/public IP for P2P candidates (for NAT/cloud environments like AWS)
     external_ip: Option<std::net::IpAddr>,
+    /// H3: Expected virtual service IP for TCP destination validation.
+    /// When set, TCP SYN packets with a destination IP that does not match are rejected.
+    service_virtual_ip: Option<Ipv4Addr>,
+    /// H3: Per-source-IP TCP SYN rate limiter: maps source IP to (window_start, count)
+    tcp_syn_rates: HashMap<Ipv4Addr, (Instant, u32)>,
+    /// 8B.3: Last time CID rotation was performed
+    last_cid_rotation: Instant,
 }
 
 impl Connector {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         server_addr: SocketAddr,
         service_id: String,
@@ -389,6 +532,9 @@ impl Connector {
         p2p_key_path: Option<&str>,
         p2p_port: u16,
         external_ip: Option<std::net::IpAddr>,
+        service_virtual_ip: Option<Ipv4Addr>,
+        ca_cert_path: Option<&str>,
+        verify_peer: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create quiche client configuration (for connecting to Intermediate)
         let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -409,10 +555,19 @@ impl Connector {
         client_config.set_initial_max_streams_bidi(100);
         client_config.set_initial_max_streams_uni(100);
 
-        // TODO(007): Enable TLS certificate verification — currently disabled for
-        // MVP self-signed certs. Task 007 (Security Hardening) will add Let's Encrypt
-        // certs and proper CA chain validation.
-        client_config.verify_peer(false);
+        // C1: TLS peer verification — enabled by default for production security.
+        // Use --no-verify-peer for development with self-signed certificates.
+        client_config.verify_peer(verify_peer);
+        if verify_peer {
+            if let Some(ca_path) = ca_cert_path {
+                client_config.load_verify_locations_from_file(ca_path)?;
+                log::info!("Loaded CA certificate from {}", ca_path);
+            } else {
+                log::info!(
+                    "verify_peer enabled, using system CA store for Intermediate connection"
+                );
+            }
+        }
 
         // Create server config if P2P certificates are provided
         let server_config = if let (Some(cert_path), Some(key_path)) = (p2p_cert_path, p2p_key_path)
@@ -435,9 +590,13 @@ impl Connector {
             cfg.set_initial_max_streams_bidi(100);
             cfg.set_initial_max_streams_uni(100);
 
-            // TODO(007): Enable client certificate verification — disabled for MVP.
-            // Task 007 (Security Hardening) will add mutual TLS authentication.
-            cfg.verify_peer(false);
+            // C1: P2P server TLS — verify connecting Agents' certificates when enabled.
+            cfg.verify_peer(verify_peer);
+            if verify_peer {
+                if let Some(ca_path) = ca_cert_path {
+                    cfg.load_verify_locations_from_file(ca_path)?;
+                }
+            }
 
             log::info!("P2P server mode enabled with certificates");
             Some(cfg)
@@ -479,15 +638,27 @@ impl Connector {
             recv_buf: vec![0u8; 65535],
             send_buf: vec![0u8; MAX_DATAGRAM_SIZE],
             stream_buf: vec![0u8; 65535],
-            registered: false,
+            reg_state: RegistrationState::NotRegistered,
             observed_addr: None,
             flow_map: HashMap::new(),
             tcp_sessions: HashMap::new(),
+            next_tcp_token: 2, // 0 = QUIC_SOCKET_TOKEN, 1 = LOCAL_SOCKET_TOKEN
+            token_to_flow: HashMap::new(),
             signaling_buffer: Vec::new(),
             session_manager: P2PSessionManager::new(),
             last_keepalive: Instant::now(),
             external_ip,
+            service_virtual_ip,
+            tcp_syn_rates: HashMap::new(),
+            last_cid_rotation: Instant::now(),
         })
+    }
+
+    /// 7A.2: Allocate a unique mio Token for a new TCP backend socket
+    fn allocate_tcp_token(&mut self) -> Token {
+        let token = Token(self.next_tcp_token);
+        self.next_tcp_token += 1;
+        token
     }
 
     fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -518,21 +689,30 @@ impl Connector {
                     LOCAL_SOCKET_TOKEN => {
                         self.process_local_socket()?;
                     }
-                    _ => {}
+                    token => {
+                        // 7A.4: TCP backend socket event
+                        self.process_tcp_event(token, event)?;
+                    }
                 }
             }
 
             // Also check local socket even without events (for edge cases)
             self.process_local_socket()?;
 
-            // Poll TCP backend connections for return traffic
-            self.process_tcp_sessions()?;
+            // 7A.5: Periodic sweep — check TCP connect timeouts, drain deadlines
+            self.sweep_tcp_sessions()?;
 
             // Process timeouts for all connections
             self.process_timeouts();
 
             // Send keepalive to Intermediate if needed
             self.maybe_send_keepalive();
+
+            // 8B.3: Periodic CID rotation for privacy
+            if self.last_cid_rotation.elapsed() >= Duration::from_secs(CID_ROTATION_INTERVAL_SECS) {
+                self.rotate_connection_ids();
+                self.last_cid_rotation = Instant::now();
+            }
 
             // Send pending packets for all connections
             self.send_pending()?;
@@ -602,7 +782,7 @@ impl Connector {
         );
 
         self.intermediate_conn = Some(conn);
-        self.registered = false;
+        self.reg_state = RegistrationState::NotRegistered;
 
         Ok(())
     }
@@ -732,68 +912,81 @@ impl Connector {
         data: &[u8],
         from: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if data.is_empty() {
+        // All P2P control messages must start with ZTNA_MAGIC and have at least 2 bytes
+        if data.len() < 2 || data[0] != ZTNA_MAGIC {
             return Ok(());
         }
 
-        match data[0] {
-            KEEPALIVE_REQUEST => {
-                // Echo back with response type byte
-                if data.len() == 5 {
-                    let mut response = [0u8; 5];
-                    response[0] = KEEPALIVE_RESPONSE;
-                    response[1..].copy_from_slice(&data[1..]);
+        // Check for keepalive messages: [ZTNA_MAGIC, type, 4-byte nonce] = 6 bytes
+        if data.len() == KEEPALIVE_SIZE {
+            match data[1] {
+                KEEPALIVE_REQUEST => {
+                    // Echo back with response type byte, preserving magic prefix and nonce
+                    let mut response = [0u8; KEEPALIVE_SIZE];
+                    response[0] = ZTNA_MAGIC;
+                    response[1] = KEEPALIVE_RESPONSE;
+                    response[2..].copy_from_slice(&data[2..]);
                     self.quic_socket.send_to(&response, from)?;
                     log::trace!("Keepalive response sent to {}", from);
                 }
+                KEEPALIVE_RESPONSE => {
+                    log::trace!("Keepalive response from {}", from);
+                }
+                _ => {
+                    log::debug!(
+                        "Unknown P2P keepalive-sized message from {} (type=0x{:02x})",
+                        from,
+                        data[1]
+                    );
+                }
             }
-            KEEPALIVE_RESPONSE => {
-                log::trace!("Keepalive response from {}", from);
-            }
-            _ => {
-                // Try as binding message
-                match bincode::deserialize::<BindingMessage>(data) {
-                    Ok(BindingMessage::Request(request)) => {
-                        log::info!(
-                            "Binding request from {} (txn {:02x}{:02x}{:02x}{:02x})",
-                            from,
-                            request.transaction_id[0],
-                            request.transaction_id[1],
-                            request.transaction_id[2],
-                            request.transaction_id[3]
-                        );
+        } else {
+            // Try as binding message (strip ZTNA_MAGIC prefix before deserializing)
+            match bincode::deserialize::<BindingMessage>(&data[1..]) {
+                Ok(BindingMessage::Request(request)) => {
+                    log::debug!(
+                        "Binding request from {} (txn {:02x}{:02x}{:02x}{:02x})",
+                        from,
+                        request.transaction_id[0],
+                        request.transaction_id[1],
+                        request.transaction_id[2],
+                        request.transaction_id[3]
+                    );
 
-                        let response = BindingMessage::Response(BindingResponse {
-                            transaction_id: request.transaction_id,
-                            success: true,
-                            mapped_address: Some(from),
-                        });
+                    let response = BindingMessage::Response(BindingResponse {
+                        transaction_id: request.transaction_id,
+                        success: true,
+                        mapped_address: Some(from),
+                    });
 
-                        if let Ok(encoded) = bincode::serialize(&response) {
-                            self.quic_socket.send_to(&encoded, from)?;
-                            log::info!(
-                                "Binding response sent to {} ({} bytes)",
-                                from,
-                                encoded.len()
-                            );
-                        }
-                    }
-                    Ok(BindingMessage::Response(response)) => {
-                        log::info!(
-                            "Binding response from {} (success={})",
-                            from,
-                            response.success
-                        );
-                    }
-                    Err(e) => {
+                    if let Ok(payload) = bincode::serialize(&response) {
+                        // Prepend ZTNA_MAGIC to outgoing binding response
+                        let mut encoded = Vec::with_capacity(1 + payload.len());
+                        encoded.push(ZTNA_MAGIC);
+                        encoded.extend_from_slice(&payload);
+                        self.quic_socket.send_to(&encoded, from)?;
                         log::debug!(
-                            "Unknown P2P control message from {} (type=0x{:02x}, len={}): {}",
+                            "Binding response sent to {} ({} bytes)",
                             from,
-                            data[0],
-                            data.len(),
-                            e
+                            encoded.len()
                         );
                     }
+                }
+                Ok(BindingMessage::Response(response)) => {
+                    log::debug!(
+                        "Binding response from {} (success={})",
+                        from,
+                        response.success
+                    );
+                }
+                Err(e) => {
+                    log::debug!(
+                        "Unknown P2P control message from {} (type=0x{:02x}, len={}): {}",
+                        from,
+                        data[1],
+                        data.len(),
+                        e
+                    );
                 }
             }
         }
@@ -890,6 +1083,46 @@ impl Connector {
                 QAD_OBSERVED_ADDRESS => {
                     // QAD message - parse observed address
                     self.handle_qad(&dgram)?;
+                }
+                REG_TYPE_ACK => {
+                    // 8A.5: Registration ACK from server
+                    // Format: [0x12, status, id_len, service_id_bytes...]
+                    if dgram.len() >= 3 {
+                        let id_len = dgram[2] as usize;
+                        if dgram.len() >= 3 + id_len {
+                            if let Ok(sid) = String::from_utf8(dgram[3..3 + id_len].to_vec()) {
+                                if sid == self.service_id {
+                                    log::info!("Registration ACK received for service '{}'", sid);
+                                    self.reg_state = RegistrationState::Registered;
+                                } else {
+                                    log::debug!("Ignoring ACK for unknown service '{}'", sid);
+                                }
+                            }
+                        }
+                    }
+                }
+                REG_TYPE_NACK => {
+                    // 8A.5: Registration NACK from server
+                    // Format: [0x13, status, id_len, service_id_bytes...]
+                    if dgram.len() >= 3 {
+                        let status = dgram[1];
+                        let id_len = dgram[2] as usize;
+                        if dgram.len() >= 3 + id_len {
+                            if let Ok(sid) = String::from_utf8(dgram[3..3 + id_len].to_vec()) {
+                                if sid == self.service_id {
+                                    log::warn!(
+                                        "Registration NACK for service '{}' (status=0x{:02x})",
+                                        sid,
+                                        status
+                                    );
+                                    // Explicit denial — terminal state, no retry
+                                    self.reg_state = RegistrationState::Denied { status };
+                                } else {
+                                    log::debug!("Ignoring NACK for unknown service '{}'", sid);
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {
                     // Encapsulated IP packet - forward to local service
@@ -1109,6 +1342,64 @@ impl Connector {
         let mut packets_to_send: Vec<Vec<u8>> = Vec::new();
 
         if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 {
+            // H3: Validate destination IP matches expected virtual service IP
+            if let Some(expected_ip) = self.service_virtual_ip {
+                if dst_ip != expected_ip {
+                    log::warn!(
+                        "TCP SYN to unexpected destination {}, expected {}. Sending RST.",
+                        dst_ip,
+                        expected_ip
+                    );
+                    packets_to_send.push(build_tcp_packet(
+                        dst_ip,
+                        dst_port,
+                        src_ip,
+                        src_port,
+                        0,
+                        seq_num.wrapping_add(1),
+                        TCP_RST | TCP_ACK,
+                        0,
+                        &[],
+                    ));
+                    for packet in &packets_to_send {
+                        self.send_ip_packet(packet)?;
+                    }
+                    return Ok(());
+                }
+            }
+
+            // H3: Per-source-IP SYN rate limiting
+            let now = Instant::now();
+            let rate_entry = self.tcp_syn_rates.entry(src_ip).or_insert((now, 0));
+            if now.duration_since(rate_entry.0).as_secs() >= 1 {
+                // Reset window
+                *rate_entry = (now, 1);
+            } else {
+                rate_entry.1 += 1;
+                if rate_entry.1 > MAX_SYN_PER_SOURCE_PER_SECOND {
+                    log::warn!(
+                        "TCP SYN rate limit exceeded for {} ({}/s), sending RST",
+                        src_ip,
+                        rate_entry.1
+                    );
+                    packets_to_send.push(build_tcp_packet(
+                        dst_ip,
+                        dst_port,
+                        src_ip,
+                        src_port,
+                        0,
+                        seq_num.wrapping_add(1),
+                        TCP_RST | TCP_ACK,
+                        0,
+                        &[],
+                    ));
+                    for packet in &packets_to_send {
+                        self.send_ip_packet(packet)?;
+                    }
+                    return Ok(());
+                }
+            }
+
             // B3: Reject new connections when at capacity (prevents fd exhaustion)
             if self.tcp_sessions.len() >= MAX_TCP_SESSIONS {
                 log::warn!(
@@ -1144,46 +1435,72 @@ impl Connector {
                 seq_num
             );
 
-            // MVP: blocking connect with reduced timeout (500ms).
-            // Post-MVP (Task 008): use non-blocking mio::net::TcpStream::connect()
-            // to avoid stalling the event loop entirely.
-            match StdTcpStream::connect_timeout(&self.forward_addr, Duration::from_millis(500)) {
-                Ok(stream) => {
-                    stream.set_nonblocking(true)?;
-                    stream.set_nodelay(true)?;
+            // 7A.3: Clean up any existing session for this flow (duplicate SYN)
+            if let Some(mut old_session) = self.tcp_sessions.remove(&flow_key) {
+                let _ = self.poll.registry().deregister(&mut old_session.stream);
+                self.token_to_flow.remove(&old_session.mio_token);
+                log::debug!("Replaced existing TCP session for flow {:?}", flow_key);
+            }
 
-                    let our_isn: u32 = {
-                        let mut buf = [0u8; 4];
-                        let _ = self.rng.fill(&mut buf);
-                        u32::from_be_bytes(buf)
-                    };
+            // 7A.3: Non-blocking connect via mio — returns immediately,
+            // connect completes asynchronously. SYN-ACK deferred until WRITABLE event.
+            match MioTcpStream::connect(self.forward_addr) {
+                Ok(mut stream) => {
+                    // Set TCP_NODELAY for low-latency proxying
+                    let _ = stream.set_nodelay(true);
 
-                    let session = TcpSession {
-                        stream,
-                        our_seq: our_isn.wrapping_add(1),
-                        their_seq: seq_num.wrapping_add(1),
-                        agent_ip: src_ip,
-                        agent_port: src_port,
-                        service_ip: dst_ip,
-                        service_port: dst_port,
-                        last_active: Instant::now(),
-                        established: false,
-                    };
+                    // Allocate mio token and register for WRITABLE (connect completion)
+                    let token = self.allocate_tcp_token();
+                    if let Err(e) =
+                        self.poll
+                            .registry()
+                            .register(&mut stream, token, Interest::WRITABLE)
+                    {
+                        log::warn!("Failed to register TCP socket with mio: {}", e);
+                        packets_to_send.push(build_tcp_packet(
+                            dst_ip,
+                            dst_port,
+                            src_ip,
+                            src_port,
+                            0,
+                            seq_num.wrapping_add(1),
+                            TCP_RST | TCP_ACK,
+                            0,
+                            &[],
+                        ));
+                    } else {
+                        let our_isn: u32 = {
+                            let mut buf = [0u8; 4];
+                            let _ = self.rng.fill(&mut buf);
+                            u32::from_be_bytes(buf)
+                        };
 
-                    packets_to_send.push(build_tcp_packet(
-                        dst_ip,
-                        dst_port,
-                        src_ip,
-                        src_port,
-                        our_isn,
-                        seq_num.wrapping_add(1),
-                        TCP_SYN | TCP_ACK,
-                        65535,
-                        &[],
-                    ));
+                        let now = Instant::now();
+                        let session = TcpSession {
+                            stream,
+                            mio_token: token,
+                            conn_state: TcpConnState::Connecting,
+                            connect_started: now,
+                            our_seq: our_isn.wrapping_add(1),
+                            their_seq: seq_num.wrapping_add(1),
+                            agent_ip: src_ip,
+                            agent_port: src_port,
+                            service_ip: dst_ip,
+                            service_port: dst_port,
+                            last_active: now,
+                            established: false,
+                            draining: false,
+                            drain_deadline: None,
+                        };
 
-                    self.tcp_sessions.insert(flow_key, session);
-                    log::debug!("TCP session created, SYN-ACK sent");
+                        self.token_to_flow.insert(token, flow_key);
+                        self.tcp_sessions.insert(flow_key, session);
+                        log::debug!(
+                            "TCP non-blocking connect initiated to {} (token={:?})",
+                            self.forward_addr,
+                            token
+                        );
+                    }
                 }
                 Err(e) => {
                     log::warn!("TCP connect to {} failed: {}", self.forward_addr, e);
@@ -1201,24 +1518,42 @@ impl Connector {
                 }
             }
         } else if flags & TCP_RST != 0 {
-            if self.tcp_sessions.remove(&flow_key).is_some() {
+            // 7A.6: Clean up mio registration on RST
+            if let Some(mut session) = self.tcp_sessions.remove(&flow_key) {
+                let _ = self.poll.registry().deregister(&mut session.stream);
+                self.token_to_flow.remove(&session.mio_token);
                 log::debug!("TCP session reset: {}:{}", src_ip, src_port);
             }
         } else if flags & TCP_FIN != 0 {
-            if let Some(session) = self.tcp_sessions.remove(&flow_key) {
+            // L6: TCP half-close draining — don't immediately remove the session.
+            // Shut down the write half to the backend and enter draining state so we
+            // can read any remaining response data before tearing down.
+            if let Some(session) = self.tcp_sessions.get_mut(&flow_key) {
+                // ACK the FIN
+                session.their_seq = seq_num.wrapping_add(1 + payload.len() as u32);
                 packets_to_send.push(build_tcp_packet(
                     dst_ip,
                     dst_port,
                     src_ip,
                     src_port,
                     session.our_seq,
-                    seq_num.wrapping_add(1 + payload.len() as u32),
-                    TCP_FIN | TCP_ACK,
+                    session.their_seq,
+                    TCP_ACK,
                     65535,
                     &[],
                 ));
-                drop(session.stream);
-                log::debug!("TCP session closed by FIN: {}:{}", src_ip, src_port);
+
+                // Shut down the write half of the backend TcpStream
+                let _ = session.stream.shutdown(std::net::Shutdown::Write);
+                session.draining = true;
+                session.drain_deadline =
+                    Some(Instant::now() + Duration::from_secs(TCP_DRAIN_TIMEOUT_SECS));
+                log::debug!(
+                    "TCP half-close: {}:{} entering drain state ({}s timeout)",
+                    src_ip,
+                    src_port,
+                    TCP_DRAIN_TIMEOUT_SECS
+                );
             }
         } else if flags & TCP_ACK != 0 {
             let mut remove_session = false;
@@ -1226,58 +1561,73 @@ impl Connector {
             if let Some(session) = self.tcp_sessions.get_mut(&flow_key) {
                 session.last_active = Instant::now();
 
-                if !session.established {
-                    session.established = true;
-                    log::debug!("TCP session established: {}:{}", src_ip, src_port);
-                }
+                // Don't forward data while backend connect is still in progress
+                if session.conn_state == TcpConnState::Connecting {
+                    log::trace!(
+                        "TCP ACK received while connecting, buffering for {}:{}",
+                        src_ip,
+                        src_port
+                    );
+                } else {
+                    if !session.established {
+                        session.established = true;
+                        log::debug!("TCP session established: {}:{}", src_ip, src_port);
+                    }
 
-                if !payload.is_empty() {
-                    match session.stream.write(payload) {
-                        Ok(n) => {
-                            session.their_seq = seq_num.wrapping_add(n as u32);
-                            packets_to_send.push(build_tcp_packet(
-                                dst_ip,
-                                dst_port,
-                                src_ip,
-                                src_port,
-                                session.our_seq,
-                                session.their_seq,
-                                TCP_ACK,
-                                65535,
-                                &[],
-                            ));
-                            log::trace!(
-                                "TCP forwarded {} bytes to backend for {}:{}",
-                                n,
-                                src_ip,
-                                src_port
-                            );
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            // Backend buffer full - don't ACK, agent retransmits
-                            log::trace!("TCP write WouldBlock for {}:{}", src_ip, src_port);
-                        }
-                        Err(e) => {
-                            log::debug!("TCP write to backend failed: {}", e);
-                            packets_to_send.push(build_tcp_packet(
-                                dst_ip,
-                                dst_port,
-                                src_ip,
-                                src_port,
-                                session.our_seq,
-                                seq_num.wrapping_add(payload.len() as u32),
-                                TCP_RST | TCP_ACK,
-                                0,
-                                &[],
-                            ));
-                            remove_session = true;
+                    // L6: Don't forward data to backend if session is draining
+                    // (write half already shut down)
+                    if !payload.is_empty() && !session.draining {
+                        match session.stream.write(payload) {
+                            Ok(n) => {
+                                session.their_seq = seq_num.wrapping_add(n as u32);
+                                packets_to_send.push(build_tcp_packet(
+                                    dst_ip,
+                                    dst_port,
+                                    src_ip,
+                                    src_port,
+                                    session.our_seq,
+                                    session.their_seq,
+                                    TCP_ACK,
+                                    65535,
+                                    &[],
+                                ));
+                                log::trace!(
+                                    "TCP forwarded {} bytes to backend for {}:{}",
+                                    n,
+                                    src_ip,
+                                    src_port
+                                );
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                // Backend buffer full - don't ACK, agent retransmits
+                                log::trace!("TCP write WouldBlock for {}:{}", src_ip, src_port);
+                            }
+                            Err(e) => {
+                                log::debug!("TCP write to backend failed: {}", e);
+                                packets_to_send.push(build_tcp_packet(
+                                    dst_ip,
+                                    dst_port,
+                                    src_ip,
+                                    src_port,
+                                    session.our_seq,
+                                    seq_num.wrapping_add(payload.len() as u32),
+                                    TCP_RST | TCP_ACK,
+                                    0,
+                                    &[],
+                                ));
+                                remove_session = true;
+                            }
                         }
                     }
                 }
             }
 
             if remove_session {
-                self.tcp_sessions.remove(&flow_key);
+                // 7A.6: Clean up mio registration on session removal
+                if let Some(mut session) = self.tcp_sessions.remove(&flow_key) {
+                    let _ = self.poll.registry().deregister(&mut session.stream);
+                    self.token_to_flow.remove(&session.mio_token);
+                }
             }
         }
 
@@ -1346,20 +1696,239 @@ impl Connector {
         Ok(())
     }
 
-    fn process_tcp_sessions(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut read_buf = [0u8; MAX_TCP_PAYLOAD];
+    /// 7A.4: Handle a mio event for a TCP backend socket.
+    ///
+    /// Dispatches based on connection state:
+    /// - Connecting + WRITABLE → check connect result via peer_addr()
+    /// - Connected + READABLE → read data from backend, forward to Agent via QUIC
+    /// - Connected + WRITABLE → backend is writable (no-op, writes happen inline in handle_tcp_packet)
+    fn process_tcp_event(
+        &mut self,
+        token: Token,
+        event: &mio::event::Event,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Look up the flow key for this token
+        let flow_key = match self.token_to_flow.get(&token) {
+            Some(fk) => *fk,
+            None => {
+                log::trace!("mio event for unknown TCP token {:?}", token);
+                return Ok(());
+            }
+        };
+
+        let mut packets_to_send: Vec<Vec<u8>> = Vec::new();
+        let mut remove_session = false;
+
+        if let Some(session) = self.tcp_sessions.get_mut(&flow_key) {
+            match session.conn_state {
+                TcpConnState::Connecting => {
+                    if event.is_writable() {
+                        // 7A.4: Check if connect succeeded by calling peer_addr()
+                        match session.stream.peer_addr() {
+                            Ok(_addr) => {
+                                // Connect succeeded — transition to Connected
+                                session.conn_state = TcpConnState::Connected;
+                                session.last_active = Instant::now();
+
+                                // Re-register for READABLE | WRITABLE
+                                if let Err(e) = self.poll.registry().reregister(
+                                    &mut session.stream,
+                                    session.mio_token,
+                                    Interest::READABLE | Interest::WRITABLE,
+                                ) {
+                                    log::warn!("Failed to reregister TCP socket: {}", e);
+                                    remove_session = true;
+                                } else {
+                                    // Send SYN-ACK to Agent now that backend is connected
+                                    let our_isn = session.our_seq.wrapping_sub(1);
+                                    packets_to_send.push(build_tcp_packet(
+                                        session.service_ip,
+                                        session.service_port,
+                                        session.agent_ip,
+                                        session.agent_port,
+                                        our_isn,
+                                        session.their_seq,
+                                        TCP_SYN | TCP_ACK,
+                                        65535,
+                                        &[],
+                                    ));
+                                    log::debug!(
+                                        "TCP backend connected, SYN-ACK sent to {}:{}",
+                                        session.agent_ip,
+                                        session.agent_port
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                // Connect failed
+                                log::warn!(
+                                    "TCP non-blocking connect failed for {}:{}: {}",
+                                    session.agent_ip,
+                                    session.agent_port,
+                                    e
+                                );
+                                packets_to_send.push(build_tcp_packet(
+                                    session.service_ip,
+                                    session.service_port,
+                                    session.agent_ip,
+                                    session.agent_port,
+                                    0,
+                                    session.their_seq,
+                                    TCP_RST | TCP_ACK,
+                                    0,
+                                    &[],
+                                ));
+                                remove_session = true;
+                            }
+                        }
+                    }
+                }
+                TcpConnState::Connected => {
+                    // Handle READABLE — read data from backend, forward to Agent
+                    if event.is_readable() {
+                        let mut read_buf = [0u8; MAX_TCP_PAYLOAD];
+                        loop {
+                            match session.stream.read(&mut read_buf) {
+                                Ok(0) => {
+                                    // Backend closed connection
+                                    if session.draining {
+                                        log::debug!(
+                                            "TCP drain complete for {}:{}, backend closed",
+                                            session.agent_ip,
+                                            session.agent_port
+                                        );
+                                    } else {
+                                        log::debug!(
+                                            "TCP backend closed for {}:{}",
+                                            session.agent_ip,
+                                            session.agent_port
+                                        );
+                                    }
+                                    packets_to_send.push(build_tcp_packet(
+                                        session.service_ip,
+                                        session.service_port,
+                                        session.agent_ip,
+                                        session.agent_port,
+                                        session.our_seq,
+                                        session.their_seq,
+                                        TCP_FIN | TCP_ACK,
+                                        65535,
+                                        &[],
+                                    ));
+                                    remove_session = true;
+                                    break;
+                                }
+                                Ok(n) => {
+                                    packets_to_send.push(build_tcp_packet(
+                                        session.service_ip,
+                                        session.service_port,
+                                        session.agent_ip,
+                                        session.agent_port,
+                                        session.our_seq,
+                                        session.their_seq,
+                                        TCP_PSH | TCP_ACK,
+                                        65535,
+                                        &read_buf[..n],
+                                    ));
+                                    session.our_seq = session.our_seq.wrapping_add(n as u32);
+                                    session.last_active = Instant::now();
+                                    log::trace!(
+                                        "TCP backend -> agent: {} bytes for {}:{}",
+                                        n,
+                                        session.agent_ip,
+                                        session.agent_port
+                                    );
+                                }
+                                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                                Err(e) => {
+                                    log::debug!(
+                                        "TCP backend read error for {}:{}: {}",
+                                        session.agent_ip,
+                                        session.agent_port,
+                                        e
+                                    );
+                                    packets_to_send.push(build_tcp_packet(
+                                        session.service_ip,
+                                        session.service_port,
+                                        session.agent_ip,
+                                        session.agent_port,
+                                        session.our_seq,
+                                        session.their_seq,
+                                        TCP_RST | TCP_ACK,
+                                        0,
+                                        &[],
+                                    ));
+                                    remove_session = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // WRITABLE for Connected sessions is a no-op here — writes happen
+                    // inline when the Agent sends data (handle_tcp_packet ACK handler).
+                }
+            }
+        }
+
+        // 7A.6: Clean up session + mio registration if needed
+        if remove_session {
+            if let Some(mut session) = self.tcp_sessions.remove(&flow_key) {
+                let _ = self.poll.registry().deregister(&mut session.stream);
+                self.token_to_flow.remove(&session.mio_token);
+            }
+        }
+
+        for packet in packets_to_send {
+            self.send_ip_packet(&packet)?;
+        }
+
+        Ok(())
+    }
+
+    /// 7A.5: Periodic sweep for TCP sessions — no I/O, just timer checks.
+    ///
+    /// Checks:
+    /// - 7A.7: Connect timeout (5s) for sessions in Connecting state
+    /// - L6: Drain deadline for half-closed sessions
+    fn sweep_tcp_sessions(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut to_remove = Vec::new();
         let mut packets_to_send: Vec<Vec<u8>> = Vec::new();
+        let now = Instant::now();
 
-        for (flow_key, session) in &mut self.tcp_sessions {
-            if !session.established {
+        for (flow_key, session) in &self.tcp_sessions {
+            // 7A.7: Non-blocking connect timeout (5 seconds)
+            if session.conn_state == TcpConnState::Connecting
+                && now.duration_since(session.connect_started) > Duration::from_secs(5)
+            {
+                log::warn!(
+                    "TCP connect timeout for {}:{} (5s elapsed), sending RST",
+                    session.agent_ip,
+                    session.agent_port
+                );
+                packets_to_send.push(build_tcp_packet(
+                    session.service_ip,
+                    session.service_port,
+                    session.agent_ip,
+                    session.agent_port,
+                    0,
+                    session.their_seq,
+                    TCP_RST | TCP_ACK,
+                    0,
+                    &[],
+                ));
+                to_remove.push(*flow_key);
                 continue;
             }
 
-            loop {
-                match session.stream.read(&mut read_buf) {
-                    Ok(0) => {
-                        // Backend closed connection
+            // L6: Check if draining sessions have exceeded their deadline
+            if session.draining {
+                if let Some(deadline) = session.drain_deadline {
+                    if now >= deadline {
+                        log::debug!(
+                            "TCP drain timeout for {}:{}, tearing down",
+                            session.agent_ip,
+                            session.agent_port
+                        );
                         packets_to_send.push(build_tcp_packet(
                             session.service_ip,
                             session.service_port,
@@ -1372,62 +1941,17 @@ impl Connector {
                             &[],
                         ));
                         to_remove.push(*flow_key);
-                        log::debug!(
-                            "TCP backend closed for {}:{}",
-                            session.agent_ip,
-                            session.agent_port
-                        );
-                        break;
-                    }
-                    Ok(n) => {
-                        packets_to_send.push(build_tcp_packet(
-                            session.service_ip,
-                            session.service_port,
-                            session.agent_ip,
-                            session.agent_port,
-                            session.our_seq,
-                            session.their_seq,
-                            TCP_PSH | TCP_ACK,
-                            65535,
-                            &read_buf[..n],
-                        ));
-                        session.our_seq = session.our_seq.wrapping_add(n as u32);
-                        session.last_active = Instant::now();
-                        log::trace!(
-                            "TCP backend -> agent: {} bytes for {}:{}",
-                            n,
-                            session.agent_ip,
-                            session.agent_port
-                        );
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(e) => {
-                        log::debug!(
-                            "TCP backend read error for {}:{}: {}",
-                            session.agent_ip,
-                            session.agent_port,
-                            e
-                        );
-                        packets_to_send.push(build_tcp_packet(
-                            session.service_ip,
-                            session.service_port,
-                            session.agent_ip,
-                            session.agent_port,
-                            session.our_seq,
-                            session.their_seq,
-                            TCP_RST | TCP_ACK,
-                            0,
-                            &[],
-                        ));
-                        to_remove.push(*flow_key);
-                        break;
                     }
                 }
             }
         }
 
+        // 7A.6: Clean up removed sessions — deregister from mio, remove token mapping
         for key in to_remove {
-            self.tcp_sessions.remove(&key);
+            if let Some(mut session) = self.tcp_sessions.remove(&key) {
+                let _ = self.poll.registry().deregister(&mut session.stream);
+                self.token_to_flow.remove(&session.mio_token);
+            }
         }
 
         for packet in packets_to_send {
@@ -1510,32 +2034,84 @@ impl Connector {
         Ok(())
     }
 
+    /// 8A.4: Registration with ACK/retry state machine
     fn maybe_register(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.registered {
+        // Check if connection is established
+        let is_established = self
+            .intermediate_conn
+            .as_ref()
+            .map(|c| c.is_established())
+            .unwrap_or(false);
+
+        if !is_established {
             return Ok(());
         }
 
+        match self.reg_state {
+            RegistrationState::Registered => return Ok(()),
+            RegistrationState::Denied { .. } => return Ok(()), // Server denied — don't retry
+            RegistrationState::Pending {
+                attempts,
+                last_sent,
+            } => {
+                // Check if we need to retry
+                let elapsed = Instant::now().duration_since(last_sent);
+                if elapsed < Duration::from_secs(REG_RETRY_TIMEOUT_SECS) {
+                    return Ok(()); // Not yet time to retry
+                }
+                if attempts >= REG_MAX_RETRIES {
+                    log::warn!(
+                        "Registration for '{}' failed after {} attempts, giving up",
+                        self.service_id,
+                        attempts
+                    );
+                    // Stay in Pending — will not retry until reconnect resets to NotRegistered
+                    return Ok(());
+                }
+                // Fall through to send retry
+                log::info!(
+                    "Registration retry for '{}' (attempt {}/{})",
+                    self.service_id,
+                    attempts + 1,
+                    REG_MAX_RETRIES
+                );
+            }
+            RegistrationState::NotRegistered => {
+                // Fall through to send first registration
+            }
+        }
+
+        // Send registration message
         if let Some(ref mut conn) = self.intermediate_conn {
-            if !conn.is_established() {
+            let id_bytes = self.service_id.as_bytes();
+            if id_bytes.len() > 255 {
+                log::error!(
+                    "Service ID '{}' exceeds 255 bytes, cannot register",
+                    self.service_id
+                );
                 return Ok(());
             }
-
-            // Build registration message: [0x11, id_len, service_id bytes]
-            let id_bytes = self.service_id.as_bytes();
             let mut msg = Vec::with_capacity(2 + id_bytes.len());
             msg.push(REG_TYPE_CONNECTOR);
             msg.push(id_bytes.len() as u8);
             msg.extend_from_slice(id_bytes);
 
-            log::debug!(
-                "DATAGRAM max_writable_len={:?}",
-                conn.dgram_max_writable_len()
-            );
-
             match conn.dgram_send(&msg) {
                 Ok(_) => {
-                    log::info!("Registered as Connector for service '{}'", self.service_id);
-                    self.registered = true;
+                    let attempt = match &self.reg_state {
+                        RegistrationState::Pending { attempts, .. } => attempts + 1,
+                        _ => 1,
+                    };
+                    self.reg_state = RegistrationState::Pending {
+                        attempts: attempt,
+                        last_sent: Instant::now(),
+                    };
+                    log::info!(
+                        "Registration sent for '{}' (attempt {}/{}), waiting for ACK",
+                        self.service_id,
+                        attempt,
+                        REG_MAX_RETRIES
+                    );
                 }
                 Err(e) => {
                     log::debug!("Failed to send registration: {:?}", e);
@@ -1562,10 +2138,26 @@ impl Connector {
         self.flow_map
             .retain(|_, ts| now.duration_since(*ts).as_secs() < 60);
 
-        // Clean up idle TCP sessions
+        // Clean up idle TCP sessions (skip draining sessions — they have their own deadline)
+        // 7A.6: Also deregister from mio and clean up token_to_flow
         let tcp_timeout = TCP_SESSION_TIMEOUT_SECS;
-        self.tcp_sessions
-            .retain(|_, session| now.duration_since(session.last_active).as_secs() < tcp_timeout);
+        let poll_registry = self.poll.registry();
+        let token_to_flow = &mut self.token_to_flow;
+        self.tcp_sessions.retain(|_, session| {
+            if session.draining {
+                true // Draining sessions are managed by sweep_tcp_sessions
+            } else if now.duration_since(session.last_active).as_secs() >= tcp_timeout {
+                let _ = poll_registry.deregister(&mut session.stream);
+                token_to_flow.remove(&session.mio_token);
+                false
+            } else {
+                true
+            }
+        });
+
+        // H3: Clean up expired SYN rate limit entries (older than 2 seconds)
+        self.tcp_syn_rates
+            .retain(|_, (window_start, _)| now.duration_since(*window_start).as_secs() < 2);
     }
 
     /// Send a QUIC PING to keep the Intermediate connection alive
@@ -1585,6 +2177,56 @@ impl Connector {
                 }
             }
             self.last_keepalive = Instant::now();
+        }
+    }
+
+    /// 8B.3: Rotate connection IDs on all established connections for privacy.
+    ///
+    /// Generates a new random source CID for the Intermediate connection and
+    /// each P2P client connection via `conn.new_scid()`.
+    fn rotate_connection_ids(&mut self) {
+        // Rotate Intermediate connection CID
+        if let Some(ref mut conn) = self.intermediate_conn {
+            if conn.is_established() && conn.scids_left() > 0 {
+                let mut new_scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+                if self.rng.fill(&mut new_scid_bytes).is_ok() {
+                    let new_scid = quiche::ConnectionId::from_ref(&new_scid_bytes);
+                    let mut reset_token_bytes = [0u8; 16];
+                    if self.rng.fill(&mut reset_token_bytes).is_ok() {
+                        let reset_token = u128::from_be_bytes(reset_token_bytes);
+                        match conn.new_scid(&new_scid, reset_token, true) {
+                            Ok(seq) => {
+                                log::debug!("Rotated intermediate CID (seq={})", seq);
+                            }
+                            Err(e) => {
+                                log::debug!("Intermediate CID rotation failed: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Rotate P2P client connection CIDs
+        for (conn_id, client) in self.p2p_clients.iter_mut() {
+            if client.conn.is_established() && client.conn.scids_left() > 0 {
+                let mut new_scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+                if self.rng.fill(&mut new_scid_bytes).is_ok() {
+                    let new_scid = quiche::ConnectionId::from_ref(&new_scid_bytes);
+                    let mut reset_token_bytes = [0u8; 16];
+                    if self.rng.fill(&mut reset_token_bytes).is_ok() {
+                        let reset_token = u128::from_be_bytes(reset_token_bytes);
+                        match client.conn.new_scid(&new_scid, reset_token, true) {
+                            Ok(seq) => {
+                                log::debug!("Rotated P2P CID for {:?} (seq={})", conn_id, seq);
+                            }
+                            Err(e) => {
+                                log::debug!("P2P CID rotation failed for {:?}: {:?}", conn_id, e);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

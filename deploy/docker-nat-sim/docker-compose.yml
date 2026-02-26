@@ -176,8 +176,6 @@ services:
       dockerfile: deploy/docker-nat-sim/Dockerfile.quic-client
     container_name: ztna-quic-client
     hostname: quic-client
-    cap_add:
-      - NET_ADMIN
     networks:
       ztna-agent-lan:
         ipv4_address: 172.21.0.10
@@ -203,8 +201,6 @@ services:
       dockerfile: deploy/docker-nat-sim/Dockerfile.connector
     container_name: ztna-app-connector
     hostname: app-connector
-    cap_add:
-      - NET_ADMIN
     networks:
       ztna-connector-lan:
         ipv4_address: 172.22.0.10

@@ -72,10 +72,14 @@ typedef enum {
 // QUIC Agent Lifecycle
 // ============================================================================
 
-/// Create a new QUIC agent instance.
+/// Create a new QUIC agent instance with TLS configuration.
+/// @param ca_cert_path Path to CA certificate PEM file for server verification.
+///   Pass NULL to use the system CA store.
+/// @param verify_peer Whether to verify the server's TLS certificate.
+///   Should be true in production. Pass false for dev with self-signed certs.
 /// Returns: Pointer to agent, or NULL on failure.
 /// Caller is responsible for calling agent_destroy when done.
-Agent* agent_create(void);
+Agent* agent_create(const char* ca_cert_path, bool verify_peer);
 
 /// Destroy an agent instance and free its resources.
 /// @param agent Pointer created by agent_create (may be NULL).
@@ -99,10 +103,11 @@ AgentResult agent_connect(Agent* agent, const char* host, uint16_t port);
 /// Set the local UDP address (used as RecvInfo.to for quiche path validation).
 /// Call this after the NWConnection reports its local endpoint.
 /// @param agent Agent pointer.
-/// @param ip Local IPv4 address as 4 bytes.
+/// @param ip Local IPv4 address as bytes.
+/// @param ip_len Length of the IP address buffer (must be >= 4).
 /// @param port Local port (host byte order).
-/// @return AgentResultOk on success.
-AgentResult agent_set_local_addr(Agent* agent, const uint8_t* ip, uint16_t port);
+/// @return AgentResultOk on success, AgentResultInvalidPointer if ip_len < 4.
+AgentResult agent_set_local_addr(Agent* agent, const uint8_t* ip, size_t ip_len, uint16_t port);
 
 /// Check if the agent is currently connected.
 /// @param agent Agent pointer.
@@ -282,7 +287,7 @@ AgentResult agent_process_binding_response(Agent* agent, const uint8_t* data, si
 /// @param agent Agent pointer.
 /// @param out_ip Buffer for destination IPv4 address (4 bytes).
 /// @param out_port On output: destination port.
-/// @param out_data Buffer for keepalive message (5 bytes minimum).
+/// @param out_data Buffer for keepalive message (6 bytes minimum).
 /// @return AgentResultOk if keepalive should be sent, AgentResultNoData otherwise.
 AgentResult agent_poll_keepalive(Agent* agent, uint8_t* out_ip, uint16_t* out_port,
                                   uint8_t* out_data);

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run ZTNA certificate renewal twice daily
+
+[Timer]
+# Check twice per day (certbot only renews when within 30 days of expiry)
+OnCalendar=*-*-* 00,12:00:00
+# Add random delay up to 1 hour to avoid thundering herd
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

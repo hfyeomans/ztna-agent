@@ -38,17 +38,29 @@ final class AgentFFI: @unchecked Sendable {
         lock.withLockUnchecked { $0.pointer }
     }
 
-    /// Create a new Rust QUIC agent. Destroys any existing agent first.
+    /// Create a new Rust QUIC agent with TLS configuration.
+    ///
+    /// - Parameters:
+    ///   - caCertPath: Path to CA certificate PEM file for server verification.
+    ///     Pass `nil` to use the system CA store.
+    ///   - verifyPeer: Whether to verify the server's TLS certificate.
+    ///     Should be `true` in production. Pass `false` for dev with self-signed certs.
     @discardableResult
-    func create() -> OpaquePointer? {
+    func create(caCertPath: String? = nil, verifyPeer: Bool = true) -> OpaquePointer? {
         lock.withLockUnchecked { state in
             if let existing = state.pointer {
                 logger.warning("Creating agent while previous exists — destroying old agent")
                 agent_destroy(existing)
             }
-            state.pointer = agent_create()
+            if let caPath = caCertPath {
+                state.pointer = caPath.withCString { cString in
+                    agent_create(cString, verifyPeer)
+                }
+            } else {
+                state.pointer = agent_create(nil, verifyPeer)
+            }
             if state.pointer != nil {
-                logger.info("Agent created")
+                logger.info("Agent created (verifyPeer=\(verifyPeer))")
             } else {
                 logger.error("agent_create() returned NULL")
             }

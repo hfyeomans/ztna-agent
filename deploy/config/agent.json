@@ -1,6 +1,7 @@
 {
   "_comment": "Reference config for the macOS/iOS Agent. These values are passed via NETunnelProviderProtocol.providerConfiguration from the app UI, not read from a file.",
-  "serverHost": "3.128.36.92",
+  "serverHost": "0.0.0.0",
+  "_comment_serverHost": "Set via environment or config file — must be configured before use",
   "serverPort": 4433,
   "serviceId": "echo-service",
   "services": [

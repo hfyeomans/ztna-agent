@@ -53,6 +53,12 @@ impl Registry {
                 // was previously registered for this service
                 if let Some(old_conn_id) = self.connectors.get(&service_id) {
                     if old_conn_id != &conn_id {
+                        log::warn!(
+                            "Connector replacement: service '{}' was {:?}, now {:?}",
+                            service_id,
+                            old_conn_id,
+                            conn_id
+                        );
                         self.connector_services.remove(old_conn_id);
                     }
                 }
@@ -157,6 +163,19 @@ impl Registry {
     #[cfg(test)]
     pub fn agent_count(&self) -> usize {
         self.agent_targets.len()
+    }
+
+    /// Check if a connection is a registered Agent targeting the given service.
+    /// Used for sender authorization on service-routed datagrams.
+    pub fn is_agent_for_service(
+        &self,
+        conn_id: &quiche::ConnectionId<'static>,
+        service_id: &str,
+    ) -> bool {
+        self.agent_targets
+            .get(conn_id)
+            .map(|services| services.contains(service_id))
+            .unwrap_or(false)
     }
 
     /// Find the Connector connection ID for a given service
@@ -339,6 +358,49 @@ mod tests {
             Some(agent_id.clone())
         );
         assert_eq!(registry.find_agent_for_service("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_is_agent_for_service() {
+        let mut registry = Registry::new();
+
+        let agent_id = make_conn_id(1);
+        let non_agent_id = make_conn_id(2);
+
+        registry.register(agent_id.clone(), ClientType::Agent, "web-app".to_string());
+
+        // Agent is registered for web-app
+        assert!(registry.is_agent_for_service(&agent_id, "web-app"));
+        // Agent is NOT registered for other services
+        assert!(!registry.is_agent_for_service(&agent_id, "database"));
+        // Non-agent is NOT registered
+        assert!(!registry.is_agent_for_service(&non_agent_id, "web-app"));
+    }
+
+    #[test]
+    fn test_connector_replacement_warns() {
+        let mut registry = Registry::new();
+
+        let old_connector = make_conn_id(1);
+        let new_connector = make_conn_id(2);
+
+        registry.register(
+            old_connector.clone(),
+            ClientType::Connector,
+            "echo-service".to_string(),
+        );
+
+        // Replacement should succeed (warning logged but not asserted here)
+        registry.register(
+            new_connector.clone(),
+            ClientType::Connector,
+            "echo-service".to_string(),
+        );
+
+        assert_eq!(
+            registry.find_connector_for_service("echo-service"),
+            Some(new_connector)
+        );
     }
 
     #[test]

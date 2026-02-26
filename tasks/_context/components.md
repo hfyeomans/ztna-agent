@@ -40,6 +40,13 @@
 - DATAGRAM relay between agent/connector pairs
 - Client registry for routing (connection-based)
 - Integration test (handshake + QAD verified)
+- **Task 007 additions:**
+  - TLS peer verification (`verify_peer(true)`) with CA cert loading
+  - mTLS client authentication (`auth.rs`, `--require-client-cert` flag)
+  - Stateless retry tokens (AEAD AES-256-GCM, `quiche::retry()`)
+  - Registration ACK/NACK (0x12/0x13) with sender authorization
+  - CID rotation (5-min timer, `cid_aliases` HashMap)
+  - SIGHUP cert hot-reload (re-creates `quiche::Config`)
 
 **Critical Compatibility:**
 - ALPN: `b"ztna-v1"` (matches Agent)
@@ -82,15 +89,22 @@
 - **mio over tokio**: Matches Intermediate Server's sans-IO model
 - **Userspace TCP proxy**: Session-based tracking avoids TUN/TAP requirement
 - **Connector-local ICMP**: Echo Reply generated at Connector, not forwarded to backend
-- **No registration ACK**: Server doesn't acknowledge; treat as best-effort
+- **Registration ACK**: Server sends 0x12 ACK / 0x13 NACK; Connector tracks `RegistrationState` with retry (Task 007)
 - **JSON config**: Supports CLI arg override for backwards compatibility
+- **Task 007 additions:**
+  - Non-blocking TCP via `mio::net::TcpStream::connect()` (event-driven, no event loop blocking)
+  - TLS peer verification + CA cert loading
+  - Per-IP TCP SYN rate limiting (`MAX_SYN_PER_SOURCE_PER_SECOND = 10`)
+  - TCP half-close draining (`TCP_DRAIN_TIMEOUT_SECS = 5`)
+  - CID rotation (5-min timer, client-side)
+  - P2P keepalive: 6-byte wire format `[ZTNA_MAGIC(0x5A), type, 4-byte nonce]`
 
 **P2P Server Mode (Port 4434):**
 - Dual-mode: QUIC client (to Intermediate on 4433) + QUIC server (for Agents on 4434)
 - Packet demux on port 4434: QUIC packets (first byte & 0xC0 != 0) vs Control packets
 - Control packet types: Binding messages (bincode variant 0x00/0x01), Keepalive (0x10 request / 0x11 response)
 - `process_p2p_control_packet()` handles binding requests and keepalive echo
-- Keepalive protocol: raw UDP, 5 bytes: `[type_byte, sequence_u32_le]`
+- Keepalive protocol: raw UDP, 6 bytes: `[ZTNA_MAGIC(0x5A), type_byte, nonce_u32_be]`
 
 **Multi-Service Architecture (Phase 7):**
 - Per-service routing requires separate Connector instances (each with own --forward-addr)
@@ -511,6 +525,45 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 
 ---
 
+### 007: Security Hardening ✅ COMPLETE
+
+**Location:** `intermediate-server/`, `app-connector/`, `core/packet_processor/`, `scripts/`, `deploy/`
+
+**Branch:** `feature/007-security-hardening` (PR #8)
+
+**Scope:** 26 security findings (1 Critical, 4 High, 8 Medium, 9 Low, 4 Info) + 6 deferred items
+
+**Phases 1-5 (Initial Hardening — 26 findings):**
+- TLS `verify_peer(true)` on all Rust crates + CA cert loading (C1)
+- K8s secrets validation script, no placeholder certs (H4)
+- Connector registration replacement warning (H2), sender authorization (M3)
+- TCP SYN rate limiting per source IP, destination IP validation (H3)
+- TCP half-close draining (L6), queue depth cap (H1)
+- ZTNA_MAGIC keepalive prefix (M2/M6), `ip_len` FFI validation (M5)
+- 15 config/ops items: hardcoded IPs, Docker caps, logging levels, cert paths, etc.
+
+**Phases 6-8 (6 Deferred Items — All Complete):**
+- **Phase 6A: mTLS Client Authentication** — `auth.rs` module, x509-parser SAN extraction, `--require-client-cert` flag, cert generation script, peer cert extraction after handshake, service authorization
+- **Phase 6B: Certificate Auto-Renewal** — SIGHUP hot-reload via signal-hook, certbot Route53 DNS-01, systemd timer, k8s cert-manager CRDs
+- **Phase 7A: Non-Blocking TCP Proxy** — `mio::net::TcpStream::connect()` replaces blocking 500ms connect, event-driven I/O, 5s connect timeout, duplicate SYN guard
+- **Phase 7B: Stateless Retry Tokens** — AEAD (AES-256-GCM) token encryption, `quiche::retry()`, Retry SCID reuse for transport parameter match, `--disable-retry` flag
+- **Phase 8A: Registration ACK Protocol** — 0x12 ACK / 0x13 NACK, `RegistrationState` state machine with Denied terminal state, per-service retry (2s timeout, 3 max), multi-ACK Vec accumulation
+- **Phase 8B: Connection ID Rotation** — 5-min timer, `cid_aliases` HashMap (max 4 per connection), cleanup on connection close, client-side rotation in Agent + Connector
+
+**Key Files Created:**
+- `intermediate-server/src/auth.rs` — mTLS auth module (ClientIdentity, SAN extraction, authorization)
+- `scripts/generate-client-certs.sh` — CA + client cert generation for dev/test
+- `scripts/resolve-pr-comments.sh` — PR comment resolution tool
+- `deploy/aws/setup-certbot.sh` — Route53 DNS-01 cert issuance
+- `deploy/aws/ztna-cert-renew.{service,timer}` — Systemd renewal
+- `deploy/k8s/overlays/cert-manager/` — k8s cert-manager CRDs
+
+**Test Count:** 143 tests passing (39+1 intermediate-server, 83 packet_processor, 18+2 app-connector)
+
+**Review Rounds:** 3 Oracle reviews (12 findings fixed) + 1 CodeRabbit/Gemini review (16 threads, 4 actionable fixes)
+
+---
+
 ## Dependency Graph
 
 ```
@@ -599,7 +652,7 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
   - ✅ P2P→Relay failover — seamless per-packet fallback, 180/180 0% loss
 
 **Path to production (post-MVP):**
-- 🔲 Task 007: Security Hardening (P1) — TLS certs, client auth, rate limiting
+- ✅ Task 007: Security Hardening (P1) — Complete (Phases 1-8, 26 findings + 6 deferred items)
 - 🔲 Task 008: Production Operations (P2) — Monitoring, CI/CD, automation
 - 🔲 Task 009: Multi-Service Architecture (P2) — Per-service backends, discovery
 - 🔲 Task 010: Admin Dashboard (P3) — Web UI for management
@@ -700,7 +753,10 @@ The Intermediate reads the 0x2F header, finds the Connector for "echo-service", 
 **Type Byte Values:**
 - `0x10` = Agent registration (targeting a service)
 - `0x11` = Connector registration (providing a service)
+- `0x12` = Registration ACK (server → client, Task 007 Phase 8A)
+- `0x13` = Registration NACK (server → client, Task 007 Phase 8A)
 - `0x2F` = Service-routed datagram (per-packet routing)
+- `0x5A` = ZTNA_MAGIC prefix for P2P keepalive messages (Task 007 Phase 4)
 
 **Example:**
 ```
@@ -775,10 +831,11 @@ if isP2PActive, agent_get_active_path(agent) == 0 {  // 0 = Direct
 ### Important Notes
 
 1. **Service ID must match**: Agent's target service ID must exactly match a registered Connector's service ID
-2. **No ACK**: Registration is fire-and-forget; server doesn't acknowledge
-3. **Re-register on reconnect**: Registration is connection-scoped; lost on disconnect
-4. **Multi-service**: Agent can register for multiple services per connection (0x2F routing)
+2. **Registration ACK/NACK** (Task 007): Server sends 0x12 ACK or 0x13 NACK after registration. Clients retry (2s timeout, 3 max attempts). NACK is terminal — no retry on explicit denial.
+3. **Re-register on reconnect**: Registration is connection-scoped; Agent clears `registered_services` on new `connect()`
+4. **Multi-service**: Agent can register for multiple services per connection (0x2F routing), with per-service ACK tracking
 5. **Backward compatible**: Non-0x2F datagrams still use implicit single-service routing
+6. **mTLS** (Task 007): When `--require-client-cert` is enabled, server validates client X.509 certs and authorizes service registration via SAN entries (`DNS:agent.<service>.ztna`)
 
 ---
 

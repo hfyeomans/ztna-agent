@@ -40,7 +40,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [005](../005-p2p-hole-punching/) | P2P Hole Punching | ✅ Complete | `master` |
 | [005a](../005a-swift-agent-integration/) | Swift Agent Integration | ✅ Complete | `master` |
 | [006](../006-cloud-deployment/) | Cloud Deployment | ✅ Complete (MVP) | `master` (PR #7 merged) |
-| [007](../007-security-hardening/) | Security Hardening | ⏳ Not Started (26 findings documented) | — |
+| [007](../007-security-hardening/) | Security Hardening | ✅ Complete (Phases 1-8, PR #8) | `feature/007-security-hardening` |
 | [008](../008-production-operations/) | Production Operations | ⏳ Not Started | — |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | ⏳ Not Started | — |
 | [010](../010-admin-dashboard/) | Admin Dashboard | ⏳ Not Started | — |
@@ -73,8 +73,8 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
                     │
          ┌──────────┼──────────────────────┐
          ▼          ▼                      ▼
-   007 (Security)  009 (Multi-Service)   011 (Protocol)
-   P1 (26 findings) P2                   P3
+   007 (Security) ✅ 009 (Multi-Service)   011 (Protocol)
+   P1 COMPLETE     P2                   P3
          │          │                      │
          ▼          ▼                      │
    008 (Prod Ops)  010 (Dashboard)       012 (Multi-Env)
@@ -114,7 +114,9 @@ git push -u origin feature/XXX-task-name
 │  │ (configurable │  │     │  - 0x2F svc routing  │     │  - UDP/TCP/ICMP     │
 │  │  host/port/   │  │     │  - Relay (fallback)  │     │  - JSON config      │
 │  │  service)     │  │     │  - Signaling (P2P)   │     │  - Keepalive        │
-│  └───────┬───────┘  │     │  - JSON config       │     │  - P2P server mode  │
+│  └───────┬───────┘  │     │  - mTLS + cert reload│     │  - P2P server mode  │
+│          │          │     │  - Stateless retry   │     │  - Non-blocking TCP │
+│          │          │     │  - Reg ACK/NACK      │     │  - Rate limiting    │
 │          │          │     └──────────▲───────────┘     └──────────▲──────────┘
 │  ┌───────▼───────┐  │                │                            │
 │  │ NEPacketTun.  │  │                │    QUIC Tunnel             │
@@ -342,15 +344,23 @@ tail -f tests/e2e/artifacts/logs/*.log
 | **Service Registration** | Protocol for Agents/Connectors to register with Intermediate for routing |
 | **0x2F Datagram** | Service-routed datagram: `[0x2F, id_len, service_id, ip_packet]` |
 | **Split Tunnel** | Only configured virtual IPs (10.100.0.0/24) go through QUIC tunnel |
+| **mTLS** | Mutual TLS — server validates client certificates for identity + service authorization (Task 007) |
+| **Stateless Retry** | QUIC anti-amplification: server sends Retry with AEAD token before accepting (Task 007) |
+| **Registration ACK** | Server confirms registration with 0x12 ACK or 0x13 NACK; clients retry with backoff (Task 007) |
+| **CID Rotation** | Periodic QUIC Connection ID rotation for privacy (Task 007) |
+| **ZTNA_MAGIC** | `0x5A` prefix byte distinguishing P2P control messages from QUIC packets (Task 007) |
 
 ### Registration & Routing Protocol
 
 Both Agents and Connectors register with a service ID to enable relay routing:
 - **Agent (0x10)**: "I want to reach service X" (can register multiple)
 - **Connector (0x11)**: "I provide service X"
+- **Registration ACK (0x12)**: Server confirms successful registration
+- **Registration NACK (0x13)**: Server denies registration (auth failure or invalid)
 - **Service-Routed Datagram (0x2F)**: Per-packet routing with embedded service ID
 
 Registration format: `[type_byte, service_id_length, service_id_bytes...]`
+ACK/NACK format: `[type_byte, status, service_id_length, service_id_bytes...]`
 Routed datagram: `[0x2F, service_id_length, service_id_bytes..., ip_packet_bytes...]`
 
 The Intermediate strips the 0x2F wrapper before forwarding to the Connector.
@@ -366,10 +376,10 @@ Items deferred from MVP implementation that must be addressed for production.
 
 | Item | Component | Description | Risk if Missing |
 |------|-----------|-------------|-----------------|
-| **Stateless Retry** | 002-Server | Anti-amplification protection via HMAC tokens (→ Task 007) | DoS amplification attacks |
-| **TLS Certificate Verification** | 001-Agent, 002-Server | Currently `verify_peer(false)` (→ Task 007) | MITM attacks |
-| **Client Authentication** | 002-Server | No auth - any client can connect (→ Task 007) | Unauthorized access |
-| **Rate Limiting** | 002-Server | No per-client DATAGRAM rate limits (→ Task 007) | Resource exhaustion |
+| ~~Stateless Retry~~ | ~~002-Server~~ | ✅ Done (Task 007 Phase 7B) — AEAD retry tokens via `quiche::retry()` | ~~DoS amplification~~ |
+| ~~TLS Certificate Verification~~ | ~~001-Agent, 002-Server~~ | ✅ Done (Task 007 Phase 1) — `verify_peer(true)` + CA cert loading | ~~MITM attacks~~ |
+| ~~Client Authentication~~ | ~~002-Server~~ | ✅ Done (Task 007 Phase 6A) — mTLS with x509 SAN-based service authorization | ~~Unauthorized access~~ |
+| ~~Rate Limiting~~ | ~~002-Server~~ | ✅ Done (Task 007 Phase 3) — Per-IP TCP SYN rate limiting | ~~Resource exhaustion~~ |
 
 ### Priority 2: Reliability (Recommended)
 
@@ -380,7 +390,7 @@ Items deferred from MVP implementation that must be addressed for production.
 | ~~Error Recovery (Agent)~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.9) — Auto-reconnect with exponential backoff, NWPathMonitor, 3 detection paths | Agent auto-recovers |
 | **Error Recovery (Server/Connector)** | 002-Server, 003-Connector | Automatic reconnection logic (→ Task 008) | Manual intervention needed |
 | ~~TCP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.4) | Userspace TCP proxy |
-| **Registration Acknowledgment** | 002-Server, 003-Connector | Server doesn't ACK registration (→ Task 007) | Silent registration failures |
+| ~~Registration Acknowledgment~~ | ~~002-Server, 003-Connector~~ | ✅ Done (Task 007 Phase 8A) — 0x12 ACK / 0x13 NACK with retry state machine | ~~Silent failures~~ |
 | ~~Return-Path DATAGRAM→TUN~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.6) | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` |
 
 ### Priority 3: Operations (Nice to Have)
@@ -391,7 +401,7 @@ Items deferred from MVP implementation that must be addressed for production.
 | ~~Configuration File~~ | ~~002-Server, 003-Connector~~ | ✅ Done (Task 006 Phase 4.2) - JSON configs |
 | **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported (→ Task 008) |
 | **IPv6 QAD Support** | 001-Agent, 002-Server, 003-Connector | Currently IPv4 only, 7-byte format (→ Task 011) |
-| **Production Certificates** | All | Currently using self-signed dev certs (→ Task 007) |
+| ~~Production Certificates~~ | ~~All~~ | ✅ Done (Task 007 Phase 6B) — SIGHUP hot-reload, certbot DNS-01, cert-manager CRDs |
 | ~~ICMP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.5) - Echo Reply |
 | ~~Multiple Service Registration~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.3) - 0x2F routing |
 | **Per-Service Backend Routing** | 003-Connector | Route different services to different backends (→ Task 009) |
@@ -523,7 +533,7 @@ See [Task 006: Cloud Deployment](../006-cloud-deployment/) for implementation de
 
 | Task | Name | Priority | Description | Dependencies |
 |------|------|----------|-------------|--------------|
-| [007](../007-security-hardening/) | Security Hardening | P1 | 26 findings: TLS certs, client auth, rate limiting, FFI safety, protocol hardening | None |
+| ~~[007](../007-security-hardening/)~~ | ~~Security Hardening~~ | ~~Done~~ | ~~26 findings + 6 deferred items: mTLS, cert renewal, non-blocking TCP, retry tokens, reg ACK, CID rotation~~ | ~~None~~ |
 | [008](../008-production-operations/) | Production Operations | P2 | Prometheus metrics, graceful shutdown, deployment automation, CI/CD | 007 |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | P2 | Per-service backend routing, dynamic discovery, health checks | None |
 | [010](../010-admin-dashboard/) | Admin Dashboard | P3 | REST API on Intermediate, web frontend, topology visualization | 008, 009 |

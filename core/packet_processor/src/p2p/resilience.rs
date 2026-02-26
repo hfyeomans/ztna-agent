@@ -19,6 +19,8 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use super::ZTNA_MAGIC;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -43,35 +45,47 @@ pub const FALLBACK_COOLDOWN: Duration = Duration::from_secs(30);
 pub const KEEPALIVE_REQUEST: u8 = 0x10;
 pub const KEEPALIVE_RESPONSE: u8 = 0x11;
 
+/// Keepalive wire format size: [ZTNA_MAGIC, type, 4-byte sequence] = 6 bytes
+pub const KEEPALIVE_SIZE: usize = 6;
+
 /// Encode a keepalive request message
-pub fn encode_keepalive_request(sequence: u32) -> [u8; 5] {
-    let mut buf = [0u8; 5];
-    buf[0] = KEEPALIVE_REQUEST;
-    buf[1..5].copy_from_slice(&sequence.to_be_bytes());
+/// Wire format: [ZTNA_MAGIC, KEEPALIVE_REQUEST, sequence (4 bytes BE)]
+pub fn encode_keepalive_request(sequence: u32) -> [u8; KEEPALIVE_SIZE] {
+    let mut buf = [0u8; KEEPALIVE_SIZE];
+    buf[0] = ZTNA_MAGIC;
+    buf[1] = KEEPALIVE_REQUEST;
+    buf[2..6].copy_from_slice(&sequence.to_be_bytes());
     buf
 }
 
 /// Encode a keepalive response message
-pub fn encode_keepalive_response(sequence: u32) -> [u8; 5] {
-    let mut buf = [0u8; 5];
-    buf[0] = KEEPALIVE_RESPONSE;
-    buf[1..5].copy_from_slice(&sequence.to_be_bytes());
+/// Wire format: [ZTNA_MAGIC, KEEPALIVE_RESPONSE, sequence (4 bytes BE)]
+pub fn encode_keepalive_response(sequence: u32) -> [u8; KEEPALIVE_SIZE] {
+    let mut buf = [0u8; KEEPALIVE_SIZE];
+    buf[0] = ZTNA_MAGIC;
+    buf[1] = KEEPALIVE_RESPONSE;
+    buf[2..6].copy_from_slice(&sequence.to_be_bytes());
     buf
 }
 
 /// Decode a keepalive message
 /// Returns (is_response, sequence) or None if invalid
 pub fn decode_keepalive(data: &[u8]) -> Option<(bool, u32)> {
-    if data.len() < 5 {
+    if data.len() < KEEPALIVE_SIZE {
         return None;
     }
 
-    let msg_type = data[0];
+    // Verify magic byte prefix
+    if data[0] != ZTNA_MAGIC {
+        return None;
+    }
+
+    let msg_type = data[1];
     if msg_type != KEEPALIVE_REQUEST && msg_type != KEEPALIVE_RESPONSE {
         return None;
     }
 
-    let sequence = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+    let sequence = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
     Some((msg_type == KEEPALIVE_RESPONSE, sequence))
 }
 
@@ -325,7 +339,7 @@ impl PathManager {
     }
 
     /// Get keepalive message to send (if needed)
-    pub fn poll_keepalive(&mut self) -> Option<(SocketAddr, [u8; 5])> {
+    pub fn poll_keepalive(&mut self) -> Option<(SocketAddr, [u8; KEEPALIVE_SIZE])> {
         if let Some(path) = self.direct_path.as_mut() {
             if path.should_send_keepalive() {
                 let seq = path.record_keepalive_sent();
@@ -338,7 +352,11 @@ impl PathManager {
 
     /// Process received keepalive message
     /// Returns keepalive response to send (if this was a request)
-    pub fn process_keepalive(&mut self, from: SocketAddr, data: &[u8]) -> Option<[u8; 5]> {
+    pub fn process_keepalive(
+        &mut self,
+        from: SocketAddr,
+        data: &[u8],
+    ) -> Option<[u8; KEEPALIVE_SIZE]> {
         let (is_response, sequence) = decode_keepalive(data)?;
 
         if let Some(path) = self.direct_path.as_mut() {
@@ -462,10 +480,16 @@ mod tests {
     #[test]
     fn test_decode_invalid_keepalive() {
         // Too short
-        assert!(decode_keepalive(&[0x10]).is_none());
+        assert!(decode_keepalive(&[ZTNA_MAGIC, 0x10]).is_none());
 
-        // Wrong type
-        assert!(decode_keepalive(&[0x00, 0, 0, 0, 0]).is_none());
+        // Wrong magic byte
+        assert!(decode_keepalive(&[0x00, 0x10, 0, 0, 0, 0]).is_none());
+
+        // Wrong type (valid magic, invalid type)
+        assert!(decode_keepalive(&[ZTNA_MAGIC, 0x00, 0, 0, 0, 0]).is_none());
+
+        // Missing magic byte entirely (old 5-byte format)
+        assert!(decode_keepalive(&[0x10, 0, 0, 0, 0]).is_none());
     }
 
     #[test]

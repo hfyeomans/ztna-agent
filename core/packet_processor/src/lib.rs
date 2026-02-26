@@ -45,6 +45,21 @@ const ALPN_PROTOCOL: &[u8] = b"ztna-v1";
 /// Registration message type for Agent (matches intermediate-server)
 const REG_TYPE_AGENT: u8 = 0x10;
 
+/// 8A.1: Registration ACK — server confirms successful registration
+const REG_TYPE_ACK: u8 = 0x12;
+
+/// 8A.1: Registration NACK — server denies registration (auth failure or invalid)
+const REG_TYPE_NACK: u8 = 0x13;
+
+/// 8A.3: Registration retry timeout in seconds
+const REG_RETRY_TIMEOUT_SECS: u64 = 2;
+
+/// 8A.3: Maximum registration retry attempts before giving up
+const REG_MAX_RETRIES: u32 = 3;
+
+/// 8B.3: Connection ID rotation interval in seconds (default: 5 minutes)
+const CID_ROTATION_INTERVAL_SECS: u64 = 300;
+
 /// QAD observed address message type
 const QAD_OBSERVED_ADDRESS: u8 = 0x01;
 
@@ -183,16 +198,37 @@ pub struct Agent {
     path_manager: p2p::PathManager,
     /// Queue of received IP packets from tunnel (for Swift to read via agent_recv_datagram)
     received_datagrams: VecDeque<Vec<u8>>,
+    /// 8A.3: Pending registrations per service — tracks ACK/retry state for each service
+    pending_registrations: std::collections::HashMap<String, (u32, Instant)>,
+    /// 8A.3: Set of service IDs for which we have received ACK
+    registered_services: std::collections::HashSet<String>,
+    /// 8B.3: Last time CID rotation was performed on connections
+    last_cid_rotation: Instant,
 }
 
 impl Agent {
-    /// Create a new agent with default configuration
-    fn new() -> Result<Self, quiche::Error> {
+    /// Create a new agent with TLS configuration
+    ///
+    /// - `ca_cert_path`: Path to CA certificate for server verification. If `None`
+    ///   and `verify_peer` is true, the system CA store is used.
+    /// - `verify_peer`: Whether to verify the server's TLS certificate. Should be
+    ///   `true` in production. Pass `false` only for development with self-signed certs.
+    fn new(ca_cert_path: Option<&str>, verify_peer: bool) -> Result<Self, quiche::Error> {
         let mut config = Config::new(quiche::PROTOCOL_VERSION)?;
 
-        // TLS configuration - for MVP, disable certificate verification
-        // In production, this should verify server certificates
-        config.verify_peer(false);
+        // C1: TLS peer verification — enabled by default for production security.
+        // When disabled, the agent is vulnerable to MITM attacks on the QUIC tunnel.
+        config.verify_peer(verify_peer);
+        if verify_peer {
+            if let Some(ca_path) = ca_cert_path {
+                config.load_verify_locations_from_file(ca_path)?;
+                log::info!("[agent] Loaded CA certificate from {}", ca_path);
+            } else {
+                log::info!("[agent] verify_peer enabled, using system CA store");
+            }
+        } else {
+            log::warn!("[agent] TLS peer verification DISABLED — do not use in production");
+        }
 
         // Set ALPN protocol
         config.set_application_protos(&[ALPN_PROTOCOL])?;
@@ -226,6 +262,9 @@ impl Agent {
             hole_punch: None,
             path_manager: p2p::PathManager::new(),
             received_datagrams: VecDeque::new(),
+            pending_registrations: std::collections::HashMap::new(),
+            registered_services: std::collections::HashSet::new(),
+            last_cid_rotation: Instant::now(),
         })
     }
 
@@ -249,6 +288,10 @@ impl Agent {
         self.intermediate_addr = Some(server_addr);
         self.state = AgentState::Connecting;
         self.last_activity = Instant::now();
+
+        // Clear registration state — new connection requires fresh registration
+        self.registered_services.clear();
+        self.pending_registrations.clear();
 
         // Set relay address in path manager
         self.path_manager.set_relay(server_addr);
@@ -292,11 +335,13 @@ impl Agent {
     ///
     /// Routes the packet to the correct connection based on source address.
     fn recv(&mut self, data: &[u8], from: SocketAddr) -> Result<(), quiche::Error> {
-        // Raw P2P keepalive messages (5 bytes, not QUIC-encapsulated) must be
-        // intercepted before QUIC parsing. The Connector echoes keepalive
+        // Raw P2P keepalive messages (6 bytes with magic prefix, not QUIC-encapsulated)
+        // must be intercepted before QUIC parsing. The Connector echoes keepalive
         // responses as raw UDP; passing them to quiche::recv() would fail.
-        if data.len() == 5
-            && (data[0] == p2p::KEEPALIVE_REQUEST || data[0] == p2p::KEEPALIVE_RESPONSE)
+        // Wire format: [ZTNA_MAGIC(0x5A), type(0x10/0x11), sequence(4 bytes)]
+        if data.len() == p2p::KEEPALIVE_SIZE
+            && data[0] == p2p::ZTNA_MAGIC
+            && (data[1] == p2p::KEEPALIVE_REQUEST || data[1] == p2p::KEEPALIVE_RESPONSE)
         {
             if let Some(p2p) = self.p2p_conns.get_mut(&from) {
                 p2p.last_activity = Instant::now();
@@ -424,8 +469,17 @@ impl Agent {
     /// which service this Agent wants to reach. The server uses this to route
     /// relay traffic between the Agent and the Connector for that service.
     ///
+    /// 8A.3: Registration is now tracked — the Agent waits for an ACK from the
+    /// server and retries up to REG_MAX_RETRIES times with REG_RETRY_TIMEOUT_SECS.
+    ///
     /// Message format: [0x10, service_id_len, service_id_bytes...]
     fn register(&mut self, service_id: &str) -> Result<(), quiche::Error> {
+        // If already registered for this service, skip
+        if self.registered_services.contains(service_id) {
+            log::debug!("[agent] Already registered for service '{}'", service_id);
+            return Ok(());
+        }
+
         let conn = self
             .intermediate_conn
             .as_mut()
@@ -449,7 +503,123 @@ impl Agent {
         conn.dgram_send(&msg)?;
         self.last_activity = Instant::now();
 
+        // 8A.3: Track pending registration per service for retry
+        self.pending_registrations
+            .insert(service_id.to_string(), (1, Instant::now()));
+        log::debug!(
+            "[agent] Registration sent for '{}' (attempt 1/{})",
+            service_id,
+            REG_MAX_RETRIES
+        );
+
         Ok(())
+    }
+
+    /// 8A.3: Check if a pending registration needs to be retried (called from tick)
+    fn check_registration_retry(&mut self) {
+        if self.pending_registrations.is_empty() {
+            return;
+        }
+
+        let conn_established = self
+            .intermediate_conn
+            .as_ref()
+            .map(|c| c.is_established())
+            .unwrap_or(false);
+
+        // Collect services that need retry (can't borrow self mutably in loop)
+        let now = Instant::now();
+        let mut to_retry: Vec<String> = Vec::new();
+        let mut to_remove: Vec<String> = Vec::new();
+
+        for (service_id, (attempts, last_time)) in &self.pending_registrations {
+            // Already registered (ACK arrived between checks)
+            if self.registered_services.contains(service_id) {
+                to_remove.push(service_id.clone());
+                continue;
+            }
+
+            let elapsed = now.duration_since(*last_time);
+            if elapsed < Duration::from_secs(REG_RETRY_TIMEOUT_SECS) {
+                continue; // Not yet time to retry
+            }
+
+            if *attempts >= REG_MAX_RETRIES {
+                log::warn!(
+                    "[agent] Registration for '{}' failed after {} attempts, giving up",
+                    service_id,
+                    attempts
+                );
+                to_remove.push(service_id.clone());
+                continue;
+            }
+
+            if conn_established {
+                to_retry.push(service_id.clone());
+            }
+            // If not connected, leave in map — will retry when reconnected
+        }
+
+        for sid in &to_remove {
+            self.pending_registrations.remove(sid);
+        }
+
+        if !conn_established && !to_retry.is_empty() {
+            log::debug!(
+                "[agent] Cannot retry {} registrations: not connected, will retry later",
+                to_retry.len()
+            );
+            return;
+        }
+
+        let conn = match self.intermediate_conn.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+
+        for service_id in to_retry {
+            let id_bytes = service_id.as_bytes();
+            if id_bytes.len() > 255 {
+                log::error!(
+                    "[agent] Service ID '{}' exceeds 255 bytes, cannot register",
+                    service_id
+                );
+                self.pending_registrations.remove(&service_id);
+                continue;
+            }
+            let mut msg = Vec::with_capacity(2 + id_bytes.len());
+            msg.push(REG_TYPE_AGENT);
+            msg.push(id_bytes.len() as u8);
+            msg.extend_from_slice(id_bytes);
+
+            match conn.dgram_send(&msg) {
+                Ok(_) => {
+                    let (attempts, _) = self
+                        .pending_registrations
+                        .get(&service_id)
+                        .copied()
+                        .unwrap_or((0, now));
+                    let next_attempt = attempts + 1;
+                    log::info!(
+                        "[agent] Registration retry for '{}' (attempt {}/{})",
+                        service_id,
+                        next_attempt,
+                        REG_MAX_RETRIES
+                    );
+                    self.pending_registrations
+                        .insert(service_id, (next_attempt, Instant::now()));
+                    self.last_activity = Instant::now();
+                }
+                Err(e) => {
+                    log::debug!(
+                        "[agent] Registration retry send failed for '{}': {:?}",
+                        service_id,
+                        e
+                    );
+                    // Leave in map — will retry on next tick
+                }
+            }
+        }
     }
 
     /// Send a keepalive PING on the Intermediate connection to prevent idle timeout.
@@ -514,6 +684,66 @@ impl Agent {
 
         // Attempt recovery on failed paths after cooldown
         self.path_manager.attempt_recovery();
+
+        // 8A.3: Check if pending registration needs retry
+        self.check_registration_retry();
+
+        // 8B.3: Periodic CID rotation for privacy
+        if self.last_cid_rotation.elapsed() >= Duration::from_secs(CID_ROTATION_INTERVAL_SECS) {
+            self.rotate_connection_ids();
+            self.last_cid_rotation = Instant::now();
+        }
+    }
+
+    /// 8B.3: Rotate connection IDs on all established connections for privacy.
+    ///
+    /// Generates a new random source CID for the Intermediate connection and
+    /// each P2P connection via `conn.new_scid()`. This makes traffic analysis
+    /// harder by periodically changing the CIDs visible on the wire.
+    fn rotate_connection_ids(&mut self) {
+        let rng = SystemRandom::new();
+
+        // Rotate Intermediate connection CID
+        if let Some(conn) = self.intermediate_conn.as_mut() {
+            if conn.is_established() && conn.scids_left() > 0 {
+                let new_scid_bytes = rand_connection_id();
+                let new_scid = ConnectionId::from_ref(&new_scid_bytes);
+
+                let mut reset_token_bytes = [0u8; 16];
+                if rng.fill(&mut reset_token_bytes).is_ok() {
+                    let reset_token = u128::from_be_bytes(reset_token_bytes);
+                    match conn.new_scid(&new_scid, reset_token, true) {
+                        Ok(seq) => {
+                            log::debug!("[agent] Rotated intermediate CID (seq={})", seq);
+                        }
+                        Err(e) => {
+                            log::debug!("[agent] Intermediate CID rotation failed: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Rotate P2P connection CIDs
+        for (addr, p2p) in self.p2p_conns.iter_mut() {
+            if p2p.conn.is_established() && p2p.conn.scids_left() > 0 {
+                let new_scid_bytes = rand_connection_id();
+                let new_scid = ConnectionId::from_ref(&new_scid_bytes);
+
+                let mut reset_token_bytes = [0u8; 16];
+                if rng.fill(&mut reset_token_bytes).is_ok() {
+                    let reset_token = u128::from_be_bytes(reset_token_bytes);
+                    match p2p.conn.new_scid(&new_scid, reset_token, true) {
+                        Ok(seq) => {
+                            log::debug!("[agent] Rotated P2P CID for {} (seq={})", addr, seq);
+                        }
+                        Err(e) => {
+                            log::debug!("[agent] P2P CID rotation failed for {}: {:?}", addr, e);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Get time until next timeout event (minimum across all connections)
@@ -561,26 +791,83 @@ impl Agent {
             None => return,
         };
 
+        // 8A.5: Collect ALL registration ACK/NACK events to process after the loop
+        // (avoids borrow conflict with self.scratch_buffer)
+        // Use Vec to handle multiple ACKs/NACKs in a single poll cycle
+        let mut reg_acks: Vec<String> = Vec::new();
+        let mut reg_nacks: Vec<(u8, String)> = Vec::new();
+
         while let Ok(len) = conn.dgram_recv(&mut self.scratch_buffer) {
             let data = &self.scratch_buffer[..len];
 
-            // Check for QAD message (simple protocol: first byte = message type)
-            if !data.is_empty() && data[0] == QAD_OBSERVED_ADDRESS {
-                // QAD OBSERVED_ADDRESS message
-                // Format: 0x01 | 4 bytes IPv4 | 2 bytes port (big endian)
-                if len >= 7 {
-                    let ip = std::net::Ipv4Addr::new(data[1], data[2], data[3], data[4]);
-                    let port = u16::from_be_bytes([data[5], data[6]]);
-                    self.observed_address = Some(SocketAddr::new(std::net::IpAddr::V4(ip), port));
-                }
-            } else if len > 0 {
-                // Tunneled IP packet — queue for Swift to read via agent_recv_datagram()
-                // Enforce queue bounds to prevent OOM in Network Extension (~50MB limit)
-                if self.received_datagrams.len() >= MAX_QUEUED_DATAGRAMS {
-                    self.received_datagrams.pop_front(); // drop oldest
-                }
-                self.received_datagrams.push_back(data.to_vec());
+            if data.is_empty() {
+                continue;
             }
+
+            match data[0] {
+                QAD_OBSERVED_ADDRESS => {
+                    // QAD OBSERVED_ADDRESS message
+                    // Format: 0x01 | 4 bytes IPv4 | 2 bytes port (big endian)
+                    if len >= 7 {
+                        let ip = std::net::Ipv4Addr::new(data[1], data[2], data[3], data[4]);
+                        let port = u16::from_be_bytes([data[5], data[6]]);
+                        self.observed_address =
+                            Some(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+                    }
+                }
+                REG_TYPE_ACK => {
+                    // 8A.5: Registration ACK from server
+                    // Format: [0x12, status, id_len, service_id_bytes...]
+                    if len >= 3 {
+                        let id_len = data[2] as usize;
+                        if len >= 3 + id_len {
+                            if let Ok(sid) = String::from_utf8(data[3..3 + id_len].to_vec()) {
+                                reg_acks.push(sid);
+                            }
+                        }
+                    }
+                }
+                REG_TYPE_NACK => {
+                    // 8A.5: Registration NACK from server
+                    // Format: [0x13, status, id_len, service_id_bytes...]
+                    if len >= 3 {
+                        let status = data[1];
+                        let id_len = data[2] as usize;
+                        if len >= 3 + id_len {
+                            if let Ok(sid) = String::from_utf8(data[3..3 + id_len].to_vec()) {
+                                reg_nacks.push((status, sid));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Tunneled IP packet — queue for Swift to read via agent_recv_datagram()
+                    // Enforce queue bounds to prevent OOM in Network Extension (~50MB limit)
+                    if self.received_datagrams.len() >= MAX_QUEUED_DATAGRAMS {
+                        self.received_datagrams.pop_front(); // drop oldest
+                    }
+                    self.received_datagrams.push_back(data.to_vec());
+                }
+            }
+        }
+
+        // Process all registration ACKs/NACKs outside the borrow scope
+        for service_id in reg_acks {
+            log::info!(
+                "[agent] Registration ACK received for service '{}'",
+                service_id
+            );
+            self.registered_services.insert(service_id.clone());
+            self.pending_registrations.remove(&service_id);
+        }
+        for (status, service_id) in reg_nacks {
+            log::warn!(
+                "[agent] Registration NACK for service '{}' (status=0x{:02x})",
+                service_id,
+                status
+            );
+            // Explicit denial — remove from pending, don't retry
+            self.pending_registrations.remove(&service_id);
         }
     }
 
@@ -604,9 +891,10 @@ impl Agent {
                 continue;
             }
 
-            // Check for keepalive message
-            if data.len() >= 5
-                && (data[0] == p2p::KEEPALIVE_REQUEST || data[0] == p2p::KEEPALIVE_RESPONSE)
+            // Check for keepalive message (magic-prefixed)
+            if data.len() >= p2p::KEEPALIVE_SIZE
+                && data[0] == p2p::ZTNA_MAGIC
+                && (data[1] == p2p::KEEPALIVE_REQUEST || data[1] == p2p::KEEPALIVE_RESPONSE)
             {
                 if let Some(response) = self.path_manager.process_keepalive(*connector_addr, &data)
                 {
@@ -814,7 +1102,7 @@ impl Agent {
     /// Poll for keepalive messages to send
     ///
     /// Returns (remote_address, keepalive_message) if a keepalive should be sent.
-    fn poll_keepalive(&mut self) -> Option<(SocketAddr, [u8; 5])> {
+    fn poll_keepalive(&mut self) -> Option<(SocketAddr, [u8; p2p::KEEPALIVE_SIZE])> {
         self.path_manager.poll_keepalive()
     }
 
@@ -877,15 +1165,36 @@ impl log::Log for NullLogger {
 // FFI Functions - Agent Lifecycle
 // ============================================================================
 
-/// Create a new agent instance
+/// Create a new agent instance with TLS configuration
+///
+/// - `ca_cert_path`: Null-terminated C string path to CA certificate PEM file.
+///   Pass null to use the system CA store (or skip CA loading if verify_peer is false).
+/// - `verify_peer`: If true, verify the server's TLS certificate. Should be true
+///   in production. Pass false only for development with self-signed certificates.
 ///
 /// Returns a pointer to the agent, or null on failure.
 /// The caller is responsible for calling `agent_destroy` when done.
 #[no_mangle]
-pub extern "C" fn agent_create() -> *mut Agent {
+pub unsafe extern "C" fn agent_create(
+    ca_cert_path: *const std::os::raw::c_char,
+    verify_peer: bool,
+) -> *mut Agent {
     init_logging();
 
-    let result = panic::catch_unwind(|| Agent::new().ok().map(Box::new));
+    let ca_path: Option<String> = if ca_cert_path.is_null() {
+        None
+    } else {
+        match std::ffi::CStr::from_ptr(ca_cert_path).to_str() {
+            Ok(s) if !s.is_empty() => Some(s.to_string()),
+            _ => None,
+        }
+    };
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        Agent::new(ca_path.as_deref(), verify_peer)
+            .ok()
+            .map(Box::new)
+    }));
 
     match result {
         Ok(Some(agent)) => Box::into_raw(agent),
@@ -975,13 +1284,25 @@ pub unsafe extern "C" fn agent_connect(
 /// Call this after the NWConnection reports its local endpoint.
 /// Without this, RecvInfo.to defaults to 0.0.0.0:0 which can cause
 /// quiche path validation issues.
+///
+/// # Arguments
+/// * `agent` - Agent pointer
+/// * `ip` - Pointer to IPv4 address bytes (4 bytes)
+/// * `ip_len` - Length of the IP buffer (must be >= 4 for IPv4)
+/// * `port` - Local port number
 #[no_mangle]
 pub unsafe extern "C" fn agent_set_local_addr(
     agent: *mut Agent,
     ip: *const u8,
+    ip_len: usize,
     port: u16,
 ) -> AgentResult {
     if agent.is_null() || ip.is_null() {
+        return AgentResult::InvalidPointer;
+    }
+
+    // Validate ip_len before creating a slice from the raw pointer
+    if ip_len < 4 {
         return AgentResult::InvalidPointer;
     }
 
@@ -1678,7 +1999,7 @@ pub unsafe extern "C" fn agent_process_binding_response(
 /// * `agent` - Agent pointer
 /// * `out_ip` - Buffer for destination IP (4 bytes)
 /// * `out_port` - Output destination port
-/// * `out_data` - Buffer for keepalive message (5 bytes minimum)
+/// * `out_data` - Buffer for keepalive message (6 bytes minimum: ZTNA_MAGIC + type + 4-byte seq)
 ///
 /// # Returns
 /// `AgentResult::Ok` if a keepalive should be sent, `AgentResult::NoData` otherwise.
@@ -1702,7 +2023,7 @@ pub unsafe extern "C" fn agent_poll_keepalive(
                     std::ptr::copy_nonoverlapping(v4.ip().octets().as_ptr(), out_ip, 4);
                 }
                 *out_port = addr.port();
-                std::ptr::copy_nonoverlapping(msg.as_ptr(), out_data, 5);
+                std::ptr::copy_nonoverlapping(msg.as_ptr(), out_data, p2p::KEEPALIVE_SIZE);
                 AgentResult::Ok
             }
             None => AgentResult::NoData,
@@ -1827,10 +2148,10 @@ mod tests {
 
     #[test]
     fn test_agent_create_destroy() {
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let state = agent_get_state(agent);
             assert_eq!(state, AgentState::Disconnected);
 
@@ -1840,10 +2161,10 @@ mod tests {
 
     #[test]
     fn test_agent_connect() {
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let host = std::ffi::CString::new("127.0.0.1").unwrap();
             let result = agent_connect(agent, host.as_ptr(), 4433);
             assert_eq!(result, AgentResult::Ok);
@@ -1857,10 +2178,10 @@ mod tests {
 
     #[test]
     fn test_agent_connect_p2p() {
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             // First connect to Intermediate
             let server = std::ffi::CString::new("127.0.0.1").unwrap();
             let result = agent_connect(agent, server.as_ptr(), 4433);
@@ -1881,10 +2202,10 @@ mod tests {
     #[test]
     fn test_agent_multi_connection() {
         // Test that Agent can manage multiple P2P connections
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let agent_ref = &mut *agent;
 
             // Connect to Intermediate
@@ -1913,10 +2234,10 @@ mod tests {
     #[test]
     fn test_agent_hole_punch_not_connected() {
         // Hole punching requires connection to Intermediate
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let agent_ref = &mut *agent;
 
             // Should fail because not connected
@@ -2032,14 +2353,16 @@ mod tests {
         assert!(keepalive.is_some());
         let (addr, msg) = keepalive.unwrap();
         assert_eq!(addr, direct_addr);
-        assert_eq!(msg[0], crate::p2p::KEEPALIVE_REQUEST);
+        assert_eq!(msg[0], crate::p2p::ZTNA_MAGIC);
+        assert_eq!(msg[1], crate::p2p::KEEPALIVE_REQUEST);
 
         // Test keepalive response processing
         let request = crate::p2p::encode_keepalive_request(42);
         let response = manager.process_keepalive(direct_addr, &request);
         assert!(response.is_some());
         let resp = response.unwrap();
-        assert_eq!(resp[0], crate::p2p::KEEPALIVE_RESPONSE);
+        assert_eq!(resp[0], crate::p2p::ZTNA_MAGIC);
+        assert_eq!(resp[1], crate::p2p::KEEPALIVE_RESPONSE);
 
         // Verify path stats
         let stats = manager.stats();
@@ -2050,7 +2373,7 @@ mod tests {
 
     #[test]
     fn test_agent_path_manager_setup() {
-        let agent = Agent::new().unwrap();
+        let agent = Agent::new(None, false).unwrap();
 
         // Initially relay path type is None
         assert_eq!(agent.active_path(), crate::p2p::ActivePath::None);
@@ -2064,10 +2387,10 @@ mod tests {
     #[test]
     fn test_agent_register_not_connected() {
         // Registration should fail if not connected
-        let agent = agent_create();
-        assert!(!agent.is_null());
-
         unsafe {
+            let agent = agent_create(std::ptr::null(), false);
+            assert!(!agent.is_null());
+
             let service = std::ffi::CString::new("test-service").unwrap();
             let result = agent_register(agent, service.as_ptr());
             // Should fail because not connected
@@ -2080,7 +2403,7 @@ mod tests {
     #[test]
     fn test_agent_register_message_format() {
         // Test that the registration message is correctly formatted
-        let mut agent = Agent::new().unwrap();
+        let mut agent = Agent::new(None, false).unwrap();
 
         // Connect first (won't actually handshake but sets up the connection)
         let server_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
@@ -2104,7 +2427,7 @@ mod tests {
 
     #[test]
     fn test_agent_recv_datagram_queue() {
-        let mut agent = Agent::new().unwrap();
+        let mut agent = Agent::new(None, false).unwrap();
 
         // Queue should start empty
         let mut buf = [0u8; 1500];
@@ -2130,7 +2453,7 @@ mod tests {
 
     #[test]
     fn test_agent_recv_datagram_buffer_too_small() {
-        let mut agent = Agent::new().unwrap();
+        let mut agent = Agent::new(None, false).unwrap();
 
         // Queue an oversized packet followed by a normal packet
         let big_pkt = vec![0x45; 100];

@@ -27,6 +27,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use super::candidate::Candidate;
+use super::ZTNA_MAGIC;
 
 // ============================================================================
 // Constants
@@ -526,14 +527,23 @@ impl CheckList {
 // Message Encoding
 // ============================================================================
 
-/// Encode a binding message
+/// Encode a binding message with ZTNA_MAGIC prefix
+/// Wire format: [ZTNA_MAGIC, bincode-serialized BindingMessage...]
 pub fn encode_binding(msg: &BindingMessage) -> Result<Vec<u8>, String> {
-    bincode::serialize(msg).map_err(|e| e.to_string())
+    let payload = bincode::serialize(msg).map_err(|e| e.to_string())?;
+    let mut buf = Vec::with_capacity(1 + payload.len());
+    buf.push(ZTNA_MAGIC);
+    buf.extend_from_slice(&payload);
+    Ok(buf)
 }
 
-/// Decode a binding message
+/// Decode a binding message (expects ZTNA_MAGIC prefix)
+/// Wire format: [ZTNA_MAGIC, bincode-serialized BindingMessage...]
 pub fn decode_binding(data: &[u8]) -> Result<BindingMessage, String> {
-    bincode::deserialize(data).map_err(|e| e.to_string())
+    if data.is_empty() || data[0] != ZTNA_MAGIC {
+        return Err("missing ZTNA magic byte prefix".to_string());
+    }
+    bincode::deserialize(&data[1..]).map_err(|e| e.to_string())
 }
 
 // ============================================================================

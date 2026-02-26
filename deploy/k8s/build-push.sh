@@ -28,8 +28,8 @@ NC='\033[0m'
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-REGISTRY="${REGISTRY:-docker.io}"
-OWNER="${OWNER:-hyeomans}"
+REGISTRY="${REGISTRY:-ghcr.io}"
+OWNER="${OWNER:-hfyeomans}"
 TAG="${TAG:-latest}"
 PLATFORMS="${PLATFORMS:-linux/arm64,linux/amd64}"
 DO_PUSH=true
@@ -151,8 +151,9 @@ build_image() {
         push_flag="--load"
         # --load only works with single platform
         if [[ "$PLATFORMS" == *","* ]]; then
-            log_warn "Multi-platform build without push - using --push anyway (images stay in buildx cache)"
-            push_flag="--push"
+            log_error "ERROR: --no-push is incompatible with multi-platform builds (buildx --load requires single platform)"
+            log_error "Use --arm64-only or set PLATFORMS to a single platform, or remove --no-push to push to registry"
+            exit 1
         fi
     fi
 

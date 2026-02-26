@@ -103,7 +103,8 @@ final class VPNManager {
     }
 
     init() {
-        serverHost = UserDefaults.standard.string(forKey: "ztnaServerHost") ?? "3.128.36.92"
+        // Set via environment or config file — must be configured before use
+        serverHost = UserDefaults.standard.string(forKey: "ztnaServerHost") ?? "0.0.0.0"
         let savedPort = UserDefaults.standard.integer(forKey: "ztnaServerPort")
         serverPort = savedPort > 0 ? UInt16(savedPort) : 4433
         serviceId = UserDefaults.standard.string(forKey: "ztnaServiceId") ?? "echo-service"
@@ -134,6 +135,11 @@ final class VPNManager {
     }
     
     func start() async {
+        guard serverHost != "0.0.0.0" && !serverHost.isEmpty else {
+            status = .startError
+            logger.error("Cannot start: server host not configured (still placeholder 0.0.0.0)")
+            return
+        }
         do {
             let managers = try await NETunnelProviderManager.loadAllFromPreferences()
             let mgr = managers.first ?? NETunnelProviderManager()
