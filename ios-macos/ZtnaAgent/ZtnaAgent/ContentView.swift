@@ -135,6 +135,11 @@ final class VPNManager {
     }
     
     func start() async {
+        guard serverHost != "0.0.0.0" && !serverHost.isEmpty else {
+            status = .startError
+            logger.error("Cannot start: server host not configured (still placeholder 0.0.0.0)")
+            return
+        }
         do {
             let managers = try await NETunnelProviderManager.loadAllFromPreferences()
             let mgr = managers.first ?? NETunnelProviderManager()

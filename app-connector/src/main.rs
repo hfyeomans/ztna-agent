@@ -387,6 +387,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "Invalid forward address")?;
 
     // L2: Validate cert/key paths exist at startup (if P2P is configured)
+    // Reject partial P2P TLS config — both cert and key are required together
+    if p2p_cert.is_some() != p2p_key.is_some() {
+        return Err("P2P TLS requires both --p2p-cert and --p2p-key (got only one)".into());
+    }
     if let Some(ref cert) = p2p_cert {
         if !Path::new(cert).exists() {
             log::error!("P2P certificate file not found: {}", cert);
@@ -1087,8 +1091,12 @@ impl Connector {
                         let id_len = dgram[2] as usize;
                         if dgram.len() >= 3 + id_len {
                             if let Ok(sid) = String::from_utf8(dgram[3..3 + id_len].to_vec()) {
-                                log::info!("Registration ACK received for service '{}'", sid);
-                                self.reg_state = RegistrationState::Registered;
+                                if sid == self.service_id {
+                                    log::info!("Registration ACK received for service '{}'", sid);
+                                    self.reg_state = RegistrationState::Registered;
+                                } else {
+                                    log::debug!("Ignoring ACK for unknown service '{}'", sid);
+                                }
                             }
                         }
                     }
@@ -1101,13 +1109,17 @@ impl Connector {
                         let id_len = dgram[2] as usize;
                         if dgram.len() >= 3 + id_len {
                             if let Ok(sid) = String::from_utf8(dgram[3..3 + id_len].to_vec()) {
-                                log::warn!(
-                                    "Registration NACK for service '{}' (status=0x{:02x})",
-                                    sid,
-                                    status
-                                );
-                                // Explicit denial — terminal state, no retry
-                                self.reg_state = RegistrationState::Denied { status };
+                                if sid == self.service_id {
+                                    log::warn!(
+                                        "Registration NACK for service '{}' (status=0x{:02x})",
+                                        sid,
+                                        status
+                                    );
+                                    // Explicit denial — terminal state, no retry
+                                    self.reg_state = RegistrationState::Denied { status };
+                                } else {
+                                    log::debug!("Ignoring NACK for unknown service '{}'", sid);
+                                }
                             }
                         }
                     }
