@@ -511,6 +511,45 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 
 ---
 
+### 007: Security Hardening ✅ COMPLETE
+
+**Location:** `intermediate-server/`, `app-connector/`, `core/packet_processor/`, `scripts/`, `deploy/`
+
+**Branch:** `feature/007-security-hardening` (PR #8)
+
+**Scope:** 26 security findings (1 Critical, 4 High, 8 Medium, 9 Low, 4 Info) + 6 deferred items
+
+**Phases 1-5 (Initial Hardening — 26 findings):**
+- TLS `verify_peer(true)` on all Rust crates + CA cert loading (C1)
+- K8s secrets validation script, no placeholder certs (H4)
+- Connector registration replacement warning (H2), sender authorization (M3)
+- TCP SYN rate limiting per source IP, destination IP validation (H3)
+- TCP half-close draining (L6), queue depth cap (H1)
+- ZTNA_MAGIC keepalive prefix (M2/M6), `ip_len` FFI validation (M5)
+- 15 config/ops items: hardcoded IPs, Docker caps, logging levels, cert paths, etc.
+
+**Phases 6-8 (6 Deferred Items — All Complete):**
+- **Phase 6A: mTLS Client Authentication** — `auth.rs` module, x509-parser SAN extraction, `--require-client-cert` flag, cert generation script, peer cert extraction after handshake, service authorization
+- **Phase 6B: Certificate Auto-Renewal** — SIGHUP hot-reload via signal-hook, certbot Route53 DNS-01, systemd timer, k8s cert-manager CRDs
+- **Phase 7A: Non-Blocking TCP Proxy** — `mio::net::TcpStream::connect()` replaces blocking 500ms connect, event-driven I/O, 5s connect timeout, duplicate SYN guard
+- **Phase 7B: Stateless Retry Tokens** — AEAD (AES-256-GCM) token encryption, `quiche::retry()`, Retry SCID reuse for transport parameter match, `--disable-retry` flag
+- **Phase 8A: Registration ACK Protocol** — 0x12 ACK / 0x13 NACK, `RegistrationState` state machine with Denied terminal state, per-service retry (2s timeout, 3 max), multi-ACK Vec accumulation
+- **Phase 8B: Connection ID Rotation** — 5-min timer, `cid_aliases` HashMap (max 4 per connection), cleanup on connection close, client-side rotation in Agent + Connector
+
+**Key Files Created:**
+- `intermediate-server/src/auth.rs` — mTLS auth module (ClientIdentity, SAN extraction, authorization)
+- `scripts/generate-client-certs.sh` — CA + client cert generation for dev/test
+- `scripts/resolve-pr-comments.sh` — PR comment resolution tool
+- `deploy/aws/setup-certbot.sh` — Route53 DNS-01 cert issuance
+- `deploy/aws/ztna-cert-renew.{service,timer}` — Systemd renewal
+- `deploy/k8s/overlays/cert-manager/` — k8s cert-manager CRDs
+
+**Test Count:** 143 tests passing (39+1 intermediate-server, 83 packet_processor, 18+2 app-connector)
+
+**Review Rounds:** 3 Oracle reviews (12 findings fixed) + 1 CodeRabbit/Gemini review (16 threads, 4 actionable fixes)
+
+---
+
 ## Dependency Graph
 
 ```
@@ -599,7 +638,7 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
   - ✅ P2P→Relay failover — seamless per-packet fallback, 180/180 0% loss
 
 **Path to production (post-MVP):**
-- 🔲 Task 007: Security Hardening (P1) — TLS certs, client auth, rate limiting
+- ✅ Task 007: Security Hardening (P1) — Complete (Phases 1-8, 26 findings + 6 deferred items)
 - 🔲 Task 008: Production Operations (P2) — Monitoring, CI/CD, automation
 - 🔲 Task 009: Multi-Service Architecture (P2) — Per-service backends, discovery
 - 🔲 Task 010: Admin Dashboard (P3) — Web UI for management
