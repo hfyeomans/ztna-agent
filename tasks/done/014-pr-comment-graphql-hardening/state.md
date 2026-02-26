@@ -1,7 +1,7 @@
 # State
 
 ## Status
-Implemented and locally validated.
+COMPLETE. Merged to master via PR #8. Live-validated against 16 PR review threads.
 
 ## Files changed
 - `scripts/resolve-pr-comments.sh`
