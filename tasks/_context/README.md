@@ -49,6 +49,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [013](../done/013-swift-modernization/) | Swift Modernization | ✅ Complete | `master` (PR #7) |
 | [014](../done/014-pr-comment-graphql-hardening/) | PR Comment GraphQL Hardening | ✅ Complete | `master` |
 | [015](../done/015-oracle-quick-fixes/) | Oracle Quick Fixes | ✅ Complete | `master` (PR #10 merged) |
+| [016](../016-infrastructure-architecture/) | Infrastructure Architecture | ⏳ Not Started | — |
 
 ### Task Dependencies
 
@@ -83,8 +84,15 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
    008 (Prod Ops)  010 (Dashboard)       012 (Multi-Env)
    P2              P3                     P3
 
+  016 (Infra Architecture) P2
+  - Separates components onto independent AWS infrastructure
+  - Docker on EC2 (host networking) for Intermediate Server
+  - ECS/Fargate for App Connector, Admin Panel, test backends
+  - Admin panel for policy management
+  - Coordinate with 008 (graceful shutdown needed for cutover)
+
   ★ Oracle Review (cross-cutting, see Deferred Items) ★
-  015 (Quick Fixes): IPv6 panic, predictable IDs, dead FFI, UDP sanity
+  015 (Quick Fixes): IPv6 panic, predictable IDs, dead FFI, UDP sanity ✅
   Signaling hijack → 009    Reg auth hardening → 009
   Cross-tenant routing → 009  Local UDP injection → 008
   DATAGRAM mismatch → 011   Endian bug (disputed) → 011
@@ -565,9 +573,11 @@ See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementati
 | ~~[007](../done/007-security-hardening/)~~ | ~~Security Hardening~~ | ~~Done~~ | ~~26 findings + 6 deferred items: mTLS, cert renewal, non-blocking TCP, retry tokens, reg ACK, CID rotation~~ | ~~None~~ |
 | [008](../008-production-operations/) | Production Operations | P2 | Prometheus metrics, graceful shutdown, deployment automation, CI/CD. **+Oracle:** local UDP injection fix | 007 ✅ |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | P2 | Per-service backend routing, dynamic discovery, health checks. **+Oracle:** signaling hijack, cross-tenant routing fixes | None |
-| [010](../010-admin-dashboard/) | Admin Dashboard | P3 | REST API on Intermediate, web frontend, topology visualization | 008, 009 |
+| [010](../010-admin-dashboard/) | Admin Dashboard | P3 | REST API on Intermediate, web frontend, topology visualization. **Note:** MVP admin panel now in Task 016; Task 010 extends it | 008, 009, 016 |
 | [011](../011-protocol-improvements/) | Protocol Improvements | P3 | IPv6 QAD, TCP flow control, separate P2P/relay sockets, QUIC migration, 0-RTT. **+Oracle:** IPv6 panic, predictable IDs, endian bug, DATAGRAM size | None |
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | P3 | DigitalOcean, multi-region, symmetric NAT/CGNAT, load testing | None |
 | ~~[013](../done/013-swift-modernization/)~~ | ~~Swift Modernization~~ | ~~Done~~ | ~~Swift 6, strict concurrency, deployment target 26.2, linting infra~~ | ~~None~~ |
 | ~~[014](../done/014-pr-comment-graphql-hardening/)~~ | ~~PR Comment GraphQL Hardening~~ | ~~Done~~ | ~~GraphQL retry/backoff, pagination, smoke-test for resolve-pr-comments.sh~~ | ~~None~~ |
+| ~~[015](../done/015-oracle-quick-fixes/)~~ | ~~Oracle Quick Fixes~~ | ~~Done~~ | ~~IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity — 4 findings fixed, 146 tests pass~~ | ~~None~~ |
+| [016](../016-infrastructure-architecture/) | Infrastructure Architecture | P2 | Separate components onto independent AWS infra, Docker on EC2 (host net) for Intermediate, ECS/Fargate for Connector/Admin/backends, admin panel, Terraform IaC | 007 ✅ |
 | ~~[015](../done/015-oracle-quick-fixes/)~~ | ~~Oracle Quick Fixes~~ | ~~Done~~ | ~~IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity — 4 findings fixed, 146 tests pass~~ | ~~None~~ |

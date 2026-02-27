@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-02-27 (Task 015 oracle quick fixes implemented. IPv6 QAD panic, predictable P2P IDs, legacy FFI dead code, UDP length sanity — all fixed.)
+**Last Updated:** 2026-02-27 (Task 016 created — infrastructure architecture. Separate components onto independent AWS infra per Oracle recommendation.)
 
 ---
 
@@ -51,6 +51,12 @@
 **Critical Compatibility:**
 - ALPN: `b"ztna-v1"` (matches Agent)
 - QAD: DATAGRAM only, 7-byte IPv4 format
+
+**Architecture Note (QAD vs STUN/TURN):**
+The Intermediate Server combines QAD (address discovery, analogous to STUN) and QUIC relay (analogous to TURN) but is **neither** STUN nor TURN. It uses native QUIC DATAGRAMs for all functions over the same connection. No separate STUN/TURN protocols or flows.
+
+**Deployment (Task 016):**
+Currently on single shared EC2 (MVP). Planned: dedicated EC2 with Docker + `--net=host` (Oracle-recommended for QUIC UDP performance). Multi-tenancy is a future concern — build single-tenant architecture first.
 
 ---
 
