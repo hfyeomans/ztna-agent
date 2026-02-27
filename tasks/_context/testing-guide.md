@@ -1,7 +1,7 @@
 # ZTNA Testing & Demo Guide
 
-**Last Updated:** 2026-02-21
-**Status:** Task 006 Complete (PR #7 merged). Swift 6 + linting infrastructure added.
+**Last Updated:** 2026-02-26
+**Status:** Task 007 Complete (PR #8 merged). Security hardening + mTLS + stateless retry. 143 unit tests.
 
 ---
 

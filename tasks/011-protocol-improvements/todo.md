@@ -58,3 +58,26 @@ Track implementation tasks for protocol improvements including IPv6, TCP flow co
 - [ ] Evaluate QUIC streams vs DATAGRAM for TCP transport
 - [ ] Implement stream-based reliable channel for control messages
 - [ ] Performance comparison: streams vs DATAGRAM for HTTP
+
+## Oracle Findings (Cross-Cutting)
+
+### Finding 9 (Medium): DATAGRAM Size Mismatch
+- [ ] Measure `dgram_max_writable_len()` during live connections across different MTU scenarios
+- [ ] Compare observed limit (~1307) against `MAX_DATAGRAM_SIZE` (1350)
+- [ ] Decide: reduce constant or query dynamically and clamp payloads
+- [ ] Update all 3 crates if constant changes
+- [ ] Test: payload at boundary size sends without `BufferTooShort`
+
+### Finding 10 (Medium): Endian Bug Investigation — DISPUTED
+- [ ] Trace `getifaddrs()` path on macOS to determine byte order of `sin_addr.s_addr`
+- [ ] Compare gathered candidate IPs against known interface IPs on Apple Silicon
+- [ ] If `to_ne_bytes()` produces correct IPs: document finding as false positive
+- [ ] If incorrect: fix to appropriate byte order conversion
+- [ ] Do NOT change code without investigation — Oracle says current code may be correct
+
+### Finding 13 (Low): Hot-Path Allocations
+- [ ] Pre-allocate send/recv buffers in `Agent` struct constructor
+- [ ] Reuse buffers across poll iterations in `agent_poll()` path
+- [ ] Pre-allocate buffers in `Connector` struct for `process_quic_socket()`
+- [ ] Benchmark: measure allocation reduction under sustained traffic
+- [ ] Verify no regressions in Network Extension memory usage (50MB limit)

@@ -44,3 +44,27 @@ Track implementation tasks for per-service backend routing, service discovery, h
 - [ ] Implement allocation API on Intermediate
 - [ ] Agent receives virtual IP assignments after registration
 - [ ] DNS resolution: service-name.ztna.local → virtual IP (optional)
+
+## Oracle Findings (Cross-Cutting — Must Address)
+
+### Finding 2 (Critical): Registration Auth Hardening
+- [ ] Decide policy: require `--require-client-cert` for production configs
+- [ ] Add loud warning or reject SAN-less certificates in production mode
+- [ ] Document that SAN-less backward compat is dev-only
+- [ ] Test: connection without valid SAN is rejected when client cert required
+
+### Finding 3 (High): Signaling Session Hijack
+- [ ] Extend `SignalingSession` struct to store expected connector `conn_id`
+- [ ] Record agent's `conn_id` when `CandidateOffer` creates a session
+- [ ] Record the specific connector chosen at offer time (`main.rs:1366`) in session
+- [ ] Validate sender's `conn_id` on `CandidateAnswer` against the exact expected connector
+- [ ] Reject answers from unauthorized connections with `log::warn!()`
+- [ ] Test: `CandidateAnswer` from non-owning connection is rejected
+
+### Finding 5 (High): Cross-Tenant Connector Routing
+- [ ] Design per-agent flow isolation strategy (3 options in research.md: per-flow socket, extra metadata, embedded flow ID)
+- [ ] Replace "first flow wins" (`flow_map.keys().next()`) with chosen strategy
+- [ ] Handle single local socket limitation — connector strips headers so return path needs agent-identifying info
+- [ ] Match return traffic to originating agent's connection
+- [ ] Test: two agents accessing same service get correct return traffic
+- [ ] Test: flow table cleanup on agent disconnection

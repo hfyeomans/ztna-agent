@@ -5,13 +5,27 @@
 **Priority:** P2
 **Depends On:** None (006 MVP complete)
 **Branch:** (not yet created)
-**Last Updated:** 2026-02-21
+**Last Updated:** 2026-02-26
 
 ---
 
 ## Purpose
 
 Plan the implementation of per-service backend routing in the Connector, dynamic service discovery, health checks, and virtual IP allocation.
+
+---
+
+## Oracle Review Findings (Assigned to This Task)
+
+From `oracle-review-01.md` — must be addressed as part of this task:
+
+| Severity | Finding | Evidence | Description |
+|----------|---------|----------|-------------|
+| **Critical** | Registration auth (conditional) | `main.rs:185`, `auth.rs:173` | mTLS requires `--require-client-cert` flag; SAN-less certs still allowed for backward compat. Not enforced by default. |
+| **High** | Signaling session hijack | `signaling.rs:291`, `main.rs:1411` | `CandidateAnswer` accepted from any connection with matching session_id — no ownership/role check on sender. Oracle confirmed NOT fixed by Task 007. |
+| **High** | Cross-tenant connector routing | `app-connector/src/main.rs:1992-1995` | "First flow wins" return-path routing (`flow_map.keys().next()`). Responses can be sent to the wrong agent — cross-tenant data leakage. |
+
+**Note:** Line references updated to current codebase (post-Task 007). Finding 2 (registration auth) added — Oracle disputed "fully fixed" status. Finding 3 (signaling hijack) Oracle confirmed NOT fixed despite initial triage marking it as resolved.
 
 ---
 
