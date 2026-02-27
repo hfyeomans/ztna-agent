@@ -6,13 +6,13 @@
 
 ---
 
-## Status: Planning Complete — Awaiting Review
+## Status: Complete — Awaiting PR Review
 
-## Branch: `chore/oracle-findings-triage`
+## Branch: `fix/015-oracle-quick-fixes`
 
-## Current Phase: Pre-implementation
+## Current Phase: Complete
 
-### Completed
+### Completed (Triage Phase)
 - [x] Read oracle-review-01.md (15 findings)
 - [x] Triage against current codebase (post-Task 007)
 - [x] Oracle verification of triage (gpt-5.3-codex, xhigh)
@@ -29,13 +29,13 @@
 - [x] Oracle feedback: Finding 5 needs per-flow socket strategy in Task 009
 - [x] Oracle feedback: _context/README.md premature completion marks fixed
 
-### Not Started (Implementation Phase)
-- [ ] Phase 1: IPv6 QAD panic fix (finding 6)
-- [ ] Phase 2: Predictable P2P identifiers fix (finding 8)
-- [ ] Phase 3: Legacy FFI dead code removal (finding 11)
-- [ ] Phase 4: UDP length sanity fix (finding 15)
-- [ ] Build & test verification
-- [ ] Oracle post-implementation review
+### Completed (Implementation Phase)
+- [x] Phase 1: IPv6 QAD panic fix (finding 6) — `build_observed_address()` returns `Option<Vec<u8>>`, panic replaced with `log::warn` + None
+- [x] Phase 2: Predictable P2P identifiers fix (finding 8) — `ring::rand::SystemRandom` CSPRNG replaces time+PID
+- [x] Phase 3: Legacy FFI dead code removal (finding 11) — `process_packet()`, `PacketAction`, bridging header, docs all removed
+- [x] Phase 4: UDP length sanity fix (finding 15) — `udp_len < 8` guard drops malformed packets
+- [x] Build & test verification — 143 tests pass, 0 clippy warnings across all 3 crates
+- [x] Oracle post-implementation review (gpt-5.3-codex) — no defects found
 
 ## Key Decisions
 - Finding 10 (endian bug): Oracle says `to_ne_bytes()` may be correct — deferred to Task 011 for investigation rather than blind fix

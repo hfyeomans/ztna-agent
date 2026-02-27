@@ -48,7 +48,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | ⏳ Not Started | — |
 | [013](../done/013-swift-modernization/) | Swift Modernization | ✅ Complete | `master` (PR #7) |
 | [014](../done/014-pr-comment-graphql-hardening/) | PR Comment GraphQL Hardening | ✅ Complete | `master` |
-| [015](../015-oracle-quick-fixes/) | Oracle Quick Fixes | ⏳ Not Started | `chore/oracle-findings-triage` |
+| [015](../015-oracle-quick-fixes/) | Oracle Quick Fixes | ✅ Complete | `fix/015-oracle-quick-fixes` |
 
 ### Task Dependencies
 
@@ -220,7 +220,7 @@ xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
     -scheme ZtnaAgent -configuration Debug \
     -derivedDataPath /tmp/ZtnaAgent-build build
 
-# Run all unit tests (114+ tests)
+# Run all unit tests (146+ tests)
 cargo test --workspace
 ```
 
@@ -399,16 +399,16 @@ Findings from `oracle-review-01.md` not addressed by Task 007's 26-finding scope
 | **Critical** | **Registration auth (conditional)** | 002-Server | mTLS requires `--require-client-cert` flag; SAN-less certs allowed. Oracle: conditionally fixed only | → Task 009 |
 | **High** | **Signaling session hijack** | 002-Server | `CandidateAnswer` accepted from any conn with matching session_id — no ownership check. Oracle confirmed NOT fixed by Task 007 | → Task 009 |
 | **High** | **Cross-tenant connector routing** | 003-Connector | "First flow wins" return-path; responses can route to wrong agent | → Task 009 |
-| **High** | **IPv6 QAD panic** | 002-Server | Quick mitigation planned in Task 015 (panic → `Option` return). Full IPv6 QAD in Task 011 Phase 3 | → Task 015 |
+| ~~**High**~~ | ~~**IPv6 QAD panic**~~ | ~~002-Server~~ | ✅ Done (Task 015) — `build_observed_address()` returns `Option<Vec<u8>>`, panic replaced with `log::warn` + `None`. Full IPv6 QAD in Task 011 | ✅ Task 015 |
 | **High** | **Local UDP injection** | 003-Connector | Accepts UDP from any local process without source validation | → Task 008 |
-| **Medium** | **Predictable P2P identifiers** | packet_processor | Planned in Task 015 — replace time+PID with `ring::rand::SystemRandom` | → Task 015 |
+| ~~**Medium**~~ | ~~**Predictable P2P identifiers**~~ | ~~packet_processor~~ | ✅ Done (Task 015) — `ring::rand::SystemRandom` CSPRNG replaces time+PID in `generate_session_id()` and `generate_transaction_id()` | ✅ Task 015 |
 | **Medium** | **DATAGRAM size mismatch** | All Rust | Constants aligned at 1350, but effective writable limit ~1307. Needs investigation | → Task 011 |
 | **Medium** | **Interface enumeration endian bug** | packet_processor | Oracle DISPUTES: `to_ne_bytes()` may be correct on macOS. Needs investigation, not blind fix | → Task 011 |
-| **Medium** | **Legacy FFI dead code** | packet_processor | Planned removal in Task 015 | → Task 015 |
+| ~~**Medium**~~ | ~~**Legacy FFI dead code**~~ | ~~packet_processor~~ | ✅ Done (Task 015) — `process_packet()`, `PacketAction` enum, bridging header decl, doc refs all removed | ✅ Task 015 |
 | ~~**Medium**~~ | ~~**Service ID length truncation**~~ | ~~003-Connector~~ | ~~Fixed in Task 007 — bounds check before `u8` cast~~ | ✅ Task 007 |
 | **Low** | **Hot-path per-packet allocations** | packet_processor, app-connector | Buffer reuse refactor across multiple hot paths | → Task 011 |
 | **Low** | **Local socket recv buffer** | 003-Connector | Per-poll `vec![0u8; 65535]` instead of reusing `self.recv_buf` | → Task 008 |
-| **Low** | **UDP length sanity** | 003-Connector | Planned in Task 015 — drop malformed UDP with `udp_len < 8` | → Task 015 |
+| ~~**Low**~~ | ~~**UDP length sanity**~~ | ~~003-Connector~~ | ✅ Done (Task 015) — `udp_len < 8` guard drops malformed packets with `log::warn` | ✅ Task 015 |
 
 ### Priority 2: Reliability (Recommended)
 
@@ -570,4 +570,4 @@ See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementati
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | P3 | DigitalOcean, multi-region, symmetric NAT/CGNAT, load testing | None |
 | ~~[013](../done/013-swift-modernization/)~~ | ~~Swift Modernization~~ | ~~Done~~ | ~~Swift 6, strict concurrency, deployment target 26.2, linting infra~~ | ~~None~~ |
 | ~~[014](../done/014-pr-comment-graphql-hardening/)~~ | ~~PR Comment GraphQL Hardening~~ | ~~Done~~ | ~~GraphQL retry/backoff, pagination, smoke-test for resolve-pr-comments.sh~~ | ~~None~~ |
-| [015](../015-oracle-quick-fixes/) | Oracle Quick Fixes | P1 | Quick-fix findings from oracle-review-01.md: IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity | None |
+| ~~[015](../015-oracle-quick-fixes/)~~ | ~~Oracle Quick Fixes~~ | ~~Done~~ | ~~IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity — 4 findings fixed, 146 tests pass~~ | ~~None~~ |

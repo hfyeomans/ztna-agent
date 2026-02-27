@@ -70,14 +70,6 @@ const MAX_QUEUED_DATAGRAMS: usize = 4096;
 // FFI Enums
 // ============================================================================
 
-/// Result of packet processing decision
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PacketAction {
-    Drop = 0,
-    Forward = 1,
-}
-
 /// Agent connection state exposed to Swift
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2108,43 +2100,12 @@ pub unsafe extern "C" fn agent_get_path_stats(
 }
 
 // ============================================================================
-// Legacy FFI - Packet Processing (kept for compatibility)
-// ============================================================================
-
-/// Process an IP packet and decide whether to forward or drop
-///
-/// This is the legacy function for simple packet filtering.
-/// For QUIC tunneling, use the agent_* functions instead.
-#[no_mangle]
-pub unsafe extern "C" fn process_packet(data: *const u8, len: libc::size_t) -> PacketAction {
-    if data.is_null() || len == 0 {
-        return PacketAction::Forward;
-    }
-
-    let result = panic::catch_unwind(|| {
-        let slice = slice::from_raw_parts(data, len);
-
-        let _ = etherparse::SlicedPacket::from_ip(slice);
-        PacketAction::Forward
-    });
-
-    result.unwrap_or(PacketAction::Forward)
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_process_packet() {
-        let data = [0u8; 20];
-        let action = unsafe { process_packet(data.as_ptr(), data.len()) };
-        assert_eq!(action, PacketAction::Forward);
-    }
 
     #[test]
     fn test_agent_create_destroy() {

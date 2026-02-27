@@ -128,24 +128,12 @@ impl BindingResponse {
     }
 }
 
-/// Generate a random transaction ID
+/// Generate a random transaction ID using CSPRNG
 fn generate_transaction_id() -> [u8; TRANSACTION_ID_LEN] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
+    use ring::rand::{SecureRandom, SystemRandom};
+    let rng = SystemRandom::new();
     let mut id = [0u8; TRANSACTION_ID_LEN];
-
-    // Use timestamp + counter for uniqueness
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-
-    id[0..8].copy_from_slice(&nanos.to_le_bytes());
-
-    // Add process ID for additional uniqueness
-    let pid = std::process::id();
-    id[8..12].copy_from_slice(&pid.to_le_bytes());
-
+    rng.fill(&mut id).expect("SystemRandom failed");
     id
 }
 
@@ -843,5 +831,12 @@ mod tests {
         // Should only have 1 pair (IPv4-IPv4)
         // IPv6 local can't pair with IPv4 remote
         assert_eq!(list.pair_count(), 1);
+    }
+
+    #[test]
+    fn test_transaction_id_uniqueness() {
+        let id1 = generate_transaction_id();
+        let id2 = generate_transaction_id();
+        assert_ne!(id1, id2, "Consecutive CSPRNG transaction IDs should differ");
     }
 }

@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-02-26 (Task 007 PR #8 merged to master. All security hardening phases complete. Oracle review findings mapped to tasks 008/009/011.)
+**Last Updated:** 2026-02-27 (Task 015 oracle quick fixes implemented. IPv6 QAD panic, predictable P2P IDs, legacy FFI dead code, UDP length sanity — all fixed.)
 
 ---
 
@@ -36,7 +36,7 @@
 
 **Capabilities:**
 - QUIC server accepting connections (mio event loop)
-- QAD: report observed address to clients (7-byte format)
+- QAD: report observed address to clients (7-byte format, IPv6 gracefully skipped — Task 015)
 - DATAGRAM relay between agent/connector pairs
 - Client registry for routing (connection-based)
 - Integration test (handshake + QAD verified)
@@ -558,7 +558,7 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 - `deploy/aws/ztna-cert-renew.{service,timer}` — Systemd renewal
 - `deploy/k8s/overlays/cert-manager/` — k8s cert-manager CRDs
 
-**Test Count:** 143 tests passing (39+1 intermediate-server, 83 packet_processor, 18+2 app-connector)
+**Test Count:** 146 tests passing (40+1 intermediate-server, 84 packet_processor, 19+2 app-connector)
 
 **Review Rounds:** 3 Oracle reviews (12 findings fixed) + 1 CodeRabbit/Gemini review (16 threads, 4 actionable fixes)
 
@@ -569,28 +569,31 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 Findings from the initial Oracle code review that were NOT in Task 007's 26-finding scope. These are mapped to upcoming tasks.
 
 **High:**
+
 | Finding | Evidence | Target Task |
 |---------|----------|-------------|
 | Signaling session hijack — client-supplied session IDs without ownership checks | `signaling.rs:321`, `main.rs:677` | 009 |
 | Cross-tenant connector routing — "first flow wins" return-path leaks data | `app-connector/main.rs:748`, `:705` | 009 |
-| IPv6 QAD panic — `qad.rs:53` panics on IPv6 addresses, remote DoS | `intermediate-server/src/qad.rs:53` | 011 |
+| ~~IPv6 QAD panic~~ — ✅ Fixed (Task 015): returns `None` instead of panicking | `intermediate-server/src/qad.rs:49-51` | ~~011~~ ✅ |
 | Local UDP injection — connector accepts UDP from any local process | `app-connector/main.rs:725`, `:755` | 008 |
 
 **Medium:**
+
 | Finding | Evidence | Target Task |
 |---------|----------|-------------|
-| Predictable P2P identifiers — time+PID, not crypto random | `p2p/signaling.rs:300`, `connectivity.rs:130` | 011 |
+| ~~Predictable P2P identifiers~~ — ✅ Fixed (Task 015): `ring::rand::SystemRandom` CSPRNG | `p2p/signaling.rs:311`, `connectivity.rs:132` | ~~011~~ ✅ |
 | DATAGRAM size mismatch — code uses 1350, effective limit ~1307 | `lib.rs:31`, `main.rs:33` | 011 |
 | Interface enumeration endian bug — `to_ne_bytes()` on network-order IP | `p2p/candidate.rs:275` | 011 |
-| Legacy FFI dead code — `process_packet()` always returns Forward | `lib.rs:1464` | Quick fix |
+| ~~Legacy FFI dead code~~ — ✅ Fixed (Task 015): `process_packet()` + `PacketAction` removed | ~~`lib.rs`~~ | ~~Quick fix~~ ✅ |
 | Service ID length truncation — `u8` length without >255 bound | `app-connector/main.rs:802` | Quick fix |
 
 **Low (from Oracle):**
+
 | Finding | Evidence | Notes |
 |---------|----------|-------|
 | Hot-path per-packet allocations | `lib.rs:235`, `:268`, `:284` | Performance optimization |
 | Local socket recv allocates per poll | `app-connector/main.rs:721` | Performance optimization |
-| UDP length < 8 yields zero-length payload | `app-connector/main.rs:688` | Should drop malformed |
+| ~~UDP length < 8 yields zero-length payload~~ — ✅ Fixed (Task 015): early return with `log::warn` | ~~`app-connector/main.rs:1268`~~ | ~~Quick fix~~ ✅ |
 
 ---
 
@@ -653,10 +656,11 @@ Findings from the initial Oracle code review that were NOT in Task 007's 26-find
                008 (Prod Ops) 010 (Dashboard)  012 (Multi-Env)
                P2             P3               P3
 
-  ★ Oracle Review Highs (cross-cutting, see Oracle section above) ★
-  Signaling hijack → 009    IPv6 QAD panic → 011
-  Cross-tenant routing → 009  Local UDP injection → 008
-  Predictable P2P IDs → 011  Endian bug → 011
+  ★ Oracle Review (cross-cutting, see Oracle section above) ★
+  ✅ IPv6 QAD panic → Task 015    ✅ Predictable P2P IDs → Task 015
+  ✅ Legacy FFI dead code → Task 015  ✅ UDP length sanity → Task 015
+  Signaling hijack → 009    Cross-tenant routing → 009
+  Local UDP injection → 008  Endian bug → 011
 ```
 
 ---
@@ -690,13 +694,13 @@ Findings from the initial Oracle code review that were NOT in Task 007's 26-find
 - ✅ Task 007: Security Hardening (P1) — Complete (Phases 1-8, PR #8 merged 2026-02-26)
 - ✅ Task 013: Swift Modernization — Complete (PR #7)
 - ✅ Task 014: PR Comment GraphQL Hardening — Complete
-- ⚠️ Oracle Review: 4 High + 5 Medium findings open (see `oracle-review-01.md`, mapped to tasks below)
+- ✅ Task 015: Oracle Quick Fixes — IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity
+- ⚠️ Oracle Review: 3 High + 2 Medium findings remain open (signaling hijack, cross-tenant routing, local UDP injection, DATAGRAM size, endian bug)
 - 🔲 Task 008: Production Operations (P2) — Monitoring, CI/CD, automation + Oracle: local UDP injection
 - 🔲 Task 009: Multi-Service Architecture (P2) — Per-service backends, discovery + Oracle: signaling hijack, cross-tenant routing
 - 🔲 Task 010: Admin Dashboard (P3) — Web UI for management
-- 🔲 Task 011: Protocol Improvements (P3) — IPv6, TCP flow, QUIC migration + Oracle: IPv6 panic, predictable IDs, endian bug, DATAGRAM size
+- 🔲 Task 011: Protocol Improvements (P3) — IPv6 full support, TCP flow, QUIC migration + Oracle: endian bug, DATAGRAM size
 - 🔲 Task 012: Multi-Environment Testing (P3) — DO, multi-region, NAT diversity
-- 🔲 Quick fixes: Legacy FFI dead code removal, service ID length validation
 
 ---
 
