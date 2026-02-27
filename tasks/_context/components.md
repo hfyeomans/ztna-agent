@@ -564,7 +564,7 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 
 ---
 
-### Oracle Review Findings (Open — `oracle-review-01.md`)
+### Oracle Review Findings (Open — Mapped to Tasks 008/009/011)
 
 Findings from the initial Oracle code review that were NOT in Task 007's 26-finding scope. These are mapped to upcoming tasks.
 

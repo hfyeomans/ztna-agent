@@ -1,7 +1,7 @@
 # ZTNA Testing & Demo Guide
 
-**Last Updated:** 2026-02-26
-**Status:** Task 007 Complete (PR #8 merged). Security hardening + mTLS + stateless retry. 143 unit tests.
+**Last Updated:** 2026-02-27
+**Status:** Task 015 Complete (PR #10 merged). Oracle quick fixes: IPv6 QAD, CSPRNG IDs, dead FFI removal, UDP length sanity. 146 unit tests.
 
 ---
 

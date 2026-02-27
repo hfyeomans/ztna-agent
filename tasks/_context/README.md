@@ -48,7 +48,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | ⏳ Not Started | — |
 | [013](../done/013-swift-modernization/) | Swift Modernization | ✅ Complete | `master` (PR #7) |
 | [014](../done/014-pr-comment-graphql-hardening/) | PR Comment GraphQL Hardening | ✅ Complete | `master` |
-| [015](../015-oracle-quick-fixes/) | Oracle Quick Fixes | ✅ Complete | `fix/015-oracle-quick-fixes` |
+| [015](../done/015-oracle-quick-fixes/) | Oracle Quick Fixes | ✅ Complete | `master` (PR #10 merged) |
 
 ### Task Dependencies
 
@@ -392,7 +392,7 @@ Items deferred from MVP implementation that must be addressed for production.
 
 ### Priority 1.5: Oracle Review Findings (Security — Open)
 
-Findings from `oracle-review-01.md` not addressed by Task 007's 26-finding scope.
+Findings from the original Oracle review not addressed by Task 007's 26-finding scope.
 
 | Severity | Item | Component | Description | Target Task |
 |----------|------|-----------|-------------|-------------|
