@@ -570,4 +570,4 @@ See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementati
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | P3 | DigitalOcean, multi-region, symmetric NAT/CGNAT, load testing | None |
 | ~~[013](../done/013-swift-modernization/)~~ | ~~Swift Modernization~~ | ~~Done~~ | ~~Swift 6, strict concurrency, deployment target 26.2, linting infra~~ | ~~None~~ |
 | ~~[014](../done/014-pr-comment-graphql-hardening/)~~ | ~~PR Comment GraphQL Hardening~~ | ~~Done~~ | ~~GraphQL retry/backoff, pagination, smoke-test for resolve-pr-comments.sh~~ | ~~None~~ |
-| ~~[015](../015-oracle-quick-fixes/)~~ | ~~Oracle Quick Fixes~~ | ~~Done~~ | ~~IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity — 4 findings fixed, 146 tests pass~~ | ~~None~~ |
+| ~~[015](../done/015-oracle-quick-fixes/)~~ | ~~Oracle Quick Fixes~~ | ~~Done~~ | ~~IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity — 4 findings fixed, 146 tests pass~~ | ~~None~~ |
