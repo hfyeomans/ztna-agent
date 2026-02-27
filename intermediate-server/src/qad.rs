@@ -29,10 +29,8 @@ const QAD_OBSERVED_ADDRESS: u8 = 0x01;
 /// Total: 7 bytes (IPv4 only)
 /// ```
 ///
-/// # Panics
-///
-/// Panics if the address is IPv6 (not yet supported).
-pub fn build_observed_address(addr: SocketAddr) -> Vec<u8> {
+/// Returns `None` for IPv6 addresses (not yet supported).
+pub fn build_observed_address(addr: SocketAddr) -> Option<Vec<u8>> {
     match addr {
         SocketAddr::V4(v4) => {
             let mut msg = Vec::with_capacity(7);
@@ -46,11 +44,11 @@ pub fn build_observed_address(addr: SocketAddr) -> Vec<u8> {
             // Port (2 bytes, big-endian)
             msg.extend_from_slice(&v4.port().to_be_bytes());
 
-            msg
+            Some(msg)
         }
         SocketAddr::V6(_) => {
-            // IPv6 not yet supported - would require Agent parser update
-            panic!("IPv6 QAD not yet implemented");
+            log::warn!("IPv6 QAD not yet supported, skipping for {:?}", addr);
+            None
         }
     }
 }
@@ -66,7 +64,7 @@ mod tests {
         // Expected: 01 CB 00 71 05 D4 31
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 54321));
 
-        let msg = build_observed_address(addr);
+        let msg = build_observed_address(addr).expect("IPv4 should return Some");
 
         assert_eq!(msg.len(), 7);
         assert_eq!(msg[0], 0x01); // Type
@@ -82,7 +80,7 @@ mod tests {
     fn test_localhost_address() {
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 4433));
 
-        let msg = build_observed_address(addr);
+        let msg = build_observed_address(addr).expect("IPv4 should return Some");
 
         assert_eq!(msg.len(), 7);
         assert_eq!(msg[0], 0x01);
@@ -90,5 +88,12 @@ mod tests {
         // Port 4433 = 0x1151
         assert_eq!(msg[5], 0x11);
         assert_eq!(msg[6], 0x51);
+    }
+
+    #[test]
+    fn test_ipv6_returns_none() {
+        use std::net::{Ipv6Addr, SocketAddrV6};
+        let addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 4433, 0, 0));
+        assert!(build_observed_address(addr).is_none());
     }
 }

@@ -70,7 +70,7 @@ Authenticate the ability to intercept and modify packets on macOS using the prop
 2.  **Network Extension**: `NEPacketTunnelProvider`.
 3.  **Rust Handler**:
     - Compiled as a static library (`libagent.a`).
-    - Exposes a C-compatible FFI: `process_packet(data: *const u8, len: usize) -> Action`.
+    - Exposes a C-compatible FFI for QUIC agent lifecycle (see `PacketProcessor-Bridging-Header.h`).
 4.  **Flow**:
     - Extension starts -> sets up `10.0.0.1` tunnel.
     - `packeflow.readPackets` -> passes data to Rust.

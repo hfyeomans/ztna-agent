@@ -23,7 +23,7 @@ Follow the [Manual Xcode Setup Guide](manual_xcode_setup_guide.md) to:
 
 ### 2. Test
 1. Click **"Install & Start VPN"** in the app.
-2. Open **Console.app** and filter for `process_packet` or `Rust`.
+2. Open **Console.app** and filter for `packet_processor` or `Rust`.
 3. In Terminal, run `ping 1.1.1.1`.
 4. **Expected Result**: You should see logs in Console.app indicating that Rust is seeing the ICMP packets.
 

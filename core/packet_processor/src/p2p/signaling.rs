@@ -307,20 +307,13 @@ pub fn read_message<R: Read>(reader: &mut R) -> io::Result<SignalingMessage> {
 // Session Management
 // ============================================================================
 
-/// Generate a random session ID
+/// Generate a random session ID using CSPRNG
 pub fn generate_session_id() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Combine timestamp with random-ish value for uniqueness
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-
-    // XOR with process ID for additional uniqueness
-    let pid = std::process::id() as u64;
-
-    timestamp ^ (pid << 32)
+    use ring::rand::{SecureRandom, SystemRandom};
+    let rng = SystemRandom::new();
+    let mut buf = [0u8; 8];
+    rng.fill(&mut buf).expect("SystemRandom failed");
+    u64::from_ne_bytes(buf)
 }
 
 // ============================================================================
@@ -541,13 +534,19 @@ mod tests {
     #[test]
     fn test_generate_session_id() {
         let id1 = generate_session_id();
-        std::thread::sleep(std::time::Duration::from_millis(1)); // Ensure different timestamps
         let id2 = generate_session_id();
 
-        // Should be different (different timestamps)
+        // CSPRNG should produce different values
         assert_ne!(id1, id2);
         assert_ne!(id1, 0);
         assert_ne!(id2, 0);
+    }
+
+    #[test]
+    fn test_session_id_uniqueness() {
+        let id1 = generate_session_id();
+        let id2 = generate_session_id();
+        assert_ne!(id1, id2, "Consecutive CSPRNG session IDs should differ");
     }
 
     #[test]

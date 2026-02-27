@@ -868,7 +868,14 @@ impl Server {
         conn_id: &quiche::ConnectionId<'static>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.clients.get_mut(conn_id) {
-            let qad_msg = qad::build_observed_address(client.observed_addr);
+            let qad_msg = match qad::build_observed_address(client.observed_addr) {
+                Some(msg) => msg,
+                None => {
+                    log::info!("Skipping QAD for {:?} (IPv6 not supported)", conn_id);
+                    client.qad_sent = true;
+                    return Ok(());
+                }
+            };
             match client.conn.dgram_send(&qad_msg) {
                 Ok(_) => {
                     log::info!(

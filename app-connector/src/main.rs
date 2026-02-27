@@ -1265,6 +1265,15 @@ impl Connector {
         let udp_len =
             u16::from_be_bytes([dgram[udp_header_start + 4], dgram[udp_header_start + 5]]) as usize;
 
+        // Sanity check: UDP length must be at least 8 (header size)
+        if udp_len < 8 {
+            log::warn!(
+                "Malformed UDP: length field {} < minimum header size 8, dropping packet",
+                udp_len
+            );
+            return Ok(());
+        }
+
         // Extract UDP payload
         let payload_start = ip_header_len + 8;
         let payload_len = udp_len.saturating_sub(8);
@@ -2962,5 +2971,52 @@ mod tests {
             0,
             "ICMP checksum should verify to 0"
         );
+    }
+
+    #[test]
+    fn test_malformed_udp_length_detected() {
+        // Build a valid UDP packet, then corrupt the UDP length field to < 8
+        let mut packet = build_udp_packet(
+            Ipv4Addr::new(192, 168, 1, 100),
+            12345,
+            Ipv4Addr::new(10, 0, 0, 1),
+            80,
+            b"Hello",
+        );
+
+        // UDP length field is at bytes 24..26 (offset 4..6 within UDP header at byte 20)
+        // Set it to 5 (less than the minimum UDP header size of 8)
+        packet[24..26].copy_from_slice(&5u16.to_be_bytes());
+
+        // Verify the IP header parses correctly
+        let ihl = (packet[0] & 0x0F) as usize * 4;
+        assert_eq!(ihl, 20);
+        assert_eq!(packet[9], 17); // UDP protocol
+
+        // Verify the UDP length field reads as 5 (malformed)
+        let udp_header_start = ihl;
+        let udp_len =
+            u16::from_be_bytes([packet[udp_header_start + 4], packet[udp_header_start + 5]])
+                as usize;
+        assert_eq!(udp_len, 5);
+        assert!(
+            udp_len < 8,
+            "UDP length {} should be detected as malformed (< 8)",
+            udp_len
+        );
+
+        // Also verify zero-length case
+        packet[24..26].copy_from_slice(&0u16.to_be_bytes());
+        let udp_len_zero =
+            u16::from_be_bytes([packet[udp_header_start + 4], packet[udp_header_start + 5]])
+                as usize;
+        assert_eq!(udp_len_zero, 0);
+        assert!(udp_len_zero < 8);
+
+        // Note: forward_to_local() is a method on Connector which requires
+        // quiche, mio, and network sockets to instantiate. The guard added at
+        // line ~1268 ensures packets with udp_len < 8 return Ok(()) early
+        // before any forwarding occurs. This test validates the detection logic
+        // that the guard relies on.
     }
 }

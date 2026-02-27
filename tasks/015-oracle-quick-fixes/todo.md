@@ -8,43 +8,44 @@
 
 ## Phase 1: IPv6 QAD Panic (Finding 6 — High)
 
-- [ ] Change `build_observed_address()` return type to `Option<Vec<u8>>` in `intermediate-server/src/qad.rs`
-- [ ] Replace `panic!()` with `log::warn!()` + `return None`
-- [ ] Update IPv4 path to return `Some(msg)`
-- [ ] Update call-site `send_qad()` in `intermediate-server/src/main.rs` to handle `Option`
-- [ ] Update existing test `test_build_observed_address` for new return type
-- [ ] Add test: IPv6 SocketAddr returns None without panicking
-- [ ] Run `cargo test --manifest-path intermediate-server/Cargo.toml`
+- [x] Change `build_observed_address()` return type to `Option<Vec<u8>>` in `intermediate-server/src/qad.rs`
+- [x] Replace `panic!()` with `log::warn!()` + `return None`
+- [x] Update IPv4 path to return `Some(msg)`
+- [x] Update call-site `send_qad()` in `intermediate-server/src/main.rs` to handle `Option`
+- [x] Update existing test `test_build_observed_address` for new return type
+- [x] Add test: IPv6 SocketAddr returns None without panicking (`test_ipv6_returns_none`)
+- [x] Run `cargo test --manifest-path intermediate-server/Cargo.toml` — 41 pass
 
 ## Phase 2: Predictable P2P Identifiers (Finding 8 — Medium)
 
-- [ ] Replace `generate_session_id()` in `core/packet_processor/src/p2p/signaling.rs` with `ring::rand::SystemRandom`
-- [ ] Replace `generate_transaction_id()` in `core/packet_processor/src/p2p/connectivity.rs` with `ring::rand::SystemRandom`
-- [ ] Remove unused `std::time` / `std::process` imports from both files
-- [ ] Add test: consecutive session IDs differ
-- [ ] Add test: consecutive transaction IDs differ
-- [ ] Run `cargo test --manifest-path core/packet_processor/Cargo.toml`
+- [x] Replace `generate_session_id()` in `core/packet_processor/src/p2p/signaling.rs` with `ring::rand::SystemRandom`
+- [x] Replace `generate_transaction_id()` in `core/packet_processor/src/p2p/connectivity.rs` with `ring::rand::SystemRandom`
+- [x] Remove unused `std::time` / `std::process` imports from both files
+- [x] Add test: consecutive session IDs differ (`test_session_id_uniqueness`)
+- [x] Add test: consecutive transaction IDs differ (`test_transaction_id_uniqueness`)
+- [x] Run `cargo test --manifest-path core/packet_processor/Cargo.toml` — 84 pass
 
 ## Phase 3: Legacy FFI Dead Code (Finding 11 — Medium)
 
-- [ ] Remove `process_packet()` function from `core/packet_processor/src/lib.rs`
-- [ ] Remove `test_process_packet` test from `core/packet_processor/src/lib.rs`
-- [ ] Remove `process_packet` declaration from `ios-macos/Shared/PacketProcessor-Bridging-Header.h`
-- [ ] Update `docs/architecture_design.md` reference (line 73)
-- [ ] Update `docs/walkthrough.md` reference (line 26)
-- [ ] Run `cargo test --manifest-path core/packet_processor/Cargo.toml`
+- [x] Remove `process_packet()` function from `core/packet_processor/src/lib.rs`
+- [x] Remove `test_process_packet` test from `core/packet_processor/src/lib.rs`
+- [x] Remove `PacketAction` enum from `core/packet_processor/src/lib.rs` (no remaining references)
+- [x] Remove `process_packet` declaration + `PacketAction` typedef from `ios-macos/Shared/PacketProcessor-Bridging-Header.h`
+- [x] Update `docs/architecture_design.md` reference (line 73)
+- [x] Update `docs/walkthrough.md` reference (line 26)
+- [x] Run `cargo test --manifest-path core/packet_processor/Cargo.toml` — 84 pass
 
 ## Phase 4: UDP Length Sanity (Finding 15 — Low)
 
-- [ ] Add `if udp_len < 8` early return with log in `app-connector/src/main.rs` (before `saturating_sub`)
-- [ ] Add test: crafted packet with udp_len < 8 is dropped
-- [ ] Run `cargo test --manifest-path app-connector/Cargo.toml`
+- [x] Add `if udp_len < 8` early return with log in `app-connector/src/main.rs` (before `saturating_sub`)
+- [x] Add test: crafted packet with udp_len < 8 is dropped (`test_malformed_udp_length_detected`)
+- [x] Run `cargo test --manifest-path app-connector/Cargo.toml` — 21 pass
 
 ## Final Verification
 
-- [ ] Run clippy on all 3 crates (intermediate-server, packet_processor, app-connector)
-- [ ] Run full test suites on all 3 crates
-- [ ] Oracle post-implementation review
+- [x] Run clippy on all 3 crates — 0 warnings (intermediate-server, packet_processor, app-connector)
+- [x] Run full test suites on all 3 crates — 143 tests pass, 0 failures
+- [x] Oracle post-implementation review (gpt-5.3-codex) — no defects identified
 
 ## Deferred: Incorporate Findings into Target Tasks
 

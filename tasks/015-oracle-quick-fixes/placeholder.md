@@ -8,7 +8,7 @@
 
 ## Placeholders
 
-None yet — task has not entered implementation phase.
+None — no placeholder code or `// TODO` comments introduced.
 
 ## Known Interim Solutions
 

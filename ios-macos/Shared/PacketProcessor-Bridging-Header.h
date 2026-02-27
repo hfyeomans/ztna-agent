@@ -6,19 +6,6 @@
 #include <stdbool.h>
 
 // ============================================================================
-// Legacy Packet Processing (kept for compatibility)
-// ============================================================================
-
-// Define the enum to match Rust's Repr(C) enum
-typedef enum {
-    PacketActionDrop = 0,
-    PacketActionForward = 1,
-} PacketAction;
-
-// Legacy packet filter function
-PacketAction process_packet(const uint8_t *data, size_t len);
-
-// ============================================================================
 // QUIC Agent Types
 // ============================================================================
 
