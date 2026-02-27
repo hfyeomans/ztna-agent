@@ -3,15 +3,28 @@
 **Task ID:** 008-production-operations
 **Status:** Not Started
 **Priority:** P2
-**Depends On:** 007-security-hardening
+**Depends On:** 007-security-hardening ✅ (PR #8 merged)
 **Branch:** (not yet created)
-**Last Updated:** 2026-02-21
+**Last Updated:** 2026-02-26
 
 ---
 
 ## Purpose
 
 Plan the implementation of monitoring, graceful shutdown, Connector auto-reconnection, deployment automation, and CI/CD pipelines.
+
+---
+
+## Oracle Review Findings (Assigned to This Task)
+
+From `oracle-review-01.md` — must be addressed as part of this task:
+
+| Severity | Finding | Evidence | Description |
+|----------|---------|----------|-------------|
+| **High** | Local UDP injection | `app-connector/src/main.rs:1964-1985` | Connector accepts UDP from any local process and forwards into tunnel without checking source matches `forward_addr` |
+| **Low** | Recv buffer allocation per poll | `app-connector/src/main.rs:1965` | `vec![0u8; 65535]` allocated every `process_local_socket()` call instead of reusing `self.recv_buf` |
+
+**Note:** Finding 7 line references updated to current codebase (post-Task 007). Original oracle references were pre-Task 007.
 
 ---
 

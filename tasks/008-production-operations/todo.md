@@ -52,3 +52,16 @@ Track implementation tasks for monitoring, graceful shutdown, Connector auto-rec
 - [ ] GitHub Actions: Run unit tests
 - [ ] GitHub Actions: Run E2E test suite
 - [ ] Automated container image builds and push
+
+## Oracle Findings (Cross-Cutting)
+
+### Finding 7 (High): Local UDP Injection
+- [ ] Validate source address in `process_local_socket()` against expected `forward_addr`
+- [ ] Drop packets from unexpected sources with `log::warn!()`
+- [ ] Coordinate with Task 009 if multi-service routing changes validation model
+- [ ] Add test: UDP from unexpected source address is dropped
+
+### Finding 14 (Low): Recv Buffer Allocation
+- [ ] Refactor `process_local_socket()` to reuse `self.recv_buf` instead of allocating `vec![0u8; 65535]`
+- [ ] Adjust borrow scopes to allow `&mut self` access alongside buffer use
+- [ ] Add benchmark: measure allocation reduction in high-PPS scenarios

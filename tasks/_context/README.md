@@ -33,20 +33,22 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 
 | Task | Component | Status | Branch |
 |------|-----------|--------|--------|
-| [001](../001-quic-tunnel-integration/) | Agent QUIC Client | ✅ Complete | `master` |
-| [002](../002-intermediate-server/) | Intermediate Server | ✅ Complete | `master` |
-| [003](../003-app-connector/) | App Connector | ✅ Complete | `master` |
-| [004](../004-e2e-relay-testing/) | E2E Relay Testing | ✅ Complete | `master` |
-| [005](../005-p2p-hole-punching/) | P2P Hole Punching | ✅ Complete | `master` |
-| [005a](../005a-swift-agent-integration/) | Swift Agent Integration | ✅ Complete | `master` |
-| [006](../006-cloud-deployment/) | Cloud Deployment | ✅ Complete (MVP) | `master` (PR #7 merged) |
-| [007](../007-security-hardening/) | Security Hardening | ✅ Complete (Phases 1-8, PR #8) | `feature/007-security-hardening` |
+| [001](../done/001-quic-tunnel-integration/) | Agent QUIC Client | ✅ Complete | `master` |
+| [002](../done/002-intermediate-server/) | Intermediate Server | ✅ Complete | `master` |
+| [003](../done/003-app-connector/) | App Connector | ✅ Complete | `master` |
+| [004](../done/004-e2e-relay-testing/) | E2E Relay Testing | ✅ Complete | `master` |
+| [005](../done/005-p2p-hole-punching/) | P2P Hole Punching | ✅ Complete | `master` |
+| [005a](../done/005a-swift-agent-integration/) | Swift Agent Integration | ✅ Complete | `master` |
+| [006](../done/006-cloud-deployment/) | Cloud Deployment | ✅ Complete (MVP) | `master` (PR #7 merged) |
+| [007](../done/007-security-hardening/) | Security Hardening | ✅ Complete (Phases 1-8, PR #8 merged) | `master` |
 | [008](../008-production-operations/) | Production Operations | ⏳ Not Started | — |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | ⏳ Not Started | — |
 | [010](../010-admin-dashboard/) | Admin Dashboard | ⏳ Not Started | — |
 | [011](../011-protocol-improvements/) | Protocol Improvements | ⏳ Not Started | — |
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | ⏳ Not Started | — |
-| [013](../013-swift-modernization/) | Swift Modernization | ✅ Complete | `master` (PR #7) |
+| [013](../done/013-swift-modernization/) | Swift Modernization | ✅ Complete | `master` (PR #7) |
+| [014](../done/014-pr-comment-graphql-hardening/) | PR Comment GraphQL Hardening | ✅ Complete | `master` |
+| [015](../015-oracle-quick-fixes/) | Oracle Quick Fixes | ⏳ Not Started | `chore/oracle-findings-triage` |
 
 ### Task Dependencies
 
@@ -70,6 +72,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
          006 (Cloud Deployment) ✅ COMPLETE (MVP)
                     │
                     ├──► 013 (Swift Modernization) ✅ COMPLETE
+                    ├──► 014 (PR Comment GraphQL) ✅ COMPLETE
                     │
          ┌──────────┼──────────────────────┐
          ▼          ▼                      ▼
@@ -79,6 +82,12 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
          ▼          ▼                      │
    008 (Prod Ops)  010 (Dashboard)       012 (Multi-Env)
    P2              P3                     P3
+
+  ★ Oracle Review (cross-cutting, see Deferred Items) ★
+  015 (Quick Fixes): IPv6 panic, predictable IDs, dead FFI, UDP sanity
+  Signaling hijack → 009    Reg auth hardening → 009
+  Cross-tenant routing → 009  Local UDP injection → 008
+  DATAGRAM mismatch → 011   Endian bug (disputed) → 011
 ```
 
 ---
@@ -381,6 +390,26 @@ Items deferred from MVP implementation that must be addressed for production.
 | ~~Client Authentication~~ | ~~002-Server~~ | ✅ Done (Task 007 Phase 6A) — mTLS with x509 SAN-based service authorization | ~~Unauthorized access~~ |
 | ~~Rate Limiting~~ | ~~002-Server~~ | ✅ Done (Task 007 Phase 3) — Per-IP TCP SYN rate limiting | ~~Resource exhaustion~~ |
 
+### Priority 1.5: Oracle Review Findings (Security — Open)
+
+Findings from `oracle-review-01.md` not addressed by Task 007's 26-finding scope.
+
+| Severity | Item | Component | Description | Target Task |
+|----------|------|-----------|-------------|-------------|
+| **Critical** | **Registration auth (conditional)** | 002-Server | mTLS requires `--require-client-cert` flag; SAN-less certs allowed. Oracle: conditionally fixed only | → Task 009 |
+| **High** | **Signaling session hijack** | 002-Server | `CandidateAnswer` accepted from any conn with matching session_id — no ownership check. Oracle confirmed NOT fixed by Task 007 | → Task 009 |
+| **High** | **Cross-tenant connector routing** | 003-Connector | "First flow wins" return-path; responses can route to wrong agent | → Task 009 |
+| **High** | **IPv6 QAD panic** | 002-Server | Quick mitigation planned in Task 015 (panic → `Option` return). Full IPv6 QAD in Task 011 Phase 3 | → Task 015 |
+| **High** | **Local UDP injection** | 003-Connector | Accepts UDP from any local process without source validation | → Task 008 |
+| **Medium** | **Predictable P2P identifiers** | packet_processor | Planned in Task 015 — replace time+PID with `ring::rand::SystemRandom` | → Task 015 |
+| **Medium** | **DATAGRAM size mismatch** | All Rust | Constants aligned at 1350, but effective writable limit ~1307. Needs investigation | → Task 011 |
+| **Medium** | **Interface enumeration endian bug** | packet_processor | Oracle DISPUTES: `to_ne_bytes()` may be correct on macOS. Needs investigation, not blind fix | → Task 011 |
+| **Medium** | **Legacy FFI dead code** | packet_processor | Planned removal in Task 015 | → Task 015 |
+| ~~**Medium**~~ | ~~**Service ID length truncation**~~ | ~~003-Connector~~ | ~~Fixed in Task 007 — bounds check before `u8` cast~~ | ✅ Task 007 |
+| **Low** | **Hot-path per-packet allocations** | packet_processor, app-connector | Buffer reuse refactor across multiple hot paths | → Task 011 |
+| **Low** | **Local socket recv buffer** | 003-Connector | Per-poll `vec![0u8; 65535]` instead of reusing `self.recv_buf` | → Task 008 |
+| **Low** | **UDP length sanity** | 003-Connector | Planned in Task 015 — drop malformed UDP with `udp_len < 8` | → Task 015 |
+
 ### Priority 2: Reliability (Recommended)
 
 | Item | Component | Description | Impact if Missing |
@@ -496,7 +525,7 @@ After E2E testing validates local relay functionality, components will be deploy
 
 ### Task Reference
 
-See [Task 006: Cloud Deployment](../006-cloud-deployment/) for implementation details.
+See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementation details.
 
 ---
 
@@ -533,10 +562,12 @@ See [Task 006: Cloud Deployment](../006-cloud-deployment/) for implementation de
 
 | Task | Name | Priority | Description | Dependencies |
 |------|------|----------|-------------|--------------|
-| ~~[007](../007-security-hardening/)~~ | ~~Security Hardening~~ | ~~Done~~ | ~~26 findings + 6 deferred items: mTLS, cert renewal, non-blocking TCP, retry tokens, reg ACK, CID rotation~~ | ~~None~~ |
-| [008](../008-production-operations/) | Production Operations | P2 | Prometheus metrics, graceful shutdown, deployment automation, CI/CD | 007 |
-| [009](../009-multi-service-architecture/) | Multi-Service Architecture | P2 | Per-service backend routing, dynamic discovery, health checks | None |
+| ~~[007](../done/007-security-hardening/)~~ | ~~Security Hardening~~ | ~~Done~~ | ~~26 findings + 6 deferred items: mTLS, cert renewal, non-blocking TCP, retry tokens, reg ACK, CID rotation~~ | ~~None~~ |
+| [008](../008-production-operations/) | Production Operations | P2 | Prometheus metrics, graceful shutdown, deployment automation, CI/CD. **+Oracle:** local UDP injection fix | 007 ✅ |
+| [009](../009-multi-service-architecture/) | Multi-Service Architecture | P2 | Per-service backend routing, dynamic discovery, health checks. **+Oracle:** signaling hijack, cross-tenant routing fixes | None |
 | [010](../010-admin-dashboard/) | Admin Dashboard | P3 | REST API on Intermediate, web frontend, topology visualization | 008, 009 |
-| [011](../011-protocol-improvements/) | Protocol Improvements | P3 | IPv6 QAD, TCP flow control, separate P2P/relay sockets, QUIC migration, 0-RTT | None |
+| [011](../011-protocol-improvements/) | Protocol Improvements | P3 | IPv6 QAD, TCP flow control, separate P2P/relay sockets, QUIC migration, 0-RTT. **+Oracle:** IPv6 panic, predictable IDs, endian bug, DATAGRAM size | None |
 | [012](../012-multi-environment-testing/) | Multi-Environment Testing | P3 | DigitalOcean, multi-region, symmetric NAT/CGNAT, load testing | None |
-| ~~[013](../013-swift-modernization/)~~ | ~~Swift Modernization~~ | ~~Done~~ | ~~Swift 6, strict concurrency, deployment target 26.2, linting infra~~ | ~~None~~ |
+| ~~[013](../done/013-swift-modernization/)~~ | ~~Swift Modernization~~ | ~~Done~~ | ~~Swift 6, strict concurrency, deployment target 26.2, linting infra~~ | ~~None~~ |
+| ~~[014](../done/014-pr-comment-graphql-hardening/)~~ | ~~PR Comment GraphQL Hardening~~ | ~~Done~~ | ~~GraphQL retry/backoff, pagination, smoke-test for resolve-pr-comments.sh~~ | ~~None~~ |
+| [015](../015-oracle-quick-fixes/) | Oracle Quick Fixes | P1 | Quick-fix findings from oracle-review-01.md: IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity | None |
