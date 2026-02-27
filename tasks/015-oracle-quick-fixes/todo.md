@@ -44,7 +44,7 @@
 ## Final Verification
 
 - [x] Run clippy on all 3 crates — 0 warnings (intermediate-server, packet_processor, app-connector)
-- [x] Run full test suites on all 3 crates — 143 tests pass, 0 failures
+- [x] Run full test suites on all 3 crates — 146 tests pass, 0 failures
 - [x] Oracle post-implementation review (gpt-5.3-codex) — no defects identified
 
 ## Deferred: Incorporate Findings into Target Tasks

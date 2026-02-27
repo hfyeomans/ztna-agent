@@ -558,7 +558,7 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 - `deploy/aws/ztna-cert-renew.{service,timer}` — Systemd renewal
 - `deploy/k8s/overlays/cert-manager/` — k8s cert-manager CRDs
 
-**Test Count:** 145 tests passing (40+1 intermediate-server, 84 packet_processor, 19+2 app-connector, +Task 015 additions)
+**Test Count:** 146 tests passing (40+1 intermediate-server, 84 packet_processor, 19+2 app-connector)
 
 **Review Rounds:** 3 Oracle reviews (12 findings fixed) + 1 CodeRabbit/Gemini review (16 threads, 4 actionable fixes)
 
@@ -569,6 +569,7 @@ macOS Agent (anywhere) --QUIC--> Elastic IP (3.128.36.92:4433)
 Findings from the initial Oracle code review that were NOT in Task 007's 26-finding scope. These are mapped to upcoming tasks.
 
 **High:**
+
 | Finding | Evidence | Target Task |
 |---------|----------|-------------|
 | Signaling session hijack — client-supplied session IDs without ownership checks | `signaling.rs:321`, `main.rs:677` | 009 |
@@ -577,6 +578,7 @@ Findings from the initial Oracle code review that were NOT in Task 007's 26-find
 | Local UDP injection — connector accepts UDP from any local process | `app-connector/main.rs:725`, `:755` | 008 |
 
 **Medium:**
+
 | Finding | Evidence | Target Task |
 |---------|----------|-------------|
 | ~~Predictable P2P identifiers~~ — ✅ Fixed (Task 015): `ring::rand::SystemRandom` CSPRNG | `p2p/signaling.rs:311`, `connectivity.rs:132` | ~~011~~ ✅ |
@@ -586,6 +588,7 @@ Findings from the initial Oracle code review that were NOT in Task 007's 26-find
 | Service ID length truncation — `u8` length without >255 bound | `app-connector/main.rs:802` | Quick fix |
 
 **Low (from Oracle):**
+
 | Finding | Evidence | Notes |
 |---------|----------|-------|
 | Hot-path per-packet allocations | `lib.rs:235`, `:268`, `:284` | Performance optimization |
