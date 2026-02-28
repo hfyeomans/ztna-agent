@@ -52,6 +52,10 @@
   - Health check endpoint (`/healthz`, HTTP 200 if running)
   - `--metrics-port` CLI flag (default 9090, 0 to disable)
   - SIGTERM/SIGINT graceful shutdown with `drain_and_shutdown()` (3s drain, APPLICATION_CLOSE to all clients)
+  - EINTR handling: `mio::Poll::poll()` EINTR continues loop to check shutdown flag (not fatal)
+- **Connection lifecycle:**
+  - QUIC idle timeout: 30s (`IDLE_TIMEOUT_MS`). 10-second PING keepalive prevents timeout
+  - Connection loss detected when `conn.is_closed()` returns true after idle timeout expiry
 
 **Critical Compatibility:**
 - ALPN: `b"ztna-v1"` (matches Agent)
@@ -117,6 +121,11 @@ Currently on single shared EC2 (MVP). Planned: dedicated EC2 with Docker + `--ne
   - `--metrics-port` CLI flag (default 9091, 0 to disable)
   - Source IP validation in `process_local_socket()` — drops UDP from unexpected sources (Oracle Finding 7)
   - Buffer reuse — `self.recv_buf` instead of per-poll `vec![0u8; 65535]` (Oracle Finding 14)
+  - EINTR handling: `mio::Poll::poll()` EINTR continues loop to check shutdown flag (not fatal)
+- **Connection lifecycle:**
+  - QUIC idle timeout: 30s (`IDLE_TIMEOUT_MS`). 10-second PING keepalive prevents timeout
+  - Connection loss detected via `conn.is_closed()` after idle timeout (~30-40s after intermediate restart)
+  - Auto-reconnection resets `reg_state` to `NotRegistered`, calls `maybe_register()` after handshake
 
 **P2P Server Mode (Port 4434):**
 - Dual-mode: QUIC client (to Intermediate on 4433) + QUIC server (for Agents on 4434)

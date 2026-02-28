@@ -548,7 +548,8 @@ After E2E testing validates local relay functionality, components will be deploy
 │  │    10.100.  │  0x2F routed   │  │    - QAD + DATAGRAM relay          │ │ │
 │  │    0.1      │                │  │    - 0x2F service routing           │ │ │
 │  │  - web-app  │                │  │    - Multi-service registry         │ │ │
-│  │    10.100.  │                │  └─────────────────────────────────────┘ │ │
+│  │    10.100.  │                │  │    - Metrics HTTP :9090             │ │ │
+│  │    0.2      │                │  └─────────────────────────────────────┘ │ │
 │  │    0.2      │                │                    │                      │ │
 │  │             │                │                    │ QUIC                 │ │
 │  │  Routes:    │                │                    ▼                      │ │
@@ -558,7 +559,8 @@ After E2E testing validates local relay functionality, components will be deploy
 │  │  All other  │                │  │    - UDP/TCP/ICMP forwarding        │ │ │
 │  │  traffic:   │                │  │    - TCP session proxy              │ │ │
 │  │  normal     │                │  │    - ICMP Echo Reply                │ │ │
-│  └─────────────┘                │  └───────────────┬─────────────────────┘ │ │
+│  └─────────────┘                │  │    - Metrics HTTP :9091/:9092       │ │ │
+│                                  │  └───────────────┬─────────────────────┘ │ │
 │                                  │                   │                       │ │
 │                                  │                   │ Local UDP/TCP         │ │
 │                                  │                   ▼                       │ │

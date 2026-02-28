@@ -1135,13 +1135,37 @@ Both components handle SIGTERM for clean shutdown. The Intermediate Server also 
 The Connector automatically reconnects to the Intermediate Server when the connection drops, using exponential backoff:
 
 ```text
-Connection lost → 1s wait → attempt → fail → 2s wait → attempt → fail → 4s → ... → 30s cap
-                  ▲                                                            │
-                  └────────────────── reset to 1s on success ◄─────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                AUTO-RECONNECTION STATE MACHINE                   │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌───────────┐     conn.is_closed()     ┌──────────────────┐    │
+│  │ Connected │ ──────────────────────► │   Detect Loss    │    │
+│  │           │    (~30-40s after        │   (idle timeout)  │    │
+│  └───────────┘     server restart)      └────────┬─────────┘    │
+│       ▲                                          │               │
+│       │                                          ▼               │
+│       │  success                        ┌──────────────────┐    │
+│       │  (reset delay                   │   Backoff Wait   │    │
+│       │   to 1s)                        │   1s→2s→4s→30s   │    │
+│       │                                 │  (500ms chunks,  │    │
+│       │                                 │   SIGTERM-aware)  │    │
+│       │                                 └────────┬─────────┘    │
+│       │                                          │               │
+│       │                                          ▼               │
+│       │                                 ┌──────────────────┐    │
+│       └──────────────────────────────── │ Attempt Connect  │    │
+│                                         │ + Re-register    │    │
+│                  fail ──────────────── │ service           │    │
+│                  (increase delay)       └──────────────────┘    │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-- **Backoff:** 1s initial, 2x factor, 30s maximum
+- **Detection:** `conn.is_closed()` returns true after QUIC idle timeout (~30s). No keepalive probes during reconnect gap
+- **Backoff:** 1s initial, 2x factor, 30s maximum (`RECONNECT_INITIAL_DELAY_MS`, `RECONNECT_MAX_DELAY_MS`)
 - **Interruptible:** Sleep is split into 500ms chunks; SIGTERM exits within 500ms
+- **EINTR handling:** `mio::Poll::poll()` EINTR continues loop to check `shutdown_flag`
 - **State reset:** On reconnect, `reg_state` resets to `NotRegistered`; `maybe_register()` re-registers automatically
 - **P2P note:** P2P clients have independent QUIC connections, but the reconnect backoff loop blocks the main event loop, pausing P2P packet processing during sleep intervals (up to 500ms per chunk). P2P connections themselves remain open.
 
