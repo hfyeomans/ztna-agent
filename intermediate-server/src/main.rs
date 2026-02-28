@@ -226,10 +226,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6B.1: Register SIGHUP handler for certificate hot-reload
     let reload_flag = Arc::new(AtomicBool::new(false));
+    // Phase 3: Register SIGTERM/SIGINT handlers for graceful shutdown
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
         signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&reload_flag))?;
-        log::info!("SIGHUP handler registered for certificate hot-reload");
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown_flag))?;
+        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown_flag))?;
+        log::info!("Signal handlers registered (SIGHUP=reload, SIGTERM/SIGINT=shutdown)");
     }
 
     // Create server and run
@@ -243,6 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         verify_peer,
         require_client_cert,
         reload_flag,
+        shutdown_flag,
         enable_retry,
     )?;
     server.run()
@@ -281,6 +286,9 @@ struct Server {
     // 6B.1: Certificate hot-reload support
     /// Atomic flag set by SIGHUP handler to trigger config reload
     reload_flag: Arc<AtomicBool>,
+    // Phase 3: Graceful shutdown support
+    /// Atomic flag set by SIGTERM/SIGINT handler to trigger graceful shutdown
+    shutdown_flag: Arc<AtomicBool>,
     /// Path to TLS certificate (for reload)
     cert_path: String,
     /// Path to TLS private key (for reload)
@@ -315,6 +323,7 @@ impl Server {
         verify_peer: bool,
         require_client_cert: bool,
         reload_flag: Arc<AtomicBool>,
+        shutdown_flag: Arc<AtomicBool>,
         enable_retry: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Parse external address if provided (for NAT environments like AWS Elastic IP)
@@ -393,6 +402,7 @@ impl Server {
             external_addr,
             require_client_cert,
             reload_flag,
+            shutdown_flag,
             cert_path: cert_path.to_string(),
             key_path: key_path.to_string(),
             ca_cert_path: ca_cert_path.map(|s| s.to_string()),
@@ -408,6 +418,13 @@ impl Server {
         let mut events = Events::with_capacity(1024);
 
         loop {
+            // Phase 3: Check for SIGTERM/SIGINT-triggered graceful shutdown
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                log::info!("Shutdown signal received, draining connections...");
+                self.drain_and_shutdown()?;
+                break Ok(());
+            }
+
             // 6B.1: Check for SIGHUP-triggered certificate reload
             if self.reload_flag.swap(false, Ordering::Relaxed) {
                 self.reload_tls_config();
@@ -452,6 +469,81 @@ impl Server {
             // Clean up closed connections
             self.cleanup_closed();
         }
+    }
+
+    /// Phase 3: Drain active connections and shut down gracefully.
+    ///
+    /// Sends APPLICATION_CLOSE to all active connections, then polls briefly
+    /// (up to 3 seconds) to flush close frames and receive acknowledgments.
+    fn drain_and_shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        log::info!(
+            "Initiating graceful shutdown for {} active connections",
+            self.clients.len()
+        );
+
+        // Close all connections with APPLICATION_CLOSE
+        for (conn_id, client) in self.clients.iter_mut() {
+            if !client.conn.is_closed() {
+                match client.conn.close(true, 0x00, b"server shutting down") {
+                    Ok(()) => {
+                        log::debug!("Sent close to connection {:?}", conn_id);
+                    }
+                    Err(quiche::Error::Done) => {
+                        // Already closing
+                        log::debug!("Connection {:?} already closing", conn_id);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to close connection {:?}: {:?}", conn_id, e);
+                    }
+                }
+            }
+        }
+
+        // Flush pending packets so close frames are sent
+        self.send_pending()?;
+
+        // Brief drain period — give connections time to receive close frames
+        let drain_deadline = Instant::now() + std::time::Duration::from_secs(3);
+        let mut events = Events::with_capacity(1024);
+
+        while Instant::now() < drain_deadline {
+            let timeout = Some(std::time::Duration::from_millis(100));
+            let _ = self.poll.poll(&mut events, timeout);
+
+            // Process any incoming packets (connection close acks)
+            for event in events.iter() {
+                if event.token() == SOCKET_TOKEN {
+                    let _ = self.process_socket();
+                }
+            }
+
+            // Process timeouts so quiche can advance connection state
+            self.process_timeouts();
+
+            // Send any pending close frames
+            self.send_pending()?;
+
+            // Check if all connections are closed
+            if self.clients.values().all(|c| c.conn.is_closed()) {
+                log::info!("All connections drained successfully");
+                break;
+            }
+        }
+
+        let remaining = self
+            .clients
+            .values()
+            .filter(|c| !c.conn.is_closed())
+            .count();
+        if remaining > 0 {
+            log::warn!(
+                "{} connections did not close within drain period",
+                remaining
+            );
+        }
+
+        log::info!("Graceful shutdown complete");
+        Ok(())
     }
 
     /// 6B.1: Reload TLS configuration from disk (triggered by SIGHUP).

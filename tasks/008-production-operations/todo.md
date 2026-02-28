@@ -1,11 +1,11 @@
 # TODO: Production Operations
 
 **Task ID:** 008-production-operations
-**Status:** Not Started
+**Status:** In Progress
 **Priority:** P2
 **Depends On:** 007-security-hardening
-**Branch:** (not yet created)
-**Last Updated:** 2026-02-21
+**Branch:** feature/008-production-operations
+**Last Updated:** 2026-02-27
 
 ---
 
@@ -17,12 +17,13 @@ Track implementation tasks for monitoring, graceful shutdown, Connector auto-rec
 
 ## Phase 1: Connector Auto-Reconnection
 
-- [ ] Add reconnection loop to App Connector main()
-- [ ] Implement exponential backoff (1s → 30s cap)
-- [ ] Re-register service after reconnect
-- [ ] Re-establish P2P listener after reconnect
-- [ ] Test: restart Intermediate, Connector auto-recovers
-- [ ] Remove dependency on systemd restart for liveness
+- [x] Add reconnection loop to App Connector run() — replaces `break` with backoff loop
+- [x] Implement exponential backoff (1s → 30s cap) — RECONNECT_INITIAL_DELAY_MS, RECONNECT_MAX_DELAY_MS
+- [x] Re-register service after reconnect — reg_state reset to NotRegistered, maybe_register() handles
+- [x] Re-establish P2P listener after reconnect — P2P clients unaffected (separate connections)
+- [x] SIGTERM handler for clean exit during reconnection — signal-hook AtomicBool pattern
+- [ ] Test: restart Intermediate, Connector auto-recovers (requires live test)
+- [x] Remove dependency on systemd restart for liveness
 
 ## Phase 2: Monitoring
 
@@ -34,10 +35,12 @@ Track implementation tasks for monitoring, graceful shutdown, Connector auto-rec
 
 ## Phase 3: Graceful Shutdown
 
-- [ ] Handle SIGTERM in Intermediate Server (drain connections)
-- [ ] Implement Connector deregistration on shutdown
-- [ ] Notify Agents of service unavailability
-- [ ] Test zero-downtime restart
+- [x] Handle SIGTERM in Intermediate Server (drain connections) — drain_and_shutdown(), 3s drain period
+- [x] Handle SIGINT in Intermediate Server — same shutdown_flag
+- [x] Handle SIGTERM in App Connector — clean loop exit
+- [x] Implement connection draining — APPLICATION_CLOSE (0x00) to all clients, poll for close acks
+- [ ] Notify Agents of service unavailability (deferred — agents detect connection close via QUIC)
+- [ ] Test zero-downtime restart (requires live test)
 
 ## Phase 4: Deployment Automation
 
@@ -56,12 +59,12 @@ Track implementation tasks for monitoring, graceful shutdown, Connector auto-rec
 ## Oracle Findings (Cross-Cutting)
 
 ### Finding 7 (High): Local UDP Injection
-- [ ] Validate source address in `process_local_socket()` against expected `forward_addr`
-- [ ] Drop packets from unexpected sources with `log::warn!()`
-- [ ] Coordinate with Task 009 if multi-service routing changes validation model
-- [ ] Add test: UDP from unexpected source address is dropped
+- [x] Validate source address in `process_local_socket()` against expected `forward_addr` IP
+- [x] Drop packets from unexpected sources with `log::warn!()`
+- [x] Coordinate with Task 009 if multi-service routing changes validation model (noted — IP-based validation)
+- [ ] Add test: UDP from unexpected source address is dropped (network mock needed)
 
 ### Finding 14 (Low): Recv Buffer Allocation
-- [ ] Refactor `process_local_socket()` to reuse `self.recv_buf` instead of allocating `vec![0u8; 65535]`
-- [ ] Adjust borrow scopes to allow `&mut self` access alongside buffer use
-- [ ] Add benchmark: measure allocation reduction in high-PPS scenarios
+- [x] Refactor `process_local_socket()` to reuse `self.recv_buf` instead of allocating `vec![0u8; 65535]`
+- [x] Adjust borrow scopes — copy received data via `to_vec()` before calling `&mut self` methods
+- [ ] Add benchmark: measure allocation reduction in high-PPS scenarios (deferred — perf optimization)

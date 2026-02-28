@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -105,6 +107,19 @@ const QUIC_SOCKET_TOKEN: Token = Token(0);
 
 /// mio token for local forwarding socket
 const LOCAL_SOCKET_TOKEN: Token = Token(1);
+
+// ============================================================================
+// Reconnection Constants
+// ============================================================================
+
+/// Initial delay before first reconnection attempt (1 second)
+const RECONNECT_INITIAL_DELAY_MS: u64 = 1_000;
+
+/// Maximum delay between reconnection attempts (30 seconds)
+const RECONNECT_MAX_DELAY_MS: u64 = 30_000;
+
+/// Backoff multiplier for reconnection delay
+const RECONNECT_BACKOFF_FACTOR: u64 = 2;
 
 // ============================================================================
 // P2P Binding Messages (must match packet_processor::p2p::connectivity)
@@ -432,6 +447,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::warn!("TLS peer verification DISABLED — do not use in production");
     }
 
+    // Register SIGTERM handler for graceful shutdown
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown_flag))?;
+        log::info!("SIGTERM handler registered for graceful shutdown");
+    }
+
     // Create connector and run
     let mut connector = Connector::new(
         server_addr,
@@ -444,6 +467,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_virtual_ip,
         ca_cert.as_deref(),
         verify_peer,
+        shutdown_flag,
     )?;
     connector.run()
 }
@@ -520,6 +544,10 @@ struct Connector {
     tcp_syn_rates: HashMap<Ipv4Addr, (Instant, u32)>,
     /// 8B.3: Last time CID rotation was performed
     last_cid_rotation: Instant,
+    /// Consecutive reconnection attempts (reset to 0 on success)
+    reconnect_attempts: u32,
+    /// Shared shutdown flag — set by SIGTERM handler
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 impl Connector {
@@ -535,6 +563,7 @@ impl Connector {
         service_virtual_ip: Option<Ipv4Addr>,
         ca_cert_path: Option<&str>,
         verify_peer: bool,
+        shutdown_flag: Arc<AtomicBool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create quiche client configuration (for connecting to Intermediate)
         let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -651,6 +680,8 @@ impl Connector {
             service_virtual_ip,
             tcp_syn_rates: HashMap::new(),
             last_cid_rotation: Instant::now(),
+            reconnect_attempts: 0,
+            shutdown_flag,
         })
     }
 
@@ -671,6 +702,12 @@ impl Connector {
         let mut events = Events::with_capacity(1024);
 
         loop {
+            // Check for SIGTERM shutdown signal
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                log::info!("Shutdown signal received, exiting main loop");
+                break;
+            }
+
             // Calculate timeout based on all connection timeouts
             let timeout = self
                 .calculate_min_timeout()
@@ -729,12 +766,78 @@ impl Connector {
                 log::debug!("Cleaned up expired P2P session {}", session_id);
             }
 
-            // Check connection states
+            // Check if Intermediate connection is closed — attempt reconnection
             if let Some(ref conn) = self.intermediate_conn {
                 if conn.is_closed() {
-                    log::warn!("Intermediate connection closed");
-                    // Reconnect logic could go here
-                    break;
+                    log::warn!("Intermediate connection closed, attempting reconnection...");
+
+                    // Clean up old connection state
+                    self.intermediate_conn = None;
+                    self.reg_state = RegistrationState::NotRegistered;
+                    self.signaling_buffer.clear();
+
+                    // Reconnection loop with exponential backoff
+                    loop {
+                        // Check shutdown before each attempt
+                        if self.shutdown_flag.load(Ordering::Relaxed) {
+                            log::info!("Shutdown signal received during reconnection");
+                            return Ok(());
+                        }
+
+                        // Calculate backoff delay: initial * factor^attempts, capped
+                        let delay_ms = RECONNECT_INITIAL_DELAY_MS
+                            .saturating_mul(
+                                RECONNECT_BACKOFF_FACTOR.saturating_pow(self.reconnect_attempts),
+                            )
+                            .min(RECONNECT_MAX_DELAY_MS);
+
+                        log::info!(
+                            "Reconnect attempt {} — waiting {}ms before retry",
+                            self.reconnect_attempts + 1,
+                            delay_ms
+                        );
+                        std::thread::sleep(Duration::from_millis(delay_ms));
+
+                        // Check shutdown again after sleeping
+                        if self.shutdown_flag.load(Ordering::Relaxed) {
+                            log::info!("Shutdown signal received during reconnection backoff");
+                            return Ok(());
+                        }
+
+                        self.reconnect_attempts += 1;
+
+                        match self.connect_to_intermediate() {
+                            Ok(()) => {
+                                // Send initial handshake packet for the new connection
+                                if let Err(e) = self.send_pending() {
+                                    log::error!("Failed to send handshake after reconnect: {}", e);
+                                    self.intermediate_conn = None;
+                                    continue;
+                                }
+                                log::info!(
+                                    "Successfully reconnected to Intermediate Server \
+                                     (after {} attempt{})",
+                                    self.reconnect_attempts,
+                                    if self.reconnect_attempts == 1 {
+                                        ""
+                                    } else {
+                                        "s"
+                                    }
+                                );
+                                self.reconnect_attempts = 0;
+                                self.last_keepalive = Instant::now();
+                                self.last_cid_rotation = Instant::now();
+                                break;
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "Reconnection attempt {} failed: {}",
+                                    self.reconnect_attempts,
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1971,16 +2074,23 @@ impl Connector {
     }
 
     fn process_local_socket(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut buf = vec![0u8; 65535];
-
         loop {
-            match self.local_socket.recv_from(&mut buf) {
+            match self.local_socket.recv_from(&mut self.recv_buf) {
                 Ok((len, from)) => {
+                    // Validate source address — only accept traffic from the expected backend
+                    if from.ip() != self.forward_addr.ip() {
+                        log::warn!(
+                            "Dropping UDP from unexpected source {}, expected {}",
+                            from.ip(),
+                            self.forward_addr.ip()
+                        );
+                        continue;
+                    }
+
                     log::trace!("Received {} bytes from local service at {}", len, from);
 
-                    // For MVP, we need to re-encapsulate and send back
-                    // Find the original flow to construct return packet
-                    self.send_return_traffic(&buf[..len], from)?;
+                    let data = self.recv_buf[..len].to_vec();
+                    self.send_return_traffic(&data, from)?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => {
