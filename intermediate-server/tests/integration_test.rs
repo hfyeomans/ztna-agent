@@ -29,7 +29,8 @@ impl ServerProcess {
             return Err("Failed to build intermediate server".into());
         }
 
-        // Start the server (--disable-retry for basic connectivity tests)
+        // Start the server (--disable-retry for basic connectivity tests,
+        // --metrics-port 0 to skip TCP listener in test environment)
         let child = Command::new("cargo")
             .args([
                 "run",
@@ -39,6 +40,8 @@ impl ServerProcess {
                 "certs/cert.pem",
                 "certs/key.pem",
                 "--disable-retry",
+                "--metrics-port",
+                "0",
             ])
             .env("RUST_LOG", "info")
             .spawn()?;

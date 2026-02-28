@@ -22,6 +22,7 @@ use mio::net::{TcpStream as MioTcpStream, UdpSocket};
 use mio::{Events, Interest, Poll, Token};
 use ring::rand::{SecureRandom, SystemRandom};
 
+mod metrics;
 mod qad;
 mod signaling;
 
@@ -107,6 +108,9 @@ const QUIC_SOCKET_TOKEN: Token = Token(0);
 
 /// mio token for local forwarding socket
 const LOCAL_SOCKET_TOKEN: Token = Token(1);
+
+/// mio token for the metrics/health HTTP listener
+const METRICS_TOKEN: Token = Token(2);
 
 // ============================================================================
 // Reconnection Constants
@@ -284,6 +288,7 @@ struct ConnectorConfig {
     p2p: Option<P2PConfig>,
     ca_cert: Option<String>,
     verify_peer: Option<bool>,
+    metrics_port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -442,7 +447,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ip
         );
     }
+    // Metrics/health HTTP endpoint (default 9091, 0 to disable)
+    let metrics_port: u16 = parse_arg(&args, "--metrics-port")
+        .and_then(|s| s.parse().ok())
+        .or(config.metrics_port)
+        .unwrap_or(9091);
+
     log::info!("  Verify peer: {}", verify_peer);
+    if metrics_port > 0 {
+        log::info!("  Metrics port: {}", metrics_port);
+    } else {
+        log::info!("  Metrics: disabled");
+    }
     if !verify_peer {
         log::warn!("TLS peer verification DISABLED — do not use in production");
     }
@@ -468,6 +484,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ca_cert.as_deref(),
         verify_peer,
         shutdown_flag,
+        metrics_port,
     )?;
     connector.run()
 }
@@ -548,6 +565,11 @@ struct Connector {
     reconnect_attempts: u32,
     /// Shared shutdown flag — set by SIGTERM handler
     shutdown_flag: Arc<AtomicBool>,
+    // Phase 2: Prometheus metrics + health check
+    /// Atomic metrics counters
+    metrics: metrics::Metrics,
+    /// TCP listener for metrics/health HTTP endpoint (None if disabled)
+    metrics_listener: Option<mio::net::TcpListener>,
 }
 
 impl Connector {
@@ -564,6 +586,7 @@ impl Connector {
         ca_cert_path: Option<&str>,
         verify_peer: bool,
         shutdown_flag: Arc<AtomicBool>,
+        metrics_port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create quiche client configuration (for connecting to Intermediate)
         let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -652,6 +675,18 @@ impl Connector {
         log::info!("QUIC socket bound to {}", quic_socket.local_addr()?);
         log::info!("Local socket bound to {}", local_socket.local_addr()?);
 
+        // Phase 2: Bind metrics/health HTTP listener (if enabled)
+        let metrics_listener = if metrics_port > 0 {
+            let metrics_addr: SocketAddr = format!("0.0.0.0:{}", metrics_port).parse()?;
+            let mut listener = mio::net::TcpListener::bind(metrics_addr)?;
+            poll.registry()
+                .register(&mut listener, METRICS_TOKEN, Interest::READABLE)?;
+            log::info!("Metrics/health endpoint listening on {}", metrics_addr);
+            Some(listener)
+        } else {
+            None
+        };
+
         Ok(Connector {
             poll,
             quic_socket,
@@ -671,7 +706,7 @@ impl Connector {
             observed_addr: None,
             flow_map: HashMap::new(),
             tcp_sessions: HashMap::new(),
-            next_tcp_token: 2, // 0 = QUIC_SOCKET_TOKEN, 1 = LOCAL_SOCKET_TOKEN
+            next_tcp_token: 3, // 0 = QUIC, 1 = LOCAL, 2 = METRICS
             token_to_flow: HashMap::new(),
             signaling_buffer: Vec::new(),
             session_manager: P2PSessionManager::new(),
@@ -682,6 +717,8 @@ impl Connector {
             last_cid_rotation: Instant::now(),
             reconnect_attempts: 0,
             shutdown_flag,
+            metrics: metrics::Metrics::new(),
+            metrics_listener,
         })
     }
 
@@ -725,6 +762,9 @@ impl Connector {
                     }
                     LOCAL_SOCKET_TOKEN => {
                         self.process_local_socket()?;
+                    }
+                    METRICS_TOKEN => {
+                        self.handle_metrics_accept();
                     }
                     token => {
                         // 7A.4: TCP backend socket event
@@ -814,6 +854,9 @@ impl Connector {
                                     self.intermediate_conn = None;
                                     continue;
                                 }
+                                self.metrics
+                                    .reconnections_total
+                                    .fetch_add(1, Ordering::Relaxed);
                                 log::info!(
                                     "Successfully reconnected to Intermediate Server \
                                      (after {} attempt{})",
@@ -1403,6 +1446,12 @@ impl Connector {
         // Forward payload to local service
         match self.local_socket.send_to(payload, self.forward_addr) {
             Ok(sent) => {
+                self.metrics
+                    .forwarded_packets_total
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .forwarded_bytes_total
+                    .fetch_add(sent as u64, Ordering::Relaxed);
                 log::trace!("Sent {} bytes to local service", sent);
             }
             Err(e) => {
@@ -1607,6 +1656,9 @@ impl Connector {
 
                         self.token_to_flow.insert(token, flow_key);
                         self.tcp_sessions.insert(flow_key, session);
+                        self.metrics
+                            .tcp_sessions_total
+                            .fetch_add(1, Ordering::Relaxed);
                         log::debug!(
                             "TCP non-blocking connect initiated to {} (token={:?})",
                             self.forward_addr,
@@ -1616,6 +1668,9 @@ impl Connector {
                 }
                 Err(e) => {
                     log::warn!("TCP connect to {} failed: {}", self.forward_addr, e);
+                    self.metrics
+                        .tcp_errors_total
+                        .fetch_add(1, Ordering::Relaxed);
                     packets_to_send.push(build_tcp_packet(
                         dst_ip,
                         dst_port,
@@ -1691,6 +1746,12 @@ impl Connector {
                     if !payload.is_empty() && !session.draining {
                         match session.stream.write(payload) {
                             Ok(n) => {
+                                self.metrics
+                                    .forwarded_packets_total
+                                    .fetch_add(1, Ordering::Relaxed);
+                                self.metrics
+                                    .forwarded_bytes_total
+                                    .fetch_add(n as u64, Ordering::Relaxed);
                                 session.their_seq = seq_num.wrapping_add(n as u32);
                                 packets_to_send.push(build_tcp_packet(
                                     dst_ip,
@@ -1715,6 +1776,9 @@ impl Connector {
                                 log::trace!("TCP write WouldBlock for {}:{}", src_ip, src_port);
                             }
                             Err(e) => {
+                                self.metrics
+                                    .tcp_errors_total
+                                    .fetch_add(1, Ordering::Relaxed);
                                 log::debug!("TCP write to backend failed: {}", e);
                                 packets_to_send.push(build_tcp_packet(
                                     dst_ip,
@@ -1879,6 +1943,9 @@ impl Connector {
                                     session.agent_port,
                                     e
                                 );
+                                self.metrics
+                                    .tcp_errors_total
+                                    .fetch_add(1, Ordering::Relaxed);
                                 packets_to_send.push(build_tcp_packet(
                                     session.service_ip,
                                     session.service_port,
@@ -1931,6 +1998,12 @@ impl Connector {
                                     break;
                                 }
                                 Ok(n) => {
+                                    self.metrics
+                                        .forwarded_packets_total
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    self.metrics
+                                        .forwarded_bytes_total
+                                        .fetch_add(n as u64, Ordering::Relaxed);
                                     packets_to_send.push(build_tcp_packet(
                                         session.service_ip,
                                         session.service_port,
@@ -1959,6 +2032,9 @@ impl Connector {
                                         session.agent_port,
                                         e
                                     );
+                                    self.metrics
+                                        .tcp_errors_total
+                                        .fetch_add(1, Ordering::Relaxed);
                                     packets_to_send.push(build_tcp_packet(
                                         session.service_ip,
                                         session.service_port,
@@ -2385,6 +2461,59 @@ impl Connector {
         }
 
         Ok(())
+    }
+
+    /// Phase 2: Accept and handle a metrics/health HTTP connection.
+    ///
+    /// Metrics connections are short-lived (Prometheus scrapes), so we handle them
+    /// synchronously: accept, read the HTTP request line, write the response, close.
+    fn handle_metrics_accept(&self) {
+        let listener = match self.metrics_listener {
+            Some(ref l) => l,
+            None => return,
+        };
+
+        // Accept all pending connections (edge-triggered)
+        loop {
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    log::debug!("Metrics connection from {}", addr);
+                    self.handle_metrics_connection(stream);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    log::debug!("Metrics accept error: {:?}", e);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Handle a single metrics/health HTTP request synchronously.
+    fn handle_metrics_connection(&self, stream: mio::net::TcpStream) {
+        let mut buf = [0u8; 1024];
+        match (&stream).read(&mut buf) {
+            Ok(n) if n > 0 => {
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let response = if request.contains("GET /healthz") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok\n".to_string()
+                } else if request.contains("GET /metrics") {
+                    let body = self.metrics.render();
+                    format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/plain; version=0.0.4\r\n\
+                         Content-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                };
+                let _ = (&stream).write_all(response.as_bytes());
+            }
+            Ok(_) => {}
+            Err(e) => log::debug!("Metrics connection read error: {:?}", e),
+        }
     }
 
     fn cleanup_closed_p2p(&mut self) {

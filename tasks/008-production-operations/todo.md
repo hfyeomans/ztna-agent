@@ -44,9 +44,10 @@ Track implementation tasks for monitoring, graceful shutdown, Connector auto-rec
 
 ## Phase 4: Deployment Automation
 
-- [ ] Create Terraform module for AWS (VPC, EC2, SG, EIP)
-- [ ] Create Ansible playbook for service deployment
-- [ ] Create container images for Intermediate + Connector
+- [x] Create Terraform module for AWS (VPC, EC2, SG, EIP) — deploy/terraform/
+- [x] Create Ansible playbook for service deployment — deploy/ansible/
+- [x] Create production Dockerfiles for Intermediate + Connector — deploy/docker/
+- [x] Create deploy/README.md documenting all deployment options
 - [ ] Update k8s manifests for production
 
 ## Phase 5: CI/CD

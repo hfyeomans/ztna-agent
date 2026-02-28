@@ -6,7 +6,7 @@
 //! - Relays DATAGRAM frames between matched pairs
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Read as _, Write as _};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +22,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 mod auth;
 mod client;
+mod metrics;
 mod qad;
 mod registry;
 mod signaling;
@@ -66,6 +67,9 @@ const DEFAULT_PORT: u16 = 4433;
 /// mio token for the UDP socket
 const SOCKET_TOKEN: Token = Token(0);
 
+/// mio token for the metrics/health HTTP listener
+const METRICS_TOKEN: Token = Token(1);
+
 /// 7B: Maximum age for retry tokens (seconds)
 const RETRY_TOKEN_MAX_AGE_SECS: u64 = 60;
 
@@ -93,6 +97,7 @@ struct ServerConfig {
     verify_peer: Option<bool>,
     require_client_cert: Option<bool>,
     disable_retry: Option<bool>,
+    metrics_port: Option<u16>,
 }
 
 fn load_config(path: &str) -> Result<ServerConfig, Box<dyn std::error::Error>> {
@@ -195,6 +200,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         !config.disable_retry.unwrap_or(false)
     };
 
+    // Metrics/health HTTP endpoint (default 9090, 0 to disable)
+    let metrics_port: u16 = parse_arg(&args, "--metrics-port")
+        .and_then(|s| s.parse().ok())
+        .or(config.metrics_port)
+        .unwrap_or(9090);
+
     // L2: Validate cert/key paths exist at startup
     if !Path::new(&cert_path).exists() {
         log::error!("Certificate file not found: {}", cert_path);
@@ -217,6 +228,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  Verify peer: {}", verify_peer);
     log::info!("  Require client cert: {}", require_client_cert);
     log::info!("  Stateless retry: {}", enable_retry);
+    if metrics_port > 0 {
+        log::info!("  Metrics port: {}", metrics_port);
+    } else {
+        log::info!("  Metrics: disabled");
+    }
     if !verify_peer {
         log::warn!("TLS peer verification DISABLED — do not use in production");
     }
@@ -249,6 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reload_flag,
         shutdown_flag,
         enable_retry,
+        metrics_port,
     )?;
     server.run()
 }
@@ -309,6 +326,11 @@ struct Server {
     cid_aliases: HashMap<quiche::ConnectionId<'static>, quiche::ConnectionId<'static>>,
     /// Last time CID rotation was performed
     last_cid_rotation: Instant,
+    // Phase 2: Prometheus metrics + health check
+    /// Atomic metrics counters
+    metrics: metrics::Metrics,
+    /// TCP listener for metrics/health HTTP endpoint (None if disabled)
+    metrics_listener: Option<mio::net::TcpListener>,
 }
 
 impl Server {
@@ -325,6 +347,7 @@ impl Server {
         reload_flag: Arc<AtomicBool>,
         shutdown_flag: Arc<AtomicBool>,
         enable_retry: bool,
+        metrics_port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Parse external address if provided (for NAT environments like AWS Elastic IP)
         let external_addr: Option<SocketAddr> = if let Some(ext_ip) = external_ip {
@@ -374,6 +397,18 @@ impl Server {
         poll.registry()
             .register(&mut socket, SOCKET_TOKEN, Interest::READABLE)?;
 
+        // Phase 2: Bind metrics/health HTTP listener (if enabled)
+        let metrics_listener = if metrics_port > 0 {
+            let metrics_addr: SocketAddr = format!("{}:{}", bind_addr, metrics_port).parse()?;
+            let mut listener = mio::net::TcpListener::bind(metrics_addr)?;
+            poll.registry()
+                .register(&mut listener, METRICS_TOKEN, Interest::READABLE)?;
+            log::info!("Metrics/health endpoint listening on {}", metrics_addr);
+            Some(listener)
+        } else {
+            None
+        };
+
         // 7B.1: Generate AEAD key for retry tokens
         let rng = SystemRandom::new();
         let mut key_bytes = [0u8; 32]; // AES-256-GCM
@@ -411,6 +446,8 @@ impl Server {
             retry_key,
             cid_aliases: HashMap::new(),
             last_cid_rotation: Instant::now(),
+            metrics: metrics::Metrics::new(),
+            metrics_listener,
         })
     }
 
@@ -438,8 +475,14 @@ impl Server {
 
             // Process socket events
             for event in events.iter() {
-                if event.token() == SOCKET_TOKEN {
-                    self.process_socket()?;
+                match event.token() {
+                    SOCKET_TOKEN => {
+                        self.process_socket()?;
+                    }
+                    METRICS_TOKEN => {
+                        self.handle_metrics_accept();
+                    }
+                    _ => {}
                 }
             }
 
@@ -544,6 +587,59 @@ impl Server {
 
         log::info!("Graceful shutdown complete");
         Ok(())
+    }
+
+    /// Phase 2: Accept and handle a metrics/health HTTP connection.
+    ///
+    /// Metrics connections are short-lived (Prometheus scrapes), so we handle them
+    /// synchronously: accept, read the HTTP request line, write the response, close.
+    fn handle_metrics_accept(&self) {
+        let listener = match self.metrics_listener {
+            Some(ref l) => l,
+            None => return,
+        };
+
+        // Accept all pending connections (edge-triggered)
+        loop {
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    log::debug!("Metrics connection from {}", addr);
+                    self.handle_metrics_connection(stream);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    log::debug!("Metrics accept error: {:?}", e);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Handle a single metrics/health HTTP request synchronously.
+    fn handle_metrics_connection(&self, stream: mio::net::TcpStream) {
+        let mut buf = [0u8; 1024];
+        match (&stream).read(&mut buf) {
+            Ok(n) if n > 0 => {
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let response = if request.contains("GET /healthz") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok\n".to_string()
+                } else if request.contains("GET /metrics") {
+                    let body = self.metrics.render();
+                    format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/plain; version=0.0.4\r\n\
+                         Content-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                };
+                let _ = (&stream).write_all(response.as_bytes());
+            }
+            Ok(_) => {}
+            Err(e) => log::debug!("Metrics connection read error: {:?}", e),
+        }
     }
 
     /// 6B.1: Reload TLS configuration from disk (triggered by SIGHUP).
@@ -788,8 +884,16 @@ impl Server {
 
             // Has token — validate it
             match self.validate_retry_token(token_data, from) {
-                Some(original_dcid) => Some(original_dcid),
+                Some(original_dcid) => {
+                    self.metrics
+                        .retry_tokens_validated
+                        .fetch_add(1, Ordering::Relaxed);
+                    Some(original_dcid)
+                }
                 None => {
+                    self.metrics
+                        .retry_token_failures
+                        .fetch_add(1, Ordering::Relaxed);
                     log::warn!("Invalid retry token from {}", from);
                     return Ok(());
                 }
@@ -833,6 +937,9 @@ impl Server {
 
         // Store the connection (use our generated scid)
         self.clients.insert(scid_owned.clone(), client);
+        self.metrics
+            .active_connections
+            .fetch_add(1, Ordering::Relaxed);
 
         // Feed the Initial packet to the new connection so the handshake
         // can proceed. quiche::accept() creates the connection but does not
@@ -1061,6 +1168,9 @@ impl Server {
                 );
                 // 8A.2: Send NACK for invalid UTF-8
                 self.send_registration_nack(conn_id, &[], 0x01);
+                self.metrics
+                    .registration_rejections_total
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
         };
@@ -1091,6 +1201,9 @@ impl Server {
                             );
                             // 8A.2: Send NACK for auth denial
                             self.send_registration_nack(conn_id, service_id.as_bytes(), 0x02);
+                            self.metrics
+                                .registration_rejections_total
+                                .fetch_add(1, Ordering::Relaxed);
                             return Ok(());
                         }
                     }
@@ -1113,6 +1226,9 @@ impl Server {
 
         // 8A.2: Send ACK after successful registration
         self.send_registration_ack(conn_id, &service_id);
+        self.metrics
+            .registrations_total
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -1199,6 +1315,12 @@ impl Server {
             );
             match dest_client.conn.dgram_send(dgram) {
                 Ok(_) => {
+                    self.metrics
+                        .datagrams_relayed_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .relay_bytes_total
+                        .fetch_add(dgram.len() as u64, Ordering::Relaxed);
                     log::debug!(
                         "Relayed {} bytes from {:?} to {:?}",
                         dgram.len(),
@@ -1286,6 +1408,12 @@ impl Server {
         if let Some(dest_client) = self.clients.get_mut(&dest_conn_id) {
             match dest_client.conn.dgram_send(ip_packet) {
                 Ok(_) => {
+                    self.metrics
+                        .datagrams_relayed_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .relay_bytes_total
+                        .fetch_add(ip_packet.len() as u64, Ordering::Relaxed);
                     log::debug!(
                         "Relayed {} bytes for '{}' from {:?} to {:?}",
                         ip_packet.len(),
@@ -1485,6 +1613,9 @@ impl Server {
                     from_conn_id.clone(),
                     candidates.clone(),
                 );
+                self.metrics
+                    .signaling_sessions_total
+                    .fetch_add(1, Ordering::Relaxed);
 
                 // Forward CandidateOffer to Connector
                 self.forward_signaling_message(
@@ -1778,6 +1909,7 @@ impl Server {
             .map(|(id, _)| id.clone())
             .collect();
 
+        let removed_count = closed.len() as u64;
         for conn_id in closed {
             log::info!("Connection closed: {:?}", conn_id);
             self.registry.unregister(&conn_id);
@@ -1785,6 +1917,11 @@ impl Server {
             // 8B.2: Remove any CID aliases pointing to this connection
             self.cid_aliases
                 .retain(|_, canonical| *canonical != conn_id);
+        }
+        if removed_count > 0 {
+            self.metrics
+                .active_connections
+                .fetch_sub(removed_count, Ordering::Relaxed);
         }
     }
 
