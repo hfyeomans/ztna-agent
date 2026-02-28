@@ -41,7 +41,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [005a](../done/005a-swift-agent-integration/) | Swift Agent Integration | ✅ Complete | `master` |
 | [006](../done/006-cloud-deployment/) | Cloud Deployment | ✅ Complete (MVP) | `master` (PR #7 merged) |
 | [007](../done/007-security-hardening/) | Security Hardening | ✅ Complete (Phases 1-8, PR #8 merged) | `master` |
-| [008](../008-production-operations/) | Production Operations | ✅ Complete | `feature/008-production-operations` |
+| [008](../done/008-production-operations/) | Production Operations | ✅ Complete | `master` (PR #11 merged) |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | ⏳ Not Started | — |
 | [010](../010-admin-dashboard/) | Admin Dashboard | ⏳ Not Started | — |
 | [011](../011-protocol-improvements/) | Protocol Improvements | ⏳ Not Started | — |
@@ -636,7 +636,7 @@ See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementati
 | Task | Name | Priority | Description | Dependencies |
 |------|------|----------|-------------|--------------|
 | ~~[007](../done/007-security-hardening/)~~ | ~~Security Hardening~~ | ~~Done~~ | ~~26 findings + 6 deferred items: mTLS, cert renewal, non-blocking TCP, retry tokens, reg ACK, CID rotation~~ | ~~None~~ |
-| ~~[008](../008-production-operations/)~~ | ~~Production Operations~~ | ~~Done~~ | ~~Prometheus metrics, graceful shutdown, auto-reconnection, deployment automation (Terraform/Ansible/Docker), CI/CD (test+release). +Oracle: UDP injection fix, buffer reuse~~ | ~~007 ✅~~ |
+| ~~[008](../done/008-production-operations/)~~ | ~~Production Operations~~ | ~~Done~~ | ~~Prometheus metrics, graceful shutdown, auto-reconnection, deployment automation (Terraform/Ansible/Docker), CI/CD (test+release). +Oracle: UDP injection fix, buffer reuse~~ | ~~007 ✅~~ |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | P2 | Per-service backend routing, dynamic discovery, health checks. **+Oracle:** signaling hijack, cross-tenant routing fixes | None |
 | [010](../010-admin-dashboard/) | Admin Dashboard | P3 | REST API on Intermediate, web frontend, topology visualization. **Note:** MVP admin panel now in Task 016; Task 010 extends it | 008, 009, 016 |
 | [011](../011-protocol-improvements/) | Protocol Improvements | P3 | IPv6 QAD, TCP flow control, separate P2P/relay sockets, QUIC migration, 0-RTT. **+Oracle:** IPv6 panic, predictable IDs, endian bug, DATAGRAM size | None |
