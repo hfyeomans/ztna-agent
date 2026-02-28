@@ -714,7 +714,7 @@ Findings from the initial Oracle code review that were NOT in Task 007's 26-find
 - ✅ Task 014: PR Comment GraphQL Hardening — Complete
 - ✅ Task 015: Oracle Quick Fixes — IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity
 - ⚠️ Oracle Review: 3 High + 2 Medium findings remain open (signaling hijack, cross-tenant routing, local UDP injection, DATAGRAM size, endian bug)
-- 🔲 Task 008: Production Operations (P2) — Monitoring, CI/CD, automation + Oracle: local UDP injection
+- ✅ Task 008: Production Operations (P2) — Metrics, graceful shutdown, auto-reconnect, deployment automation (PR #11)
 - 🔲 Task 009: Multi-Service Architecture (P2) — Per-service backends, discovery + Oracle: signaling hijack, cross-tenant routing
 - 🔲 Task 010: Admin Dashboard (P3) — Web UI for management
 - 🔲 Task 011: Protocol Improvements (P3) — IPv6 full support, TCP flow, QUIC migration + Oracle: endian bug, DATAGRAM size

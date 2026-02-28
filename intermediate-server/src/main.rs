@@ -621,9 +621,13 @@ impl Server {
         match (&stream).read(&mut buf) {
             Ok(n) if n > 0 => {
                 let request = String::from_utf8_lossy(&buf[..n]);
-                let response = if request.starts_with("GET /healthz") {
+                let response = if request.starts_with("GET /healthz ")
+                    || request.starts_with("GET /healthz\r")
+                {
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok\n".to_string()
-                } else if request.starts_with("GET /metrics") {
+                } else if request.starts_with("GET /metrics ")
+                    || request.starts_with("GET /metrics\r")
+                {
                     let body = self.metrics.render();
                     format!(
                         "HTTP/1.1 200 OK\r\n\
