@@ -470,8 +470,13 @@ impl Server {
             // Calculate timeout based on earliest connection timeout
             let timeout = self.clients.values().filter_map(|c| c.conn.timeout()).min();
 
-            // Poll for events
-            self.poll.poll(&mut events, timeout)?;
+            // Poll for events (EINTR from SIGTERM is expected — continue to check shutdown_flag)
+            if let Err(e) = self.poll.poll(&mut events, timeout) {
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e.into());
+            }
 
             // Process socket events
             for event in events.iter() {

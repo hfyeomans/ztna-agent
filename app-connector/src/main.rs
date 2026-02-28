@@ -751,8 +751,13 @@ impl Connector {
                 .map(|t| t.min(Duration::from_millis(100)))
                 .or(Some(Duration::from_millis(100)));
 
-            // Poll for events
-            self.poll.poll(&mut events, timeout)?;
+            // Poll for events (EINTR from SIGTERM is expected — continue to check shutdown_flag)
+            if let Err(e) = self.poll.poll(&mut events, timeout) {
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e.into());
+            }
 
             // Process events
             for event in events.iter() {
