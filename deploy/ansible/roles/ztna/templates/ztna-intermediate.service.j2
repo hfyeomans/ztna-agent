@@ -12,9 +12,12 @@ ExecStart={{ ztna_install_dir }}/intermediate-server/target/release/intermediate
     --port {{ intermediate_port }} \
     --cert {{ intermediate_cert }} \
     --key {{ intermediate_key }} \
-    --bind {{ intermediate_bind_addr }}{% if intermediate_ca_cert != "" %} \
+    --bind {{ intermediate_bind_addr }} \
+    --metrics-port {{ intermediate_metrics_port }}{% if intermediate_ca_cert != "" %} \
     --ca-cert {{ intermediate_ca_cert }}{% endif %}{% if intermediate_require_client_cert %} \
-    --require-client-cert{% endif %}
+    --require-client-cert{% endif %}{% if intermediate_disable_retry %} \
+    --disable-retry{% endif %}{% if intermediate_no_verify_peer %} \
+    --no-verify-peer{% endif %}
 
 Environment=RUST_LOG=info
 Restart=on-failure

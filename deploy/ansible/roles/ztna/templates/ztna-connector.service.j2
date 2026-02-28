@@ -11,7 +11,14 @@ WorkingDirectory={{ ztna_install_dir }}
 ExecStart={{ ztna_install_dir }}/app-connector/target/release/app-connector \
     --server {{ connector_server }} \
     --service {{ connector_service_id }} \
-    --forward {{ connector_forward }}
+    --forward {{ connector_forward }} \
+    --metrics-port {{ connector_metrics_port }}{% if connector_p2p_cert != "" %} \
+    --p2p-cert {{ connector_p2p_cert }}{% endif %}{% if connector_p2p_key != "" %} \
+    --p2p-key {{ connector_p2p_key }}{% endif %}{% if connector_p2p_listen_port != 4434 %} \
+    --p2p-listen-port {{ connector_p2p_listen_port }}{% endif %}{% if connector_external_ip != "" %} \
+    --external-ip {{ connector_external_ip }}{% endif %}{% if connector_ca_cert != "" %} \
+    --ca-cert {{ connector_ca_cert }}{% endif %}{% if connector_no_verify_peer %} \
+    --no-verify-peer{% endif %}
 Environment=RUST_LOG=info
 Restart=on-failure
 RestartSec=5

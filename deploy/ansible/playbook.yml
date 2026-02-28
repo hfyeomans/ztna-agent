@@ -32,10 +32,22 @@
     intermediate_ca_cert: ""
     intermediate_require_client_cert: false
 
+    # Intermediate Server — Task 007 security
+    intermediate_disable_retry: false
+    intermediate_no_verify_peer: false
+    intermediate_metrics_port: 9090
+
     # App Connector
     connector_server: "127.0.0.1:4433"
     connector_service_id: "echo-service"
     connector_forward: "127.0.0.1:8080"
+    connector_p2p_cert: ""
+    connector_p2p_key: ""
+    connector_p2p_listen_port: 4434
+    connector_external_ip: ""
+    connector_ca_cert: ""
+    connector_no_verify_peer: false
+    connector_metrics_port: 9091
 
     # Echo Server
     echo_server_port: 8080
