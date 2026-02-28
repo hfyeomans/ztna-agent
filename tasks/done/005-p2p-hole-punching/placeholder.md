@@ -64,9 +64,11 @@ E2E test script for P2P hole punching functionality including candidate exchange
    - `sudo ifconfig lo0 alias 127.0.0.3`
 
 **Blocked By:**
-- Phase 4 Integration: Wire HolePunchCoordinator into Agent/Connector
-- Phase 5: Keepalive implementation
-- QUIC test client P2P support
+- ~~Phase 4 Integration: Wire HolePunchCoordinator into Agent/Connector~~ ✅ Done (Task 005)
+- ~~Phase 5: Keepalive implementation~~ ✅ Done (Task 005)
+- QUIC test client P2P support (still needed for automated E2E)
+
+**Tracked in:** `tasks/_context/README.md` Priority 4 deferred items ("P2P Test Script Scaffolding")
 
 ---
 
