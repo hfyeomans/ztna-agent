@@ -1,0 +1,50 @@
+# =============================================================================
+# ZTNA Agent — Deployment Playbook
+# =============================================================================
+# Deploys the Intermediate Server, App Connector, and Echo Server to an
+# Ubuntu host. Builds from source, installs systemd services, and manages
+# TLS certificates.
+#
+# Usage:
+#   ansible-playbook playbook.yml                    # Full deploy
+#   ansible-playbook playbook.yml --tags build       # Rebuild binaries only
+#   ansible-playbook playbook.yml --tags services    # Restart services only
+#   ansible-playbook playbook.yml --check            # Dry run
+# =============================================================================
+---
+- name: Deploy ZTNA Agent services
+  hosts: ztna_servers
+  become: true
+  vars:
+    # Override these in group_vars, host_vars, or --extra-vars
+    ztna_repo_url: "https://github.com/hfyeomans/ztna-agent.git"
+    ztna_repo_branch: "master"
+    ztna_install_dir: "/home/ubuntu/ztna-agent"
+    ztna_cert_dir: "/home/ubuntu/ztna-agent/certs"
+    ztna_user: "ubuntu"
+    ztna_group: "ubuntu"
+
+    # Intermediate Server
+    intermediate_port: 4433
+    intermediate_bind_addr: "0.0.0.0"
+    intermediate_cert: "{{ ztna_cert_dir }}/cert.pem"
+    intermediate_key: "{{ ztna_cert_dir }}/key.pem"
+    intermediate_ca_cert: ""
+    intermediate_require_client_cert: false
+
+    # App Connector
+    connector_server: "127.0.0.1:4433"
+    connector_service_id: "echo-service"
+    connector_forward: "127.0.0.1:8080"
+
+    # Echo Server
+    echo_server_port: 8080
+
+    # Firewall
+    ufw_enabled: true
+
+    # Rust toolchain
+    rust_toolchain: "stable"
+
+  roles:
+    - ztna

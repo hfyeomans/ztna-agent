@@ -1,0 +1,27 @@
+[Unit]
+Description=ZTNA Intermediate Server (QUIC relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ ztna_user }}
+Group={{ ztna_group }}
+WorkingDirectory={{ ztna_install_dir }}
+ExecStart={{ ztna_install_dir }}/intermediate-server/target/release/intermediate-server \
+    --port {{ intermediate_port }} \
+    --cert {{ intermediate_cert }} \
+    --key {{ intermediate_key }} \
+    --bind {{ intermediate_bind_addr }}{% if intermediate_ca_cert != "" %} \
+    --ca-cert {{ intermediate_ca_cert }}{% endif %}{% if intermediate_require_client_cert %} \
+    --require-client-cert{% endif %}
+
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+# Graceful shutdown: intermediate-server handles SIGTERM with connection draining
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

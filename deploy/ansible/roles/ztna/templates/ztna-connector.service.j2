@@ -1,0 +1,23 @@
+[Unit]
+Description=ZTNA App Connector ({{ connector_service_id }})
+After=network-online.target ztna-intermediate.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ ztna_user }}
+Group={{ ztna_group }}
+WorkingDirectory={{ ztna_install_dir }}
+ExecStart={{ ztna_install_dir }}/app-connector/target/release/app-connector \
+    --server {{ connector_server }} \
+    --service {{ connector_service_id }} \
+    --forward {{ connector_forward }}
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+# Graceful shutdown: app-connector handles SIGTERM cleanly
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

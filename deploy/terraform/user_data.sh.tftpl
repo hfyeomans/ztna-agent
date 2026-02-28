@@ -1,0 +1,161 @@
+#!/bin/bash
+# =============================================================================
+# ZTNA Agent — EC2 User Data Bootstrap
+# =============================================================================
+# Installs Rust toolchain, system dependencies, and configures the host for
+# running the ZTNA Intermediate Server and App Connector via systemd.
+# =============================================================================
+
+set -euo pipefail
+exec > >(tee /var/log/ztna-user-data.log) 2>&1
+
+echo "=== ZTNA Bootstrap — $(date -u) ==="
+
+# --- System packages ---
+apt-get update -qq
+apt-get upgrade -y -qq
+apt-get install -y -qq \
+    build-essential pkg-config libssl-dev cmake \
+    git curl ufw jq python3
+
+# --- Firewall (ufw) ---
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp        comment "SSH"
+ufw allow 4433/udp      comment "QUIC Intermediate Server"
+ufw allow 4434/udp      comment "P2P hole-punching"
+ufw --force enable
+
+# --- Rust toolchain (as ubuntu user) ---
+sudo -u ubuntu bash -c '
+    if ! command -v rustup &>/dev/null; then
+        curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    fi
+    source "$HOME/.cargo/env"
+    rustup update stable
+    rustc --version
+    cargo --version
+'
+
+# --- Clone or update repo ---
+REPO_DIR="/home/ubuntu/ztna-agent"
+if [ -d "$REPO_DIR" ]; then
+    sudo -u ubuntu bash -c "cd $REPO_DIR && git pull --ff-only"
+else
+    sudo -u ubuntu git clone https://github.com/hfyeomans/ztna-agent.git "$REPO_DIR"
+fi
+
+# --- Create cert directory ---
+mkdir -p "$REPO_DIR/certs"
+chown ubuntu:ubuntu "$REPO_DIR/certs"
+
+# --- Build release binaries ---
+sudo -u ubuntu bash -c '
+    source "$HOME/.cargo/env"
+    cd /home/ubuntu/ztna-agent
+    cargo build --release --manifest-path intermediate-server/Cargo.toml
+    cargo build --release --manifest-path app-connector/Cargo.toml
+'
+
+# --- Install systemd service files ---
+# Intermediate Server
+cat > /etc/systemd/system/ztna-intermediate.service << 'UNIT'
+[Unit]
+Description=ZTNA Intermediate Server (QUIC relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/ztna-agent
+ExecStart=/home/ubuntu/ztna-agent/intermediate-server/target/release/intermediate-server \
+    --port 4433 \
+    --cert /home/ubuntu/ztna-agent/certs/cert.pem \
+    --key /home/ubuntu/ztna-agent/certs/key.pem \
+    --bind 0.0.0.0
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# App Connector (echo-service)
+cat > /etc/systemd/system/ztna-connector.service << 'UNIT'
+[Unit]
+Description=ZTNA App Connector (echo-service)
+After=network-online.target ztna-intermediate.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/ztna-agent
+ExecStart=/home/ubuntu/ztna-agent/app-connector/target/release/app-connector \
+    --server 127.0.0.1:4433 \
+    --service echo-service \
+    --forward 127.0.0.1:8080
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Echo Server (Python test service)
+cat > /etc/systemd/system/echo-server.service << 'UNIT'
+[Unit]
+Description=ZTNA Echo Server (TCP test service)
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/bin/python3 -c "
+import socket, threading
+def handle(conn, addr):
+    while True:
+        data = conn.recv(4096)
+        if not data: break
+        print(f'Echo: {data}', flush=True)
+        conn.sendall(data)
+    conn.close()
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', 8080))
+s.listen(5)
+print('Echo server listening on 127.0.0.1:8080', flush=True)
+while True:
+    conn, addr = s.accept()
+    print(f'Connected by {addr}', flush=True)
+    threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
+"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Enable and start services ---
+systemctl daemon-reload
+systemctl enable echo-server ztna-intermediate ztna-connector
+
+# Only start echo-server automatically; intermediate + connector need certs
+systemctl start echo-server
+
+%{ if domain_name != "" ~}
+# --- Certbot (optional, if domain provided) ---
+apt-get install -y -qq certbot python3-certbot-dns-route53
+echo "Domain configured: ${domain_name}"
+echo "Run certbot manually or use deploy/aws/setup-certbot.sh to issue certificates."
+%{ endif ~}
+
+echo "=== ZTNA Bootstrap complete — $(date -u) ==="
+echo "Next: copy TLS certificates to /home/ubuntu/ztna-agent/certs/ then start services."
