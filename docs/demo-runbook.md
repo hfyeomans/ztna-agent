@@ -6,42 +6,62 @@
 
 ---
 
+## Configuration
+
+Set these variables before running demo commands. All SSH and curl commands below use these.
+
+```bash
+# SSH access (10.x is private/Tailscale — SSH only)
+export ZTNA_SSH_KEY="~/.ssh/hfymba.aws.pem"
+export ZTNA_SSH_HOST="ubuntu@10.0.2.126"
+export ZTNA_SSH="ssh -i $ZTNA_SSH_KEY $ZTNA_SSH_HOST"
+
+# Public QUIC endpoint (3.x is the Elastic IP — used for QUIC connections)
+export ZTNA_PUBLIC_IP="3.128.36.92"
+export ZTNA_QUIC_PORT="4433"
+
+# Intermediate Server metrics (binds to --bind address, NOT 0.0.0.0)
+export ZTNA_INTERMEDIATE_BIND="10.0.2.126"
+export ZTNA_INTERMEDIATE_METRICS_PORT="9090"
+
+# Connector metrics (binds to 0.0.0.0, accessible via localhost)
+export ZTNA_CONNECTOR_METRICS_PORT="9091"
+export ZTNA_CONNECTOR_WEB_METRICS_PORT="9092"
+```
+
 ## Prerequisites Checklist
 
 Before starting the demo, verify:
 
-- [ ] SSH access to AWS EC2: `ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126`
+- [ ] SSH access: `$ZTNA_SSH 'hostname'`
 - [ ] macOS Agent app built (Xcode or `xcodebuild`)
-- [ ] Agent configured: Host=3.128.36.92, Port=4433, Services=echo-service,web-app
+- [ ] Agent configured: Host=$ZTNA_PUBLIC_IP, Port=$ZTNA_QUIC_PORT, Services=echo-service,web-app
 - [ ] AWS services running (see Verify Services below)
 - [ ] Metrics endpoints reachable (see Verify Metrics below)
 
 ### Verify AWS Services
 
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'systemctl is-active ztna-intermediate ztna-connector ztna-connector-web http-server echo-server'
+$ZTNA_SSH 'systemctl is-active ztna-intermediate ztna-connector ztna-connector-web http-server echo-server'
 ```
 
 Expected output: 5 lines of `active`. If any show `inactive`, restart:
 
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'sudo systemctl restart ztna-intermediate ztna-connector ztna-connector-web http-server echo-server'
+$ZTNA_SSH 'sudo systemctl restart ztna-intermediate ztna-connector ztna-connector-web http-server echo-server'
 ```
 
 ### Verify Metrics
 
-From the AWS host (Intermediate metrics bind to `--bind` address; Connector metrics bind to `0.0.0.0`):
+Intermediate metrics bind to the `--bind` address; Connector metrics bind to `0.0.0.0`:
 
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'curl -s http://10.0.2.126:9090/healthz && echo " intermediate" && curl -s http://localhost:9091/healthz && echo " connector"'
+$ZTNA_SSH "curl -s http://${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/healthz && echo ' intermediate' && curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/healthz && echo ' connector'"
 ```
 
 Expected: `ok intermediate` and `ok connector`.
 
-**Note:** Metrics ports (9090/9091) are **not** exposed in the AWS security group by default. To reach them from your Mac via Tailscale, SSH tunnel or set Terraform `enable_metrics_port = true` (opens 9090 only — add a second rule for 9091 if needed). For demo purposes, SSH into the host and curl locally.
+**Note:** Metrics ports are **not** exposed in the AWS security group by default. To reach them externally, set Terraform `enable_metrics_port = true` or use SSH tunnel: `ssh -L 9090:${ZTNA_INTERMEDIATE_BIND}:9090 -L 9091:localhost:9091 $ZTNA_SSH_HOST`
 
 ---
 
@@ -66,14 +86,12 @@ Establish the ZTNA tunnel from macOS to AWS.
 
 **T1 — AWS Intermediate Server logs:**
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'sudo journalctl -u ztna-intermediate -f'
+$ZTNA_SSH 'sudo journalctl -u ztna-intermediate -f'
 ```
 
 **T2 — AWS Connector logs:**
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'sudo journalctl -u ztna-connector -f'
+$ZTNA_SSH 'sudo journalctl -u ztna-connector -f'
 ```
 
 **T3 — macOS Agent logs:**
@@ -177,7 +195,7 @@ Demonstrate seamless per-packet failover from P2P to relay.
 
 **T5 — SSH to AWS (separate session):**
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
+$ZTNA_SSH
 ```
 
 **T4 — Start a sustained ping:**
@@ -235,8 +253,7 @@ Demonstrate built-in Prometheus metrics and health checks.
 
 **T6 — Watch Intermediate Server metrics live:**
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'watch -n2 "curl -s http://10.0.2.126:9090/metrics | grep -v ^#"'
+$ZTNA_SSH "watch -n2 'curl -s http://${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/metrics | grep -v ^#'"
 ```
 
 **What you'll see (counter names and live values):**
@@ -265,8 +282,7 @@ curl http://10.100.0.2:8080/
 
 **T6 — Switch to Connector metrics:**
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'curl -s http://localhost:9091/metrics | grep -v ^#'
+$ZTNA_SSH "curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/metrics | grep -v ^#"
 ```
 
 **Connector counters:**
@@ -281,8 +297,7 @@ ztna_connector_uptime_seconds 3400
 
 **T6 — Health check (one-liner):**
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'echo "Intermediate: $(curl -s 10.0.2.126:9090/healthz)  Connector: $(curl -s localhost:9091/healthz)"'
+$ZTNA_SSH "echo \"Intermediate: \$(curl -s ${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/healthz)  Connector: \$(curl -s localhost:${ZTNA_CONNECTOR_METRICS_PORT}/healthz)\""
 ```
 
 Expected: `Intermediate: ok  Connector: ok`
@@ -302,14 +317,12 @@ ping -c 120 10.100.0.1
 
 **T6 — Watch the connector's reconnection counter:**
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'watch -n1 "curl -s http://localhost:9091/metrics | grep reconnections"'
+$ZTNA_SSH "watch -n1 'curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/metrics | grep reconnections'"
 ```
 
 **T5 — Gracefully restart the Intermediate Server:**
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'sudo systemctl restart ztna-intermediate'
+$ZTNA_SSH 'sudo systemctl restart ztna-intermediate'
 ```
 
 **What you'll see across terminals:**
@@ -381,9 +394,11 @@ networksetup -disconnectpppoeservice "ZTNA Agent"
 
 ## Quick Reference: AWS Commands
 
+All commands below assume the Configuration variables from the top of this runbook are set.
+
 ```bash
 # SSH to AWS
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
+$ZTNA_SSH
 
 # Check all services
 systemctl status ztna-intermediate ztna-connector ztna-connector-web http-server echo-server
@@ -407,22 +422,24 @@ sudo iptables -F INPUT
 sudo systemctl restart ztna-intermediate ztna-connector ztna-connector-web http-server echo-server
 
 # --- Metrics & Health (Task 008) ---
+# Note: Intermediate metrics bind to --bind address (ZTNA_INTERMEDIATE_BIND)
+#       Connector metrics bind to 0.0.0.0 (accessible via localhost)
 
 # Intermediate Server metrics (9 counters)
-curl -s http://10.0.2.126:9090/metrics | grep -v ^#
+curl -s http://${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/metrics | grep -v ^#
 
 # App Connector metrics (6 counters)
-curl -s http://localhost:9091/metrics | grep -v ^#
+curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/metrics | grep -v ^#
 
 # Health checks
-curl -s http://10.0.2.126:9090/healthz    # Intermediate → "ok"
-curl -s http://localhost:9091/healthz    # Connector → "ok"
+curl -s http://${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/healthz  # Intermediate → "ok"
+curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/healthz                      # Connector → "ok"
 
 # Watch metrics live (refreshes every 2s)
-watch -n2 'curl -s http://10.0.2.126:9090/metrics | grep -v ^#'
+watch -n2 "curl -s http://${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/metrics | grep -v ^#"
 
 # Check connector reconnection count
-curl -s http://localhost:9091/metrics | grep reconnections
+curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/metrics | grep reconnections
 
 # Graceful restart (triggers drain + auto-reconnect)
 sudo systemctl restart ztna-intermediate

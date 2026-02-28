@@ -349,9 +349,9 @@ log show --last 5m --predicate 'subsystem CONTAINS "ztna"' --info
 # Server/Connector logs (local E2E)
 tail -f tests/e2e/artifacts/logs/*.log
 
-# AWS service logs (real-time)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-intermediate -f'
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-connector -f'
+# AWS service logs (real-time) — uses $ZTNA_SSH from demo-runbook.md Configuration
+$ZTNA_SSH 'sudo journalctl -u ztna-intermediate -f'
+$ZTNA_SSH 'sudo journalctl -u ztna-connector -f'
 ```
 
 ### Metrics & Health (Task 008)
@@ -359,39 +359,41 @@ ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-connecto
 Both Intermediate Server and App Connector expose Prometheus metrics and health endpoints.
 Configurable via `--metrics-port` CLI flag (default 9090/9091, pass `0` to disable).
 
+Commands use variables from demo-runbook.md Configuration section (`$ZTNA_SSH`, etc.).
+
 ```bash
 # Health checks (Intermediate binds to --bind addr, connectors bind to 0.0.0.0)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://10.0.2.126:9090/healthz'  # Intermediate → "ok"
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://localhost:9091/healthz'     # Connector echo → "ok"
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://localhost:9092/healthz'     # Connector web → "ok"
+$ZTNA_SSH "curl -s http://${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/healthz"  # → "ok"
+$ZTNA_SSH "curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/healthz"                      # → "ok"
+$ZTNA_SSH "curl -s http://localhost:${ZTNA_CONNECTOR_WEB_METRICS_PORT}/healthz"                  # → "ok"
 
-# Intermediate Server metrics (9 counters, port 9090)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://10.0.2.126:9090/metrics'
+# Intermediate Server metrics (9 counters)
+$ZTNA_SSH "curl -s http://${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/metrics"
 # Key counters: ztna_active_connections, ztna_relay_bytes_total,
 #   ztna_registrations_total, ztna_registration_rejections_total,
 #   ztna_datagrams_relayed_total, ztna_signaling_sessions_total,
 #   ztna_retry_tokens_validated, ztna_retry_token_failures, ztna_uptime_seconds
 
-# App Connector metrics (6 counters each, ports 9091/9092)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://localhost:9091/metrics'  # echo-service
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://localhost:9092/metrics'  # web-app
+# App Connector metrics (6 counters each)
+$ZTNA_SSH "curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/metrics"      # echo-service
+$ZTNA_SSH "curl -s http://localhost:${ZTNA_CONNECTOR_WEB_METRICS_PORT}/metrics"  # web-app
 # Key counters: ztna_connector_forwarded_packets_total, ztna_connector_forwarded_bytes_total,
 #   ztna_connector_tcp_sessions_total, ztna_connector_tcp_errors_total,
 #   ztna_connector_reconnections_total, ztna_connector_uptime_seconds
 
 # Watch metrics live (refreshes every 2s)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'watch -n2 "curl -s http://10.0.2.126:9090/metrics | grep -v ^#"'
+$ZTNA_SSH "watch -n2 'curl -s http://${ZTNA_INTERMEDIATE_BIND}:${ZTNA_INTERMEDIATE_METRICS_PORT}/metrics | grep -v ^#'"
 
 # Note: Metrics ports are NOT in the AWS security group by default.
-# To reach externally, set Terraform enable_metrics_port=true (opens 9090 only)
-# or use SSH tunnel: ssh -L 9090:10.0.2.126:9090 -L 9091:localhost:9091 ubuntu@10.0.2.126
+# To reach externally, set Terraform enable_metrics_port=true
+# or use SSH tunnel: ssh -L 9090:${ZTNA_INTERMEDIATE_BIND}:9090 -L 9091:localhost:9091 $ZTNA_SSH_HOST
 
-# Auto-reconnect test (NOT zero-downtime — ~38s gap during QUIC idle timeout)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo systemctl restart ztna-intermediate'
-# Watch connector reconnect (~38s after restart):
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-connector -f'
+# Auto-reconnect test (NOT zero-downtime — ~30-40s gap during QUIC idle timeout)
+$ZTNA_SSH 'sudo systemctl restart ztna-intermediate'
+# Watch connector reconnect (~30-40s after restart):
+$ZTNA_SSH 'sudo journalctl -u ztna-connector -f'
 # Look for: "Reconnect attempt 1 — waiting 1000ms" then "Successfully reconnected"
-# Verify: curl -s http://localhost:9091/metrics | grep reconnections
+# Verify: curl -s http://localhost:${ZTNA_CONNECTOR_METRICS_PORT}/metrics | grep reconnections
 ```
 
 ---
@@ -624,21 +626,21 @@ Port 9092 is not a code default — it requires explicit `--metrics-port 9092` w
 
 ### AWS Build & Deploy
 
+Uses `$ZTNA_SSH`, `$ZTNA_SSH_KEY`, `$ZTNA_SSH_HOST` from demo-runbook.md Configuration section.
+
 ```bash
 # Sync source
-rsync -avz -e "ssh -i ~/.ssh/hfymba.aws.pem" \
+rsync -avz -e "ssh -i $ZTNA_SSH_KEY" \
   --exclude target/ --exclude .git/ --exclude ios-macos/ \
-  /Users/hank/dev/src/agent-driver/ztna-agent/ ubuntu@10.0.2.126:/home/ubuntu/ztna-agent/
+  . $ZTNA_SSH_HOST:/home/ubuntu/ztna-agent/
 
 # Build (source ~/.cargo/env REQUIRED for non-login shells)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-  'source ~/.cargo/env && cd /home/ubuntu/ztna-agent && \
+$ZTNA_SSH 'source ~/.cargo/env && cd /home/ubuntu/ztna-agent && \
    cargo build --release --manifest-path intermediate-server/Cargo.toml && \
    cargo build --release --manifest-path app-connector/Cargo.toml'
 
 # Restart (order matters: intermediate first, then connectors)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-  'sudo systemctl restart ztna-intermediate && sleep 2 && \
+$ZTNA_SSH 'sudo systemctl restart ztna-intermediate && sleep 2 && \
    sudo systemctl restart ztna-connector && sleep 1 && \
    sudo systemctl restart ztna-connector-web'
 ```
