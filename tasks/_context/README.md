@@ -518,6 +518,10 @@ Items that were deferred during Task 008 implementation because they require liv
 | **Agent Service Unavailability Notification** | 002-Server, 001-Agent | Notify agents when connector goes down (currently agents detect via QUIC close) | Protocol extension; currently graceful enough via QUIC |
 | **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported currently | Multi-interface support; low priority |
 | **MD040 Markdown Lint** | Docs | Pre-existing unlabeled fenced code blocks in `docs/architecture.md` (~20) and `docs/demo-runbook.md` (~3); Task 008 fixed only the new blocks it added | Bulk find-and-tag pass; low-priority cosmetic |
+| **iOS verifyPeer Default** | 001-Agent (Swift) | `PacketTunnelProvider.swift:66` defaults `verifyPeer = false`. Production deployments need this flipped to `true` with proper CA certs | Requires production TLS cert infrastructure; currently intentional for dev with self-signed certs |
+| **Terraform Inline Python Echo-Server** | deploy/terraform | `user_data.sh.tftpl:120` has inline Python echo-server in systemd ExecStart. Syntactically valid (unlike fixed Ansible version) but inconsistent — Ansible uses separate `echo-server.py.j2` template | Extract to separate script file for consistency; low-priority cosmetic |
+| **Stale Placeholder Line References** | Docs | `placeholder.md` files in tasks 006, 007, 008 have line numbers that no longer match current code (items ARE resolved, just the references drifted) | Update line numbers or remove them since items are resolved; low-priority cosmetic |
+| **P2P Test Script Scaffolding** | tests/e2e | `tests/e2e/scenarios/p2p-hole-punching.sh:59` has placeholder markers in test scaffolding | Complete P2P E2E test automation; not production code |
 
 ### Tracking
 
