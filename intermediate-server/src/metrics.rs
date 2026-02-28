@@ -134,8 +134,9 @@ mod tests {
     fn test_metrics_uptime_present() {
         let m = Metrics::new();
         let output = m.render();
-        // Uptime should be 0 or very small (just created)
-        assert!(output.contains("ztna_uptime_seconds 0"));
+        assert!(output
+            .lines()
+            .any(|l| l.starts_with("ztna_uptime_seconds ")));
     }
 
     #[test]

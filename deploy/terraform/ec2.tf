@@ -149,7 +149,7 @@ resource "aws_vpc_security_group_ingress_rule" "metrics" {
   ip_protocol       = "tcp"
   from_port         = 9090
   to_port           = 9090
-  cidr_ipv4         = "0.0.0.0/0"
+  cidr_ipv4         = var.metrics_cidr
   description       = "Prometheus metrics endpoint"
 }
 
@@ -185,6 +185,12 @@ resource "aws_instance" "ztna" {
   key_name               = var.key_name
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.ztna.id]
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
 
   root_block_device {
     volume_size = 20

@@ -138,7 +138,6 @@ Currently on single shared EC2 (MVP). Planned: dedicated EC2 with Docker + `--ne
 - Future improvement: use separate sockets for P2P and relay connections
 
 **Deferred to Post-MVP:**
-- Automatic reconnection (→ Task 008)
 - Per-service backend routing, currently single --forward address for all services (→ Task 009)
 - TCP window flow control, currently simple ACK-per-segment (→ Task 011)
 - Separate P2P and relay sockets in Connector (→ Task 011)

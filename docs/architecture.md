@@ -1047,7 +1047,7 @@ kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-serve
 
 Both the Intermediate Server and App Connector expose built-in Prometheus-compatible metrics via a lightweight HTTP server. The HTTP endpoint is implemented using `mio::net::TcpListener` — no external HTTP crate, consistent with the project's no-tokio philosophy.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                       METRICS ARCHITECTURE                              │
 ├─────────────────────────────────────────────────────────────────────────┤
@@ -1105,7 +1105,7 @@ Both the Intermediate Server and App Connector expose built-in Prometheus-compat
 
 Both components handle SIGTERM for clean shutdown. The Intermediate Server also handles SIGINT:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                    GRACEFUL SHUTDOWN LIFECYCLE                           │
 ├─────────────────────────────────────────────────────────────────────────┤
@@ -1134,7 +1134,7 @@ Both components handle SIGTERM for clean shutdown. The Intermediate Server also 
 
 The Connector automatically reconnects to the Intermediate Server when the connection drops, using exponential backoff:
 
-```
+```text
 Connection lost → 1s wait → attempt → fail → 2s wait → attempt → fail → 4s → ... → 30s cap
                   ▲                                                            │
                   └────────────────── reset to 1s on success ◄─────────────────┘

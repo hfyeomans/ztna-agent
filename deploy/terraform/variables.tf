@@ -62,6 +62,12 @@ variable "enable_metrics_port" {
   default     = false
 }
 
+variable "metrics_cidr" {
+  description = "CIDR block allowed to access Prometheus metrics endpoint (TCP 9090)"
+  type        = string
+  default     = "10.0.0.0/8"
+}
+
 variable "enable_web_ports" {
   description = "Whether to open TCP 80/443 for HTTP/HTTPS (certbot, web services)"
   type        = bool

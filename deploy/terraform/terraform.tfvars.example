@@ -12,7 +12,7 @@ aws_region = "us-east-2"
 instance_type = "t3.micro"
 
 # Name of your SSH key pair (must already exist in the AWS region)
-key_name = "hfymba"
+key_name = "your-ssh-key-name"
 
 # Restrict SSH access to specific CIDRs (your IP or VPN range)
 # Use https://checkip.amazonaws.com to find your current public IP
@@ -34,6 +34,7 @@ allowed_ssh_cidrs = [
 
 # Open Prometheus metrics port (TCP 9090)
 # enable_metrics_port = true
+# metrics_cidr = "10.0.0.0/8"  # CIDR allowed to scrape metrics (default: private)
 
 # Open HTTP/HTTPS ports (TCP 80/443) for certbot or web services
 # enable_web_ports = true

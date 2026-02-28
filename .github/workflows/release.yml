@@ -82,7 +82,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: deploy/docker-nat-sim/Dockerfile.intermediate
+          file: deploy/docker/Dockerfile.intermediate
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/ztna-intermediate-server:${{ github.ref_name }}
@@ -93,7 +93,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: deploy/docker-nat-sim/Dockerfile.connector
+          file: deploy/docker/Dockerfile.connector
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/ztna-app-connector:${{ github.ref_name }}

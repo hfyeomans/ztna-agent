@@ -240,7 +240,7 @@ ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
 ```
 
 **What you'll see (counter names and live values):**
-```
+```text
 ztna_active_connections 2
 ztna_relay_bytes_total 15360
 ztna_registrations_total 4
@@ -270,7 +270,7 @@ ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
 ```
 
 **Connector counters:**
-```
+```text
 ztna_connector_forwarded_packets_total 42
 ztna_connector_forwarded_bytes_total 8192
 ztna_connector_tcp_sessions_total 1

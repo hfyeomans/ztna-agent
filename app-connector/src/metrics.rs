@@ -108,7 +108,9 @@ mod tests {
     fn test_metrics_uptime_present() {
         let m = Metrics::new();
         let output = m.render();
-        assert!(output.contains("ztna_connector_uptime_seconds 0"));
+        assert!(output
+            .lines()
+            .any(|l| l.starts_with("ztna_connector_uptime_seconds ")));
     }
 
     #[test]
