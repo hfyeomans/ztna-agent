@@ -6,21 +6,7 @@ After=network-online.target
 Type=simple
 User={{ ztna_user }}
 Group={{ ztna_group }}
-ExecStart=/usr/bin/python3 -c "\
-import socket, threading; \
-def handle(conn, addr): \
-    while True: \
-        data = conn.recv(4096); \
-        (not data) and (conn.close() or exit()); \
-        print(f'Echo: {data}', flush=True); \
-        conn.sendall(data) \
-\
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); \
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); \
-s.bind(('127.0.0.1', {{ echo_server_port }})); \
-s.listen(5); \
-print('Echo server listening on 127.0.0.1:{{ echo_server_port }}', flush=True); \
-[threading.Thread(target=handle, args=s.accept(), daemon=True).start() for _ in iter(lambda: True, False)]"
+ExecStart=/usr/bin/python3 {{ ztna_install_dir }}/echo-server.py --port {{ echo_server_port }}
 Restart=on-failure
 RestartSec=3
 

@@ -836,12 +836,17 @@ impl Connector {
                             self.reconnect_attempts + 1,
                             delay_ms
                         );
-                        std::thread::sleep(Duration::from_millis(delay_ms));
 
-                        // Check shutdown again after sleeping
-                        if self.shutdown_flag.load(Ordering::Relaxed) {
-                            log::info!("Shutdown signal received during reconnection backoff");
-                            return Ok(());
+                        // Sleep in short intervals so SIGTERM is responsive
+                        let mut remaining_ms = delay_ms;
+                        while remaining_ms > 0 {
+                            let chunk = remaining_ms.min(500);
+                            std::thread::sleep(Duration::from_millis(chunk));
+                            remaining_ms = remaining_ms.saturating_sub(chunk);
+                            if self.shutdown_flag.load(Ordering::Relaxed) {
+                                log::info!("Shutdown signal received during reconnection backoff");
+                                return Ok(());
+                            }
                         }
 
                         self.reconnect_attempts += 1;

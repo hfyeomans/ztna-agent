@@ -99,6 +99,18 @@
     mode: "0750"
   tags: [certs]
 
+# ---- Echo Server Script ----
+
+- name: Deploy echo-server Python script
+  ansible.builtin.template:
+    src: echo-server.py.j2
+    dest: "{{ ztna_install_dir }}/echo-server.py"
+    owner: "{{ ztna_user }}"
+    group: "{{ ztna_group }}"
+    mode: "0755"
+  notify: Restart echo server
+  tags: [services]
+
 # ---- Systemd Services ----
 
 - name: Deploy intermediate-server systemd unit

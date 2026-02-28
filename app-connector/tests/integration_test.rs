@@ -51,6 +51,8 @@ impl ServerProcess {
                 "certs/cert.pem",
                 "certs/key.pem",
                 "--disable-retry",
+                "--metrics-port",
+                "0",
             ])
             .current_dir("../intermediate-server")
             .env("RUST_LOG", "info")
@@ -283,6 +285,8 @@ impl ConnectorProcess {
                 "certs/connector-cert.pem",
                 "--p2p-key",
                 "certs/connector-key.pem",
+                "--metrics-port",
+                "0",
             ])
             .current_dir(".")
             .env("RUST_LOG", "info")
