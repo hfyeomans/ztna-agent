@@ -507,11 +507,12 @@ Items that were deferred during Task 008 implementation because they require liv
 
 | Item | Component | Description | What's Needed |
 |------|-----------|-------------|---------------|
-| **Grafana Dashboard JSON** | 002-Server, 003-Connector | Pre-built dashboard for Prometheus metrics (9+6 counters) | Grafana instance; import JSON |
+| **Full Observability Stack** | Infrastructure | Deploy Prometheus server + Grafana to scrape `/metrics` endpoints and visualize dashboards. Alerting rules for reconnections, connection drops, error rates | Prometheus + Grafana instances (Docker or k8s); → Task 016 or dedicated observability task |
+| **Grafana Dashboard JSON** | 002-Server, 003-Connector | Pre-built dashboard for Prometheus metrics (9+6 counters) | Grafana instance; import JSON; blocked by observability stack |
 | **E2E Tests in CI** | CI/CD | GitHub Actions workflow for shell-based E2E test suite | Docker-in-CI infrastructure; server binary builds |
 | **K8s Manifest Updates** | deploy/k8s | Production kustomize overlays for updated binaries | K8s cluster access; existing Pi kustomize works for dev |
-| **Live Reconnect Test** | 003-Connector | Restart Intermediate, verify Connector auto-recovers | AWS EC2 deployment with both services |
-| **Zero-Downtime Restart Test** | 002-Server | Verify graceful shutdown + restart has no dropped connections | AWS EC2 + active Agent connections |
+| ~~Live Reconnect Test~~ | ~~003-Connector~~ | ~~Restart Intermediate, verify Connector auto-recovers~~ | ✅ Verified 2026-02-28 — Connector auto-reconnected, `reconnections_total` incremented |
+| ~~Zero-Downtime Restart Test~~ | ~~002-Server~~ | ~~Verify graceful shutdown + restart~~ | ✅ Verified 2026-02-28 — Graceful drain works (EINTR fix in `d9c98b6`), instant connection close detection via APPLICATION_CLOSE. Not true zero-downtime (~30-40s gap without multiple intermediates) |
 | **UDP Injection Mock Test** | 003-Connector | Unit test that UDP from unexpected source IP is dropped | Network mock / loopback test harness |
 | **Buffer Reuse Benchmark** | 003-Connector | Measure allocation reduction in high-PPS scenarios | Perf benchmarking harness (criterion) |
 | **Agent Service Unavailability Notification** | 002-Server, 001-Agent | Notify agents when connector goes down (currently agents detect via QUIC close) | Protocol extension; currently graceful enough via QUIC |
