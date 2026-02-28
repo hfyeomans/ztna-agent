@@ -511,6 +511,7 @@ Items that were deferred during Task 008 implementation because they require liv
 | **Buffer Reuse Benchmark** | 003-Connector | Measure allocation reduction in high-PPS scenarios | Perf benchmarking harness (criterion) |
 | **Agent Service Unavailability Notification** | 002-Server, 001-Agent | Notify agents when connector goes down (currently agents detect via QUIC close) | Protocol extension; currently graceful enough via QUIC |
 | **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported currently | Multi-interface support; low priority |
+| **MD040 Markdown Lint** | Docs | Pre-existing unlabeled fenced code blocks in `docs/architecture.md` (~20) and `docs/demo-runbook.md` (~3); Task 008 fixed only the new blocks it added | Bulk find-and-tag pass; low priority cosmetic |
 
 ### Tracking
 
