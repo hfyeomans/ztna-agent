@@ -207,7 +207,7 @@ resource "aws_instance" "ztna" {
   })
 
   lifecycle {
-    # Prevent accidental destruction of a running server
+    # Set to true for production; false during development for easy teardown
     prevent_destroy = false
   }
 }
