@@ -360,35 +360,38 @@ Both Intermediate Server and App Connector expose Prometheus metrics and health 
 Configurable via `--metrics-port` CLI flag (default 9090/9091, pass `0` to disable).
 
 ```bash
-# From AWS host (metrics bind to 0.0.0.0; restrict via SG/firewall)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9090/healthz'   # → "ok"
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9091/healthz'   # → "ok"
+# Health checks (Intermediate binds to --bind addr, connectors bind to 0.0.0.0)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://10.0.2.126:9090/healthz'  # Intermediate → "ok"
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://localhost:9091/healthz'     # Connector echo → "ok"
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://localhost:9092/healthz'     # Connector web → "ok"
 
 # Intermediate Server metrics (9 counters, port 9090)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9090/metrics'
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://10.0.2.126:9090/metrics'
 # Key counters: ztna_active_connections, ztna_relay_bytes_total,
 #   ztna_registrations_total, ztna_registration_rejections_total,
 #   ztna_datagrams_relayed_total, ztna_signaling_sessions_total,
 #   ztna_retry_tokens_validated, ztna_retry_token_failures, ztna_uptime_seconds
 
-# App Connector metrics (6 counters, port 9091)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9091/metrics'
+# App Connector metrics (6 counters each, ports 9091/9092)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://localhost:9091/metrics'  # echo-service
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s http://localhost:9092/metrics'  # web-app
 # Key counters: ztna_connector_forwarded_packets_total, ztna_connector_forwarded_bytes_total,
 #   ztna_connector_tcp_sessions_total, ztna_connector_tcp_errors_total,
 #   ztna_connector_reconnections_total, ztna_connector_uptime_seconds
 
 # Watch metrics live (refreshes every 2s)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'watch -n2 "curl -s localhost:9090/metrics | grep -v ^#"'
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'watch -n2 "curl -s http://10.0.2.126:9090/metrics | grep -v ^#"'
 
-# Note: Metrics ports (9090/9091) are NOT in the AWS security group by default.
+# Note: Metrics ports are NOT in the AWS security group by default.
 # To reach externally, set Terraform enable_metrics_port=true (opens 9090 only)
-# or use SSH tunnel: ssh -L 9090:localhost:9090 -L 9091:localhost:9091 ubuntu@10.0.2.126
+# or use SSH tunnel: ssh -L 9090:10.0.2.126:9090 -L 9091:localhost:9091 ubuntu@10.0.2.126
 
-# Graceful restart (demonstrates drain + auto-reconnect)
+# Auto-reconnect test (NOT zero-downtime — ~38s gap during QUIC idle timeout)
 ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo systemctl restart ztna-intermediate'
-# Watch connector reconnect:
+# Watch connector reconnect (~38s after restart):
 ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-connector -f'
-# Look for: "Reconnecting (attempt 1) in 1000ms..." then "Reconnected to Intermediate Server"
+# Look for: "Reconnect attempt 1 — waiting 1000ms" then "Successfully reconnected"
+# Verify: curl -s http://localhost:9091/metrics | grep reconnections
 ```
 
 ---
@@ -596,9 +599,92 @@ After E2E testing validates local relay functionality, components will be deploy
 - Can be same or different machine as Intermediate
 - UDP port range for local services
 
-### Task Reference
+### Deployment Automation (Task 008)
 
-See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementation details.
+| Tool | Path | Purpose |
+|------|------|---------|
+| Terraform | `deploy/terraform/` | AWS VPC, EC2, SG, EIP provisioning |
+| Ansible | `deploy/ansible/` | Service deployment, systemd templates, cert management |
+| Docker | `deploy/docker/` | Production Dockerfiles (multi-stage, debian-slim, non-root) |
+| CI/CD | `.github/workflows/test.yml` | Unit test matrix (5 crates) |
+| CI/CD | `.github/workflows/release.yml` | Cross-compile, Docker images (GHCR), GitHub Releases |
+
+### AWS Systemd Services
+
+| Service | Binary | Default Metrics Port | Description |
+|---------|--------|---------------------|-------------|
+| `ztna-intermediate` | `intermediate-server` | 9090 | QUIC relay + registry |
+| `ztna-connector` | `app-connector` | 9091 | echo-service connector |
+| `ztna-connector-web` | `app-connector` | 9092 | web-app connector |
+| `echo-server` | Python | N/A | TCP echo test service |
+| `http-server` | HTTP backend | N/A | Web test service |
+
+### AWS Build & Deploy
+
+```bash
+# Sync source
+rsync -avz -e "ssh -i ~/.ssh/hfymba.aws.pem" \
+  --exclude target/ --exclude .git/ --exclude ios-macos/ \
+  /Users/hank/dev/src/agent-driver/ztna-agent/ ubuntu@10.0.2.126:/home/ubuntu/ztna-agent/
+
+# Build (source ~/.cargo/env REQUIRED for non-login shells)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+  'source ~/.cargo/env && cd /home/ubuntu/ztna-agent && \
+   cargo build --release --manifest-path intermediate-server/Cargo.toml && \
+   cargo build --release --manifest-path app-connector/Cargo.toml'
+
+# Restart (order matters: intermediate first, then connectors)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+  'sudo systemctl restart ztna-intermediate && sleep 2 && \
+   sudo systemctl restart ztna-connector && sleep 1 && \
+   sudo systemctl restart ztna-connector-web'
+```
+
+**Key deployment notes:**
+- Self-signed certs require `--no-verify-peer` on connectors (Task 007 default changed to verify)
+- Multiple connectors on same host need different `--metrics-port` values
+- Intermediate metrics bind to `--bind` address (not 0.0.0.0), use that IP for curl
+
+### CLI Reference
+
+**Intermediate Server** (`intermediate-server`):
+
+| Flag | Default | Added | Description |
+|------|---------|-------|-------------|
+| `--port` | `4433` | MVP | Listen port (also positional arg #1) |
+| `--cert` | `certs/cert.pem` | MVP | TLS certificate path (positional #2) |
+| `--key` | `certs/key.pem` | MVP | TLS private key path (positional #3) |
+| `--bind` | `0.0.0.0` | MVP | Bind address (positional #4) |
+| `--external-ip` | none | Task 006 | Public IP for QAD |
+| `--config` | auto-detect | MVP | Config file path |
+| `--ca-cert` | none | Task 007 | CA cert for peer verification |
+| `--no-verify-peer` | verify on | Task 007 | Disable TLS verification (dev only) |
+| `--require-client-cert` | off | Task 007 | Require mTLS client certs |
+| `--disable-retry` | retry on | Task 007 | Disable stateless retry tokens |
+| `--metrics-port` | `9090` | Task 008 | Metrics/health HTTP port (0=disabled) |
+
+**App Connector** (`app-connector`):
+
+| Flag | Default | Added | Description |
+|------|---------|-------|-------------|
+| `--server` | `127.0.0.1:4433` | MVP | Intermediate address |
+| `--service` | `default` | MVP | Service ID to register |
+| `--forward` | `127.0.0.1:8080` | MVP | Local backend address |
+| `--config` | auto-detect | MVP | Config file path |
+| `--p2p-cert` | none | Task 005 | TLS cert for P2P server |
+| `--p2p-key` | none | Task 005 | TLS key for P2P server |
+| `--p2p-listen-port` | `4434` | Task 005 | P2P listen port |
+| `--external-ip` | none | Task 006 | Public IP for P2P candidates |
+| `--service-ip` | none | Task 007 | Virtual IP for TCP validation |
+| `--ca-cert` | none | Task 007 | CA cert for peer verification |
+| `--no-verify-peer` | verify on | Task 007 | Disable TLS verification (dev only) |
+| `--metrics-port` | `9091` | Task 008 | Metrics/health HTTP port (0=disabled) |
+
+### Task References
+
+- [Task 006: Cloud Deployment](../done/006-cloud-deployment/) — Initial AWS setup, QAD
+- [Task 007: Security Hardening](../done/007-security-hardening/) — mTLS, retry, CID rotation
+- [Task 008: Production Operations](../done/008-production-operations/) — Metrics, reconnect, CI/CD
 
 ---
 
@@ -645,4 +731,3 @@ See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementati
 | ~~[014](../done/014-pr-comment-graphql-hardening/)~~ | ~~PR Comment GraphQL Hardening~~ | ~~Done~~ | ~~GraphQL retry/backoff, pagination, smoke-test for resolve-pr-comments.sh~~ | ~~None~~ |
 | ~~[015](../done/015-oracle-quick-fixes/)~~ | ~~Oracle Quick Fixes~~ | ~~Done~~ | ~~IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity — 4 findings fixed, 146 tests pass~~ | ~~None~~ |
 | [016](../016-infrastructure-architecture/) | Infrastructure Architecture | P2 | Separate components onto independent AWS infra, Docker on EC2 (host net) for Intermediate, ECS/Fargate for Connector/Admin/backends, admin panel, Terraform IaC | 007 ✅ |
-| ~~[015](../done/015-oracle-quick-fixes/)~~ | ~~Oracle Quick Fixes~~ | ~~Done~~ | ~~IPv6 QAD panic, predictable P2P IDs, legacy FFI removal, UDP length sanity — 4 findings fixed, 146 tests pass~~ | ~~None~~ |
