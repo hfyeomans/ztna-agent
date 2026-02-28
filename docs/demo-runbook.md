@@ -315,9 +315,9 @@ ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
 **What you'll see across terminals:**
 
 - **T1:** `"Shutdown signal received, draining connections..."` followed by `"Sending APPLICATION_CLOSE to N connections"` then `"All connections closed cleanly"`
-- **T2:** Connection lost, then: `"Intermediate connection closed, reconnecting..."`, `"Reconnecting (attempt 1) in 1000ms..."`, `"Reconnected to Intermediate Server"`, `"Registration sent"`
+- **T2:** Connection lost, then: `"Intermediate connection closed, attempting reconnection..."`, `"Reconnect attempt 1 — waiting 1000ms before retry"`, `"Successfully reconnected to Intermediate Server"`, `"Registration ACK received"`
 - **T6:** `ztna_connector_reconnections_total` increments from `0` to `1`
-- **T4:** Brief interruption during restart (~2-3 seconds), then pings resume
+- **T4:** Service interruption during QUIC idle timeout (~30-40 seconds), then traffic resumes after reconnect
 
 **T4 — Verify traffic resumes:**
 ```bash
@@ -433,4 +433,4 @@ sudo systemctl restart ztna-intermediate
 **Cross-references:**
 - Full testing guide: `tasks/_context/testing-guide.md`
 - Architecture details: `tasks/_context/components.md`
-- Task 006 state: `tasks/006-cloud-deployment/state.md`
+- Task 006 state: `tasks/done/006-cloud-deployment/state.md`

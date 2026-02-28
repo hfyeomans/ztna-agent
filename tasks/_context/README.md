@@ -295,7 +295,7 @@ kubectl --context k8s1 get svc -n ztna
 ./app-connector/target/release/app-connector \
   --server 10.0.150.205:4433 \
   --service test-from-mac \
-  --insecure
+  --no-verify-peer
 
 # Multi-terminal log watching
 # Terminal 1: Intermediate server
