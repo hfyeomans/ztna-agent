@@ -169,6 +169,9 @@ The Intermediate System is the rendezvous point between Agents and App Connector
 - Route DATAGRAM frames between matched Agent/Connector pairs
 - Facilitate P2P hole punching (future optimization)
 - Authenticate and authorize connections
+- **Observability:** Expose Prometheus metrics (`/metrics`, 9 counters) and health check (`/healthz`) on configurable HTTP port (default 9090)
+- **Graceful shutdown:** SIGTERM/SIGINT → drain connections (APPLICATION_CLOSE to all clients, 3s timeout) → exit cleanly
+- **Cert hot-reload:** SIGHUP reloads TLS certificates without restart
 
 **Deployment:**
 - Cloud VM with public IP (AWS, GCP, Azure, etc.)
@@ -192,6 +195,9 @@ The App Connector runs alongside private applications and provides the "last mil
 - **JSON config:** `--config` flag for service definitions, backend addresses, P2P certs
 - **Keepalive:** 10-second QUIC PING prevents idle timeout
 - Handle response traffic back through the tunnel
+- **Auto-reconnection:** Exponential backoff (1s→30s cap) on connection loss, interruptible 500ms sleep chunks, automatic service re-registration after reconnect
+- **Observability:** Expose Prometheus metrics (`/metrics`, 6 counters) and health check (`/healthz`) on configurable HTTP port (default 9091)
+- **Graceful shutdown:** SIGTERM → clean event loop exit
 
 **Deployment Options:**
 
