@@ -1,0 +1,14 @@
+[Unit]
+Description=ZTNA Echo Server (TCP test service on port {{ echo_server_port }})
+After=network-online.target
+
+[Service]
+Type=simple
+User={{ ztna_user }}
+Group={{ ztna_group }}
+ExecStart=/usr/bin/python3 {{ ztna_install_dir }}/echo-server.py --port {{ echo_server_port }}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+# =============================================================================
+# ZTNA Agent — Terraform Variables Example
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: terraform.tfvars is gitignored — never commit secrets.
+# =============================================================================
+
+aws_region = "us-east-2"
+
+instance_type = "t3.micro"
+
+# Name of your SSH key pair (must already exist in the AWS region)
+key_name = "your-ssh-key-name"
+
+# Restrict SSH access to specific CIDRs (your IP or VPN range)
+# Use https://checkip.amazonaws.com to find your current public IP
+allowed_ssh_cidrs = [
+  # "203.0.113.42/32",   # Example: your home IP
+  # "10.0.0.0/8",        # Example: Tailscale/VPN range
+]
+
+# Optional: domain name for TLS certificate (used in certbot bootstrap)
+# domain_name = "ztna.example.com"
+
+# VPC and subnet configuration (defaults match existing AWS setup)
+# vpc_cidr          = "10.0.0.0/16"
+# subnet_cidr       = "10.0.2.0/24"
+# availability_zone = "us-east-2a"
+
+# Override the AMI (default: latest Ubuntu 22.04 LTS)
+# ami_id = "ami-0123456789abcdef0"
+
+# Open Prometheus metrics port (TCP 9090)
+# enable_metrics_port = true
+# metrics_cidr = "10.0.0.0/8"  # CIDR allowed to scrape metrics (default: private)
+
+# Open HTTP/HTTPS ports (TCP 80/443) for certbot or web services
+# enable_web_ports = true
+
+# Additional tags applied to all resources
+# tags = {
+#   Environment = "production"
+#   Team        = "platform"
+# }

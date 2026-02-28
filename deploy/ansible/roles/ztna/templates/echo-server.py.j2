@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Simple TCP echo server for ZTNA testing."""
+
+import argparse
+import socket
+import threading
+
+
+def handle(conn, addr):
+    """Handle a single client connection."""
+    try:
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
+            print(f"Echo {addr}: {len(data)} bytes", flush=True)
+            conn.sendall(data)
+    except (ConnectionResetError, BrokenPipeError):
+        pass
+    finally:
+        conn.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ZTNA Echo Server")
+    parser.add_argument("--port", type=int, default={{ echo_server_port }})
+    parser.add_argument("--bind", default="127.0.0.1")
+    args = parser.parse_args()
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((args.bind, args.port))
+    s.listen(5)
+    print(f"Echo server listening on {args.bind}:{args.port}", flush=True)
+
+    while True:
+        conn, addr = s.accept()
+        threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

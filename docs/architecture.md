@@ -85,7 +85,9 @@ The Zero Trust Network Access (ZTNA) Agent provides secure, identity-aware acces
 | **004** | E2E Relay Testing | ✅ Complete | 61+ E2E tests, relay verified |
 | **005** | P2P Hole Punching | ✅ Complete | 81 unit tests, protocol ready |
 | **005a** | Swift Agent Integration | ✅ Complete | macOS VPN + QUIC |
-| **006** | Cloud Deployment | 🔄 In Progress | Config, TCP/ICMP, 0x2F routing done |
+| **006** | Cloud Deployment | ✅ Complete | AWS EC2, Docker NAT sim, Pi k8s |
+| **007** | Security Hardening | ✅ Complete | mTLS, stateless retry, CID rotation, cert reload |
+| **008** | Production Operations | ✅ Complete | Metrics, graceful shutdown, auto-reconnect, IaC |
 
 ### Why This Matters
 
@@ -1039,6 +1041,123 @@ kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-serve
 
 ---
 
+## Observability & Operations (Task 008)
+
+### Metrics Architecture
+
+Both the Intermediate Server and App Connector expose built-in Prometheus-compatible metrics via a lightweight HTTP server. The HTTP endpoint is implemented using `mio::net::TcpListener` — no external HTTP crate, consistent with the project's no-tokio philosophy.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       METRICS ARCHITECTURE                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Intermediate Server                    App Connector                    │
+│  ┌─────────────────────┐               ┌─────────────────────┐          │
+│  │ QUIC Server :4433   │               │ QUIC Client         │          │
+│  │ Metrics HTTP :9090  │               │ Metrics HTTP :9091  │          │
+│  │                     │               │                     │          │
+│  │ GET /metrics        │               │ GET /metrics        │          │
+│  │ GET /healthz        │               │ GET /healthz        │          │
+│  └─────────────────────┘               └─────────────────────┘          │
+│         │                                       │                       │
+│         ▼                                       ▼                       │
+│  Prometheus scraper ◄───────────────────────────┘                       │
+│  (optional, external)                                                   │
+│         │                                                               │
+│         ▼                                                               │
+│  Grafana dashboard (optional)                                           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Endpoints:**
+- `GET /metrics` — Prometheus text exposition format (`Content-Type: text/plain; version=0.0.4`)
+- `GET /healthz` — Plain text `ok` (HTTP 200 if running)
+
+**CLI flag:** `--metrics-port <port>` (default 9090 for Intermediate, 9091 for Connector; pass `0` to disable)
+
+### Intermediate Server Metrics (port 9090)
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `ztna_active_connections` | gauge | Current QUIC connections (agents + connectors) |
+| `ztna_relay_bytes_total` | counter | Total bytes relayed via DATAGRAMs |
+| `ztna_registrations_total` | counter | Successful service registrations |
+| `ztna_registration_rejections_total` | counter | Registration NACKs (auth failures) |
+| `ztna_datagrams_relayed_total` | counter | Total DATAGRAMs relayed between peers |
+| `ztna_signaling_sessions_total` | counter | P2P signaling sessions created |
+| `ztna_retry_tokens_validated` | counter | Stateless retry tokens validated |
+| `ztna_retry_token_failures` | counter | Retry token validation failures |
+| `ztna_uptime_seconds` | gauge | Server uptime since last restart |
+
+### App Connector Metrics (port 9091)
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `ztna_connector_forwarded_packets_total` | counter | IP packets forwarded to backend |
+| `ztna_connector_forwarded_bytes_total` | counter | Total bytes forwarded to backend |
+| `ztna_connector_tcp_sessions_total` | counter | TCP proxy sessions created |
+| `ztna_connector_tcp_errors_total` | counter | TCP connect/read/write errors |
+| `ztna_connector_reconnections_total` | counter | Reconnections to Intermediate Server |
+| `ztna_connector_uptime_seconds` | gauge | Connector uptime since last restart |
+
+### Graceful Shutdown
+
+Both components handle SIGTERM for clean shutdown. The Intermediate Server also handles SIGINT:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    GRACEFUL SHUTDOWN LIFECYCLE                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. SIGTERM received (both) / SIGINT received (Intermediate only)        │
+│     └─► shutdown_flag.store(true) via signal-hook                       │
+│                                                                          │
+│  2. Main loop detects flag                                              │
+│     └─► Intermediate: drain_and_shutdown()                              │
+│     └─► Connector: clean loop exit                                      │
+│                                                                          │
+│  3. Drain phase (Intermediate only, 3 seconds max)                      │
+│     └─► Send APPLICATION_CLOSE (0x00) to all QUIC connections           │
+│     └─► Poll for close acknowledgments                                  │
+│     └─► Process timeouts so quiche advances state machines              │
+│     └─► Break early if all connections report is_closed()               │
+│                                                                          │
+│  4. Exit                                                                 │
+│     └─► Log remaining open connections (if any after 3s)                │
+│     └─► Process exits cleanly (exit code 0)                             │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Auto-Reconnection (App Connector)
+
+The Connector automatically reconnects to the Intermediate Server when the connection drops, using exponential backoff:
+
+```text
+Connection lost → 1s wait → attempt → fail → 2s wait → attempt → fail → 4s → ... → 30s cap
+                  ▲                                                            │
+                  └────────────────── reset to 1s on success ◄─────────────────┘
+```
+
+- **Backoff:** 1s initial, 2x factor, 30s maximum
+- **Interruptible:** Sleep is split into 500ms chunks; SIGTERM exits within 500ms
+- **State reset:** On reconnect, `reg_state` resets to `NotRegistered`; `maybe_register()` re-registers automatically
+- **P2P note:** P2P clients have independent QUIC connections, but the reconnect backoff loop blocks the main event loop, pausing P2P packet processing during sleep intervals (up to 500ms per chunk). P2P connections themselves remain open.
+
+### Deployment Automation
+
+| Method | Files | Purpose |
+|--------|-------|---------|
+| Terraform | `deploy/terraform/` | Provision AWS VPC, EC2, SG, EIP from scratch |
+| Ansible | `deploy/ansible/` | Install Rust, build binaries, deploy systemd services, configure UFW |
+| Docker | `deploy/docker/` | Multi-stage production images (debian-slim, non-root) |
+| CI/CD | `.github/workflows/test.yml`, `release.yml` | Unit test matrix (5 crates), cross-compile, GHCR Docker, GitHub Releases |
+
+See `deploy/README.md` for usage instructions and `docs/demo-runbook.md` for live demo commands.
+
+---
+
 ## Technology Choices
 
 | Component | Technology | Rationale |
@@ -1050,6 +1169,10 @@ kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-serve
 | App Connector | Rust + `mio` | Lightweight, matches server |
 | Container Runtime | Docker / Kubernetes | Standard deployment |
 | Build System | Cargo + Kustomize | Rust builds, k8s overlays |
+| Metrics | Prometheus text format (atomic counters) | Lock-free, zero-dependency HTTP via mio |
+| Deployment | Terraform + Ansible + Docker | `deploy/` directory, IaC-based |
+| CI/CD | GitHub Actions | 5-crate test matrix, cross-compile, GHCR images |
+| Signals | `signal-hook` crate | SIGTERM/SIGINT/SIGHUP via `Arc<AtomicBool>` |
 
 ---
 
@@ -1067,6 +1190,9 @@ kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-serve
 - `tasks/_context/README.md` - Project overview and session resume instructions
 - `tasks/_context/components.md` - Component status overview with Service Registration Protocol
 - `tasks/_context/testing-guide.md` - Testing commands and E2E verification
-- `tasks/006-cloud-deployment/` - Current task: cloud deployment and NAT testing
+- `tasks/006-cloud-deployment/` - Cloud deployment and NAT testing
+- `tasks/008-production-operations/` - Metrics, graceful shutdown, auto-reconnect, IaC
+- `deploy/README.md` - Deployment automation guide (Terraform, Ansible, Docker)
 - `deploy/k8s/k8s-deploy-skill.md` - Kubernetes deployment guide
+- `docs/demo-runbook.md` - Live 7-act demo with multi-terminal commands
 - `tests/e2e/README.md` - E2E test framework architecture

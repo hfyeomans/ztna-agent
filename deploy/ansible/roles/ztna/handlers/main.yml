@@ -1,0 +1,23 @@
+# =============================================================================
+# ZTNA Role — Handlers
+# =============================================================================
+---
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart intermediate server
+  ansible.builtin.systemd:
+    name: ztna-intermediate
+    state: restarted
+
+- name: Restart app connector
+  ansible.builtin.systemd:
+    name: ztna-connector
+    state: restarted
+
+- name: Restart echo server
+  ansible.builtin.systemd:
+    name: echo-server
+    state: restarted

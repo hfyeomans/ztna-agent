@@ -1,0 +1,36 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Test (${{ matrix.crate.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - {name: "intermediate-server", path: "intermediate-server"}
+          - {name: "app-connector", path: "app-connector"}
+          - {name: "packet-processor", path: "core/packet_processor"}
+          - {name: "echo-server", path: "tests/e2e/fixtures/echo-server"}
+          - {name: "quic-client", path: "tests/e2e/fixtures/quic-client"}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate.path }}
+
+      - name: Run tests
+        run: cargo test --manifest-path ${{ matrix.crate.path }}/Cargo.toml

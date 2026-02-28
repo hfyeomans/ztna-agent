@@ -41,7 +41,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
 | [005a](../done/005a-swift-agent-integration/) | Swift Agent Integration | ✅ Complete | `master` |
 | [006](../done/006-cloud-deployment/) | Cloud Deployment | ✅ Complete (MVP) | `master` (PR #7 merged) |
 | [007](../done/007-security-hardening/) | Security Hardening | ✅ Complete (Phases 1-8, PR #8 merged) | `master` |
-| [008](../008-production-operations/) | Production Operations | ⏳ Not Started | — |
+| [008](../008-production-operations/) | Production Operations | ✅ Complete | `feature/008-production-operations` |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | ⏳ Not Started | — |
 | [010](../010-admin-dashboard/) | Admin Dashboard | ⏳ Not Started | — |
 | [011](../011-protocol-improvements/) | Protocol Improvements | ⏳ Not Started | — |
@@ -81,8 +81,8 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
    P1 COMPLETE     P2                   P3
          │          │                      │
          ▼          ▼                      │
-   008 (Prod Ops)  010 (Dashboard)       012 (Multi-Env)
-   P2              P3                     P3
+   008 (Prod Ops) ✅ 010 (Dashboard)       012 (Multi-Env)
+   COMPLETE        P3                     P3
 
   016 (Infra Architecture) P2
   - Separates components onto independent AWS infrastructure
@@ -94,7 +94,7 @@ Zero Trust Network Access (ZTNA) agent for macOS that intercepts packets, encaps
   ★ Oracle Review (cross-cutting, see Deferred Items) ★
   015 (Quick Fixes): IPv6 panic, predictable IDs, dead FFI, UDP sanity ✅
   Signaling hijack → 009    Reg auth hardening → 009
-  Cross-tenant routing → 009  Local UDP injection → 008
+  Cross-tenant routing → 009  Local UDP injection → 008 ✅
   DATAGRAM mismatch → 011   Endian bug (disputed) → 011
 ```
 
@@ -164,6 +164,9 @@ git push -u origin feature/XXX-task-name
 | Packet Encapsulation | QUIC DATAGRAM | RFC 9221 |
 | Address Discovery | QAD | Replaces STUN |
 | Linting | clippy + rustfmt, SwiftLint, ShellCheck | GitHub Actions CI + pre-commit hooks |
+| Metrics | Prometheus text format (lock-free atomics) | mio TcpListener HTTP, `--metrics-port` CLI flag |
+| Deployment | Terraform, Ansible, Docker, Kustomize | `deploy/terraform/`, `deploy/ansible/`, `deploy/docker/` |
+| CI/CD | GitHub Actions | `test.yml` (5-crate matrix), `release.yml` (cross-compile + Docker) |
 
 ---
 
@@ -343,8 +346,49 @@ log stream --predicate 'subsystem CONTAINS "ztna"' --info
 # Recent macOS Agent logs
 log show --last 5m --predicate 'subsystem CONTAINS "ztna"' --info
 
-# Server/Connector logs
+# Server/Connector logs (local E2E)
 tail -f tests/e2e/artifacts/logs/*.log
+
+# AWS service logs (real-time)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-intermediate -f'
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-connector -f'
+```
+
+### Metrics & Health (Task 008)
+
+Both Intermediate Server and App Connector expose Prometheus metrics and health endpoints.
+Configurable via `--metrics-port` CLI flag (default 9090/9091, pass `0` to disable).
+
+```bash
+# From AWS host (metrics bind to 0.0.0.0; restrict via SG/firewall)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9090/healthz'   # → "ok"
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9091/healthz'   # → "ok"
+
+# Intermediate Server metrics (9 counters, port 9090)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9090/metrics'
+# Key counters: ztna_active_connections, ztna_relay_bytes_total,
+#   ztna_registrations_total, ztna_registration_rejections_total,
+#   ztna_datagrams_relayed_total, ztna_signaling_sessions_total,
+#   ztna_retry_tokens_validated, ztna_retry_token_failures, ztna_uptime_seconds
+
+# App Connector metrics (6 counters, port 9091)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9091/metrics'
+# Key counters: ztna_connector_forwarded_packets_total, ztna_connector_forwarded_bytes_total,
+#   ztna_connector_tcp_sessions_total, ztna_connector_tcp_errors_total,
+#   ztna_connector_reconnections_total, ztna_connector_uptime_seconds
+
+# Watch metrics live (refreshes every 2s)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'watch -n2 "curl -s localhost:9090/metrics | grep -v ^#"'
+
+# Note: Metrics ports (9090/9091) are NOT in the AWS security group by default.
+# To reach externally, set Terraform enable_metrics_port=true (opens 9090 only)
+# or use SSH tunnel: ssh -L 9090:localhost:9090 -L 9091:localhost:9091 ubuntu@10.0.2.126
+
+# Graceful restart (demonstrates drain + auto-reconnect)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo systemctl restart ztna-intermediate'
+# Watch connector reconnect:
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-connector -f'
+# Look for: "Reconnecting (attempt 1) in 1000ms..." then "Reconnected to Intermediate Server"
 ```
 
 ---
@@ -366,6 +410,10 @@ tail -f tests/e2e/artifacts/logs/*.log
 | **Registration ACK** | Server confirms registration with 0x12 ACK or 0x13 NACK; clients retry with backoff (Task 007) |
 | **CID Rotation** | Periodic QUIC Connection ID rotation for privacy (Task 007) |
 | **ZTNA_MAGIC** | `0x5A` prefix byte distinguishing P2P control messages from QUIC packets (Task 007) |
+| **Prometheus Metrics** | Lock-free atomic counters exposed at `/metrics` in Prometheus text format (Task 008) |
+| **Health Check** | HTTP 200 `ok` response at `/healthz` endpoint — indicates component is running (Task 008) |
+| **Graceful Shutdown** | SIGTERM/SIGINT triggers `drain_and_shutdown()` — APPLICATION_CLOSE to all clients, 3s drain period (Task 008) |
+| **Auto-Reconnect** | Connector reconnects to Intermediate with exponential backoff (1s→30s cap) on connection loss (Task 008) |
 
 ### Registration & Routing Protocol
 
@@ -408,24 +456,24 @@ Findings from the original Oracle review not addressed by Task 007's 26-finding 
 | **High** | **Signaling session hijack** | 002-Server | `CandidateAnswer` accepted from any conn with matching session_id — no ownership check. Oracle confirmed NOT fixed by Task 007 | → Task 009 |
 | **High** | **Cross-tenant connector routing** | 003-Connector | "First flow wins" return-path; responses can route to wrong agent | → Task 009 |
 | ~~**High**~~ | ~~**IPv6 QAD panic**~~ | ~~002-Server~~ | ✅ Done (Task 015) — `build_observed_address()` returns `Option<Vec<u8>>`, panic replaced with `log::warn` + `None`. Full IPv6 QAD in Task 011 | ✅ Task 015 |
-| **High** | **Local UDP injection** | 003-Connector | Accepts UDP from any local process without source validation | → Task 008 |
+| ~~**High**~~ | ~~**Local UDP injection**~~ | ~~003-Connector~~ | ✅ Done (Task 008) — Source IP validation in `process_local_socket()` against `forward_addr`, drops unexpected sources with `log::warn` | ✅ Task 008 |
 | ~~**Medium**~~ | ~~**Predictable P2P identifiers**~~ | ~~packet_processor~~ | ✅ Done (Task 015) — `ring::rand::SystemRandom` CSPRNG replaces time+PID in `generate_session_id()` and `generate_transaction_id()` | ✅ Task 015 |
 | **Medium** | **DATAGRAM size mismatch** | All Rust | Constants aligned at 1350, but effective writable limit ~1307. Needs investigation | → Task 011 |
 | **Medium** | **Interface enumeration endian bug** | packet_processor | Oracle DISPUTES: `to_ne_bytes()` may be correct on macOS. Needs investigation, not blind fix | → Task 011 |
 | ~~**Medium**~~ | ~~**Legacy FFI dead code**~~ | ~~packet_processor~~ | ✅ Done (Task 015) — `process_packet()`, `PacketAction` enum, bridging header decl, doc refs all removed | ✅ Task 015 |
 | ~~**Medium**~~ | ~~**Service ID length truncation**~~ | ~~003-Connector~~ | ~~Fixed in Task 007 — bounds check before `u8` cast~~ | ✅ Task 007 |
 | **Low** | **Hot-path per-packet allocations** | packet_processor, app-connector | Buffer reuse refactor across multiple hot paths | → Task 011 |
-| **Low** | **Local socket recv buffer** | 003-Connector | Per-poll `vec![0u8; 65535]` instead of reusing `self.recv_buf` | → Task 008 |
+| ~~**Low**~~ | ~~**Local socket recv buffer**~~ | ~~003-Connector~~ | ✅ Done (Task 008) — `self.recv_buf` reuse with `to_vec()` copy, eliminates per-poll 65KB allocation | ✅ Task 008 |
 | ~~**Low**~~ | ~~**UDP length sanity**~~ | ~~003-Connector~~ | ✅ Done (Task 015) — `udp_len < 8` guard drops malformed packets with `log::warn` | ✅ Task 015 |
 
 ### Priority 2: Reliability (Recommended)
 
 | Item | Component | Description | Impact if Missing |
 |------|-----------|-------------|-------------------|
-| **Graceful Shutdown** | 002-Server | Connection draining on shutdown (→ Task 008) | Abrupt disconnects |
+| ~~Graceful Shutdown~~ | ~~002-Server~~ | ✅ Done (Task 008) — `drain_and_shutdown()`, SIGTERM/SIGINT handlers, 3s drain period, APPLICATION_CLOSE to all clients | ~~Abrupt disconnects~~ |
 | **Connection State Tracking** | 002-Server | Full state machine for connections (→ Task 008) | Edge case bugs |
 | ~~Error Recovery (Agent)~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.9) — Auto-reconnect with exponential backoff, NWPathMonitor, 3 detection paths | Agent auto-recovers |
-| **Error Recovery (Server/Connector)** | 002-Server, 003-Connector | Automatic reconnection logic (→ Task 008) | Manual intervention needed |
+| ~~Error Recovery (Server/Connector)~~ | ~~002-Server, 003-Connector~~ | ✅ Done (Task 008) — Connector auto-reconnects with exponential backoff (1s→30s), interruptible 500ms sleep chunks, reg_state reset | ~~Manual intervention needed~~ |
 | ~~TCP Support~~ | ~~003-Connector~~ | ✅ Done (Task 006 Phase 4.4) | Userspace TCP proxy |
 | ~~Registration Acknowledgment~~ | ~~002-Server, 003-Connector~~ | ✅ Done (Task 007 Phase 8A) — 0x12 ACK / 0x13 NACK with retry state machine | ~~Silent failures~~ |
 | ~~Return-Path DATAGRAM→TUN~~ | ~~001-Agent~~ | ✅ Done (Task 006 Phase 4.6) | `agent_recv_datagram()` FFI + `drainIncomingDatagrams()` |
@@ -434,7 +482,7 @@ Findings from the original Oracle review not addressed by Task 007's 26-finding 
 
 | Item | Component | Description |
 |------|-----------|-------------|
-| **Metrics/Stats Endpoint** | 002-Server, 003-Connector | Connection counts, packet rates, latency (→ Task 008) |
+| ~~Metrics/Stats Endpoint~~ | ~~002-Server, 003-Connector~~ | ✅ Done (Task 008) — Prometheus text format on `/metrics`, health on `/healthz`, 9+6 atomic counters, `--metrics-port` CLI flag |
 | ~~Configuration File~~ | ~~002-Server, 003-Connector~~ | ✅ Done (Task 006 Phase 4.2) - JSON configs |
 | **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported (→ Task 008) |
 | **IPv6 QAD Support** | 001-Agent, 002-Server, 003-Connector | Currently IPv4 only, 7-byte format (→ Task 011) |
@@ -448,9 +496,26 @@ Findings from the original Oracle review not addressed by Task 007's 26-finding 
 | **Multiplexed QUIC Streams** | 002-Server | DATAGRAMs sufficient for current relay needs (→ Task 011) |
 | ~~P2P NAT Testing~~ | ~~006-Cloud~~ | ✅ Done (Task 006 Phase 6.8) — Direct P2P path achieved, keepalive demux fix in Rust `recv()` |
 
+### Priority 4: Deferred from Task 008
+
+Items that were deferred during Task 008 implementation because they require live infrastructure, external tooling, or are lower priority.
+
+| Item | Component | Description | What's Needed |
+|------|-----------|-------------|---------------|
+| **Grafana Dashboard JSON** | 002-Server, 003-Connector | Pre-built dashboard for Prometheus metrics (9+6 counters) | Grafana instance; import JSON |
+| **E2E Tests in CI** | CI/CD | GitHub Actions workflow for shell-based E2E test suite | Docker-in-CI infrastructure; server binary builds |
+| **K8s Manifest Updates** | deploy/k8s | Production kustomize overlays for updated binaries | K8s cluster access; existing Pi kustomize works for dev |
+| **Live Reconnect Test** | 003-Connector | Restart Intermediate, verify Connector auto-recovers | AWS EC2 deployment with both services |
+| **Zero-Downtime Restart Test** | 002-Server | Verify graceful shutdown + restart has no dropped connections | AWS EC2 + active Agent connections |
+| **UDP Injection Mock Test** | 003-Connector | Unit test that UDP from unexpected source IP is dropped | Network mock / loopback test harness |
+| **Buffer Reuse Benchmark** | 003-Connector | Measure allocation reduction in high-PPS scenarios | Perf benchmarking harness (criterion) |
+| **Agent Service Unavailability Notification** | 002-Server, 001-Agent | Notify agents when connector goes down (currently agents detect via QUIC close) | Protocol extension; currently graceful enough via QUIC |
+| **Multiple Bind Addresses** | 002-Server | Only `0.0.0.0:4433` supported currently | Multi-interface support; low priority |
+| **MD040 Markdown Lint** | Docs | Pre-existing unlabeled fenced code blocks in `docs/architecture.md` (~20) and `docs/demo-runbook.md` (~3); Task 008 fixed only the new blocks it added | Bulk find-and-tag pass; low-priority cosmetic |
+
 ### Tracking
 
-Post-MVP tasks (007-012) have been created to address these deferred items.
+Post-MVP tasks (007-016) have been created to address these deferred items.
 Each item above references its target task number (→ Task NNN).
 When implementing, reference this section in the task's `plan.md` and update
 this table when complete (change to ✅ and add commit reference).
@@ -549,7 +614,7 @@ See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementati
 - macOS Agent with SwiftUI config UI + 23 FFI functions
 - AWS EC2 deployment (Intermediate + 2 Connectors + echo + HTTP services)
 - Pi k8s deployment (Kustomize + Cilium L2 LoadBalancer)
-- 177+ tests (116 unit + 61+ E2E)
+- 214+ tests (153 unit + 61+ E2E)
 - Performance: P2P 32.6ms vs Relay 76ms (2.3x faster), 10-min 0% loss, seamless failover
 
 **Post-MVP completions (merged in PR #7):**
@@ -571,7 +636,7 @@ See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementati
 | Task | Name | Priority | Description | Dependencies |
 |------|------|----------|-------------|--------------|
 | ~~[007](../done/007-security-hardening/)~~ | ~~Security Hardening~~ | ~~Done~~ | ~~26 findings + 6 deferred items: mTLS, cert renewal, non-blocking TCP, retry tokens, reg ACK, CID rotation~~ | ~~None~~ |
-| [008](../008-production-operations/) | Production Operations | P2 | Prometheus metrics, graceful shutdown, deployment automation, CI/CD. **+Oracle:** local UDP injection fix | 007 ✅ |
+| ~~[008](../008-production-operations/)~~ | ~~Production Operations~~ | ~~Done~~ | ~~Prometheus metrics, graceful shutdown, auto-reconnection, deployment automation (Terraform/Ansible/Docker), CI/CD (test+release). +Oracle: UDP injection fix, buffer reuse~~ | ~~007 ✅~~ |
 | [009](../009-multi-service-architecture/) | Multi-Service Architecture | P2 | Per-service backend routing, dynamic discovery, health checks. **+Oracle:** signaling hijack, cross-tenant routing fixes | None |
 | [010](../010-admin-dashboard/) | Admin Dashboard | P3 | REST API on Intermediate, web frontend, topology visualization. **Note:** MVP admin panel now in Task 016; Task 010 extends it | 008, 009, 016 |
 | [011](../011-protocol-improvements/) | Protocol Improvements | P3 | IPv6 QAD, TCP flow control, separate P2P/relay sockets, QUIC migration, 0-RTT. **+Oracle:** IPv6 panic, predictable IDs, endian bug, DATAGRAM size | None |

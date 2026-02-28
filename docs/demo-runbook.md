@@ -1,7 +1,7 @@
 # ZTNA Demo Runbook
 
-**Purpose:** Self-contained 5-terminal demo for blog posts, articles, and presentations.
-**Last Updated:** 2026-02-21
+**Purpose:** Self-contained 6-terminal demo for blog posts, articles, and presentations.
+**Last Updated:** 2026-02-27
 **Prerequisites:** AWS EC2 running all services, macOS Agent built, VPN configuration set.
 
 ---
@@ -14,6 +14,7 @@ Before starting the demo, verify:
 - [ ] macOS Agent app built (Xcode or `xcodebuild`)
 - [ ] Agent configured: Host=3.128.36.92, Port=4433, Services=echo-service,web-app
 - [ ] AWS services running (see Verify Services below)
+- [ ] Metrics endpoints reachable (see Verify Metrics below)
 
 ### Verify AWS Services
 
@@ -29,11 +30,24 @@ ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
     'sudo systemctl restart ztna-intermediate ztna-connector ztna-connector-web http-server echo-server'
 ```
 
+### Verify Metrics
+
+From the AWS host (metrics bind to `0.0.0.0` by default, reachable on any interface):
+
+```bash
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'curl -s http://localhost:9090/healthz && echo " intermediate" && curl -s http://localhost:9091/healthz && echo " connector"'
+```
+
+Expected: `ok intermediate` and `ok connector`.
+
+**Note:** Metrics ports (9090/9091) are **not** exposed in the AWS security group by default. To reach them from your Mac via Tailscale, SSH tunnel or set Terraform `enable_metrics_port = true` (opens 9090 only — add a second rule for 9091 if needed). For demo purposes, SSH into the host and curl locally.
+
 ---
 
 ## Terminal Layout
 
-Open 5 terminal windows, arranged so all are visible:
+Open 6 terminal windows, arranged so all are visible:
 
 | Terminal | Purpose | What to Watch |
 |----------|---------|---------------|
@@ -42,6 +56,7 @@ Open 5 terminal windows, arranged so all are visible:
 | T3 | macOS Agent logs | QUIC connection, service registration, hole punch |
 | T4 | Test traffic | ping, curl, nc commands |
 | T5 | Failover testing | SSH to AWS for iptables commands |
+| T6 | Metrics monitoring | Prometheus counters, health checks, reconnections |
 
 ---
 
@@ -214,6 +229,106 @@ round-trip min/avg/max/stddev = 30.2/31.8/35.3/0.7 ms
 
 ---
 
+## Act 6: Observability — Live Metrics
+
+Demonstrate built-in Prometheus metrics and health checks.
+
+**T6 — Watch Intermediate Server metrics live:**
+```bash
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'watch -n2 "curl -s http://localhost:9090/metrics | grep -v ^#"'
+```
+
+**What you'll see (counter names and live values):**
+```text
+ztna_active_connections 2
+ztna_relay_bytes_total 15360
+ztna_registrations_total 4
+ztna_registration_rejections_total 0
+ztna_datagrams_relayed_total 120
+ztna_signaling_sessions_total 1
+ztna_retry_tokens_validated 2
+ztna_retry_token_failures 0
+ztna_uptime_seconds 3421
+```
+
+**T4 — Generate some traffic while watching T6:**
+```bash
+ping -c 20 10.100.0.1
+curl http://10.100.0.2:8080/
+```
+
+**What you'll see in T6:**
+- `ztna_datagrams_relayed_total` increments with each relayed packet
+- `ztna_relay_bytes_total` grows as bytes flow through
+- `ztna_active_connections` shows 2 (Agent + Connector)
+
+**T6 — Switch to Connector metrics:**
+```bash
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'curl -s http://localhost:9091/metrics | grep -v ^#'
+```
+
+**Connector counters:**
+```text
+ztna_connector_forwarded_packets_total 42
+ztna_connector_forwarded_bytes_total 8192
+ztna_connector_tcp_sessions_total 1
+ztna_connector_tcp_errors_total 0
+ztna_connector_reconnections_total 0
+ztna_connector_uptime_seconds 3400
+```
+
+**T6 — Health check (one-liner):**
+```bash
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'echo "Intermediate: $(curl -s localhost:9090/healthz)  Connector: $(curl -s localhost:9091/healthz)"'
+```
+
+Expected: `Intermediate: ok  Connector: ok`
+
+**Talking point:** Both components expose Prometheus-compatible metrics and health endpoints with zero external dependencies — no Grafana or Prometheus server needed to inspect. The counters are lock-free atomics, adding negligible overhead. In production, point a Prometheus scraper at port 9090/9091 and build dashboards.
+
+---
+
+## Act 7: Graceful Restart & Auto-Reconnect
+
+Demonstrate that the Intermediate Server drains connections on restart, and the Connector automatically reconnects.
+
+**T4 — Start a sustained ping (background traffic):**
+```bash
+ping -c 120 10.100.0.1
+```
+
+**T6 — Watch the connector's reconnection counter:**
+```bash
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'watch -n1 "curl -s http://localhost:9091/metrics | grep reconnections"'
+```
+
+**T5 — Gracefully restart the Intermediate Server:**
+```bash
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
+    'sudo systemctl restart ztna-intermediate'
+```
+
+**What you'll see across terminals:**
+
+- **T1:** `"Shutdown signal received, draining connections..."` followed by `"Sending APPLICATION_CLOSE to N connections"` then `"All connections closed cleanly"`
+- **T2:** Connection lost, then: `"Intermediate connection closed, reconnecting..."`, `"Reconnecting (attempt 1) in 1000ms..."`, `"Reconnected to Intermediate Server"`, `"Registration sent"`
+- **T6:** `ztna_connector_reconnections_total` increments from `0` to `1`
+- **T4:** Brief interruption during restart (~2-3 seconds), then pings resume
+
+**T4 — Verify traffic resumes:**
+```bash
+ping -c 10 10.100.0.1
+curl http://10.100.0.2:8080/
+```
+
+**Talking point:** The Intermediate Server handles SIGTERM gracefully — it sends QUIC APPLICATION_CLOSE to all connected clients and waits up to 3 seconds for acknowledgments before exiting. The Connector detects the lost connection and auto-reconnects with exponential backoff (1s, 2s, 4s... up to 30s cap). No manual intervention, no systemd restart needed. The backoff sleep is interruptible — if SIGTERM arrives during reconnection delay, the Connector exits within 500ms.
+
+---
+
 ## Key Talking Points for Blog/Article
 
 1. **Split tunnel architecture** — only ZTNA traffic (10.100.0.0/24) goes through the tunnel. Everything else routes normally. No VPN-style "all traffic" overhead.
@@ -227,6 +342,10 @@ round-trip min/avg/max/stddev = 30.2/31.8/35.3/0.7 ms
 5. **Connection resilience** — the Agent auto-recovers from server restarts, WiFi toggles, and network changes. Exponential backoff (1s → 30s cap) prevents thundering herd on outages.
 
 6. **Performance** — P2P direct: 32.6ms avg. Relay: 76ms avg. 10-minute sustained test: 600/600 packets, 0% loss. P2P is 2.3x faster than relay.
+
+7. **Built-in observability** — both server components expose Prometheus metrics and health endpoints with zero external dependencies. Lock-free atomic counters add negligible overhead. Point any Prometheus scraper at ports 9090/9091 for production monitoring.
+
+8. **Graceful shutdown + auto-reconnect** — the Intermediate Server drains connections on SIGTERM (3s drain window). The Connector auto-reconnects with exponential backoff (1s → 30s cap, interruptible for SIGTERM). Zero manual intervention for rolling restarts.
 
 ---
 
@@ -286,6 +405,27 @@ sudo iptables -F INPUT
 
 # Restart all services
 sudo systemctl restart ztna-intermediate ztna-connector ztna-connector-web http-server echo-server
+
+# --- Metrics & Health (Task 008) ---
+
+# Intermediate Server metrics (9 counters)
+curl -s http://localhost:9090/metrics | grep -v ^#
+
+# App Connector metrics (6 counters)
+curl -s http://localhost:9091/metrics | grep -v ^#
+
+# Health checks
+curl -s http://localhost:9090/healthz    # Intermediate → "ok"
+curl -s http://localhost:9091/healthz    # Connector → "ok"
+
+# Watch metrics live (refreshes every 2s)
+watch -n2 'curl -s http://localhost:9090/metrics | grep -v ^#'
+
+# Check connector reconnection count
+curl -s http://localhost:9091/metrics | grep reconnections
+
+# Graceful restart (triggers drain + auto-reconnect)
+sudo systemctl restart ztna-intermediate
 ```
 
 ---

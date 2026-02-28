@@ -1,0 +1,239 @@
+# =============================================================================
+# ZTNA Role — Main Tasks
+# =============================================================================
+---
+
+# ---- System Dependencies ----
+
+- name: Install system packages
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - pkg-config
+      - libssl-dev
+      - cmake
+      - git
+      - curl
+      - ufw
+      - jq
+      - python3
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags: [deps]
+
+# ---- Rust Toolchain ----
+
+- name: Check if Rust is installed
+  ansible.builtin.command: /home/{{ ztna_user }}/.cargo/bin/rustc --version
+  become: true
+  become_user: "{{ ztna_user }}"
+  register: rust_check
+  changed_when: false
+  failed_when: false
+  tags: [deps, rust]
+
+- name: Install Rust toolchain
+  ansible.builtin.shell: |
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain {{ rust_toolchain }}
+  become: true
+  become_user: "{{ ztna_user }}"
+  when: rust_check.rc != 0
+  tags: [deps, rust]
+
+- name: Update Rust toolchain
+  ansible.builtin.command: /home/{{ ztna_user }}/.cargo/bin/rustup update {{ rust_toolchain }}
+  become: true
+  become_user: "{{ ztna_user }}"
+  changed_when: "'updated' in rust_update.stdout"
+  register: rust_update
+  tags: [deps, rust]
+
+# ---- Repository ----
+
+- name: Clone or update ztna-agent repository
+  ansible.builtin.git:
+    repo: "{{ ztna_repo_url }}"
+    dest: "{{ ztna_install_dir }}"
+    version: "{{ ztna_repo_branch }}"
+    force: false
+  become: true
+  become_user: "{{ ztna_user }}"
+  register: repo_update
+  tags: [repo]
+
+# ---- Build ----
+
+- name: Build intermediate-server (release)
+  ansible.builtin.shell: |
+    source /home/{{ ztna_user }}/.cargo/env
+    cargo build --release --manifest-path {{ ztna_install_dir }}/intermediate-server/Cargo.toml
+  become: true
+  become_user: "{{ ztna_user }}"
+  args:
+    executable: /bin/bash
+  when: repo_update.changed or (force_build | default(false))
+  notify: Restart intermediate server
+  tags: [build]
+
+- name: Build app-connector (release)
+  ansible.builtin.shell: |
+    source /home/{{ ztna_user }}/.cargo/env
+    cargo build --release --manifest-path {{ ztna_install_dir }}/app-connector/Cargo.toml
+  become: true
+  become_user: "{{ ztna_user }}"
+  args:
+    executable: /bin/bash
+  when: repo_update.changed or (force_build | default(false))
+  notify: Restart app connector
+  tags: [build]
+
+# ---- Certificates Directory ----
+
+- name: Ensure certificate directory exists
+  ansible.builtin.file:
+    path: "{{ ztna_cert_dir }}"
+    state: directory
+    owner: "{{ ztna_user }}"
+    group: "{{ ztna_group }}"
+    mode: "0750"
+  tags: [certs]
+
+# ---- Echo Server Script ----
+
+- name: Deploy echo-server Python script
+  ansible.builtin.template:
+    src: echo-server.py.j2
+    dest: "{{ ztna_install_dir }}/echo-server.py"
+    owner: "{{ ztna_user }}"
+    group: "{{ ztna_group }}"
+    mode: "0755"
+  notify: Restart echo server
+  tags: [services]
+
+# ---- Systemd Services ----
+
+- name: Deploy intermediate-server systemd unit
+  ansible.builtin.template:
+    src: ztna-intermediate.service.j2
+    dest: /etc/systemd/system/ztna-intermediate.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart intermediate server
+  tags: [services]
+
+- name: Deploy app-connector systemd unit
+  ansible.builtin.template:
+    src: ztna-connector.service.j2
+    dest: /etc/systemd/system/ztna-connector.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart app connector
+  tags: [services]
+
+- name: Deploy echo-server systemd unit
+  ansible.builtin.template:
+    src: echo-server.service.j2
+    dest: /etc/systemd/system/echo-server.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart echo server
+  tags: [services]
+
+- name: Deploy cert-renewal systemd units
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - "{{ ztna_install_dir }}/deploy/aws/ztna-cert-renew.service"
+    - "{{ ztna_install_dir }}/deploy/aws/ztna-cert-renew.timer"
+  notify: Reload systemd
+  tags: [services, certs]
+
+# ---- Enable and Start Services ----
+
+- name: Enable ZTNA services at boot
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    daemon_reload: true
+  loop:
+    - echo-server
+    - ztna-intermediate
+    - ztna-connector
+  tags: [services]
+
+- name: Start echo-server
+  ansible.builtin.systemd:
+    name: echo-server
+    state: started
+  tags: [services]
+
+- name: Start intermediate-server
+  ansible.builtin.systemd:
+    name: ztna-intermediate
+    state: started
+  tags: [services]
+
+- name: Start app-connector
+  ansible.builtin.systemd:
+    name: ztna-connector
+    state: started
+  tags: [services]
+
+# ---- Firewall ----
+
+- name: Configure UFW defaults
+  community.general.ufw:
+    direction: "{{ item.direction }}"
+    policy: "{{ item.policy }}"
+  loop:
+    - { direction: incoming, policy: deny }
+    - { direction: outgoing, policy: allow }
+  when: ufw_enabled
+  tags: [firewall]
+
+- name: Allow SSH
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    comment: "SSH"
+  when: ufw_enabled
+  tags: [firewall]
+
+- name: Allow QUIC (UDP 4433)
+  community.general.ufw:
+    rule: allow
+    port: "4433"
+    proto: udp
+    comment: "QUIC Intermediate Server"
+  when: ufw_enabled
+  tags: [firewall]
+
+- name: Allow P2P (UDP 4434)
+  community.general.ufw:
+    rule: allow
+    port: "4434"
+    proto: udp
+    comment: "P2P hole-punching"
+  when: ufw_enabled
+  tags: [firewall]
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
+  when: ufw_enabled
+  tags: [firewall]

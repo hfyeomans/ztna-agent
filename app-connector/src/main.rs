@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -20,6 +22,7 @@ use mio::net::{TcpStream as MioTcpStream, UdpSocket};
 use mio::{Events, Interest, Poll, Token};
 use ring::rand::{SecureRandom, SystemRandom};
 
+mod metrics;
 mod qad;
 mod signaling;
 
@@ -105,6 +108,22 @@ const QUIC_SOCKET_TOKEN: Token = Token(0);
 
 /// mio token for local forwarding socket
 const LOCAL_SOCKET_TOKEN: Token = Token(1);
+
+/// mio token for the metrics/health HTTP listener
+const METRICS_TOKEN: Token = Token(2);
+
+// ============================================================================
+// Reconnection Constants
+// ============================================================================
+
+/// Initial delay before first reconnection attempt (1 second)
+const RECONNECT_INITIAL_DELAY_MS: u64 = 1_000;
+
+/// Maximum delay between reconnection attempts (30 seconds)
+const RECONNECT_MAX_DELAY_MS: u64 = 30_000;
+
+/// Backoff multiplier for reconnection delay
+const RECONNECT_BACKOFF_FACTOR: u64 = 2;
 
 // ============================================================================
 // P2P Binding Messages (must match packet_processor::p2p::connectivity)
@@ -269,6 +288,7 @@ struct ConnectorConfig {
     p2p: Option<P2PConfig>,
     ca_cert: Option<String>,
     verify_peer: Option<bool>,
+    metrics_port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -427,9 +447,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ip
         );
     }
+    // Metrics/health HTTP endpoint (default 9091, 0 to disable)
+    let metrics_port: u16 = parse_arg(&args, "--metrics-port")
+        .and_then(|s| s.parse().ok())
+        .or(config.metrics_port)
+        .unwrap_or(9091);
+
     log::info!("  Verify peer: {}", verify_peer);
+    if metrics_port > 0 {
+        log::info!("  Metrics port: {}", metrics_port);
+    } else {
+        log::info!("  Metrics: disabled");
+    }
     if !verify_peer {
         log::warn!("TLS peer verification DISABLED — do not use in production");
+    }
+
+    // Register SIGTERM handler for graceful shutdown
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown_flag))?;
+        log::info!("SIGTERM handler registered for graceful shutdown");
     }
 
     // Create connector and run
@@ -444,6 +483,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_virtual_ip,
         ca_cert.as_deref(),
         verify_peer,
+        shutdown_flag,
+        metrics_port,
     )?;
     connector.run()
 }
@@ -520,6 +561,15 @@ struct Connector {
     tcp_syn_rates: HashMap<Ipv4Addr, (Instant, u32)>,
     /// 8B.3: Last time CID rotation was performed
     last_cid_rotation: Instant,
+    /// Consecutive reconnection attempts (reset to 0 on success)
+    reconnect_attempts: u32,
+    /// Shared shutdown flag — set by SIGTERM handler
+    shutdown_flag: Arc<AtomicBool>,
+    // Phase 2: Prometheus metrics + health check
+    /// Atomic metrics counters
+    metrics: metrics::Metrics,
+    /// TCP listener for metrics/health HTTP endpoint (None if disabled)
+    metrics_listener: Option<mio::net::TcpListener>,
 }
 
 impl Connector {
@@ -535,6 +585,8 @@ impl Connector {
         service_virtual_ip: Option<Ipv4Addr>,
         ca_cert_path: Option<&str>,
         verify_peer: bool,
+        shutdown_flag: Arc<AtomicBool>,
+        metrics_port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create quiche client configuration (for connecting to Intermediate)
         let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -623,6 +675,18 @@ impl Connector {
         log::info!("QUIC socket bound to {}", quic_socket.local_addr()?);
         log::info!("Local socket bound to {}", local_socket.local_addr()?);
 
+        // Phase 2: Bind metrics/health HTTP listener (if enabled)
+        let metrics_listener = if metrics_port > 0 {
+            let metrics_addr: SocketAddr = format!("0.0.0.0:{}", metrics_port).parse()?;
+            let mut listener = mio::net::TcpListener::bind(metrics_addr)?;
+            poll.registry()
+                .register(&mut listener, METRICS_TOKEN, Interest::READABLE)?;
+            log::info!("Metrics/health endpoint listening on {}", metrics_addr);
+            Some(listener)
+        } else {
+            None
+        };
+
         Ok(Connector {
             poll,
             quic_socket,
@@ -642,7 +706,7 @@ impl Connector {
             observed_addr: None,
             flow_map: HashMap::new(),
             tcp_sessions: HashMap::new(),
-            next_tcp_token: 2, // 0 = QUIC_SOCKET_TOKEN, 1 = LOCAL_SOCKET_TOKEN
+            next_tcp_token: 3, // 0 = QUIC, 1 = LOCAL, 2 = METRICS
             token_to_flow: HashMap::new(),
             signaling_buffer: Vec::new(),
             session_manager: P2PSessionManager::new(),
@@ -651,6 +715,10 @@ impl Connector {
             service_virtual_ip,
             tcp_syn_rates: HashMap::new(),
             last_cid_rotation: Instant::now(),
+            reconnect_attempts: 0,
+            shutdown_flag,
+            metrics: metrics::Metrics::new(),
+            metrics_listener,
         })
     }
 
@@ -671,6 +739,12 @@ impl Connector {
         let mut events = Events::with_capacity(1024);
 
         loop {
+            // Check for SIGTERM shutdown signal
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                log::info!("Shutdown signal received, exiting main loop");
+                break;
+            }
+
             // Calculate timeout based on all connection timeouts
             let timeout = self
                 .calculate_min_timeout()
@@ -688,6 +762,9 @@ impl Connector {
                     }
                     LOCAL_SOCKET_TOKEN => {
                         self.process_local_socket()?;
+                    }
+                    METRICS_TOKEN => {
+                        self.handle_metrics_accept();
                     }
                     token => {
                         // 7A.4: TCP backend socket event
@@ -729,12 +806,86 @@ impl Connector {
                 log::debug!("Cleaned up expired P2P session {}", session_id);
             }
 
-            // Check connection states
+            // Check if Intermediate connection is closed — attempt reconnection
             if let Some(ref conn) = self.intermediate_conn {
                 if conn.is_closed() {
-                    log::warn!("Intermediate connection closed");
-                    // Reconnect logic could go here
-                    break;
+                    log::warn!("Intermediate connection closed, attempting reconnection...");
+
+                    // Clean up old connection state
+                    self.intermediate_conn = None;
+                    self.reg_state = RegistrationState::NotRegistered;
+                    self.signaling_buffer.clear();
+
+                    // Reconnection loop with exponential backoff
+                    loop {
+                        // Check shutdown before each attempt
+                        if self.shutdown_flag.load(Ordering::Relaxed) {
+                            log::info!("Shutdown signal received during reconnection");
+                            return Ok(());
+                        }
+
+                        // Calculate backoff delay: initial * factor^attempts, capped
+                        let delay_ms = RECONNECT_INITIAL_DELAY_MS
+                            .saturating_mul(
+                                RECONNECT_BACKOFF_FACTOR.saturating_pow(self.reconnect_attempts),
+                            )
+                            .min(RECONNECT_MAX_DELAY_MS);
+
+                        log::info!(
+                            "Reconnect attempt {} — waiting {}ms before retry",
+                            self.reconnect_attempts + 1,
+                            delay_ms
+                        );
+
+                        // Sleep in short intervals so SIGTERM is responsive
+                        let mut remaining_ms = delay_ms;
+                        while remaining_ms > 0 {
+                            let chunk = remaining_ms.min(500);
+                            std::thread::sleep(Duration::from_millis(chunk));
+                            remaining_ms = remaining_ms.saturating_sub(chunk);
+                            if self.shutdown_flag.load(Ordering::Relaxed) {
+                                log::info!("Shutdown signal received during reconnection backoff");
+                                return Ok(());
+                            }
+                        }
+
+                        self.reconnect_attempts += 1;
+
+                        match self.connect_to_intermediate() {
+                            Ok(()) => {
+                                // Send initial handshake packet for the new connection
+                                if let Err(e) = self.send_pending() {
+                                    log::error!("Failed to send handshake after reconnect: {}", e);
+                                    self.intermediate_conn = None;
+                                    continue;
+                                }
+                                self.metrics
+                                    .reconnections_total
+                                    .fetch_add(1, Ordering::Relaxed);
+                                log::info!(
+                                    "Successfully reconnected to Intermediate Server \
+                                     (after {} attempt{})",
+                                    self.reconnect_attempts,
+                                    if self.reconnect_attempts == 1 {
+                                        ""
+                                    } else {
+                                        "s"
+                                    }
+                                );
+                                self.reconnect_attempts = 0;
+                                self.last_keepalive = Instant::now();
+                                self.last_cid_rotation = Instant::now();
+                                break;
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "Reconnection attempt {} failed: {}",
+                                    self.reconnect_attempts,
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1300,6 +1451,12 @@ impl Connector {
         // Forward payload to local service
         match self.local_socket.send_to(payload, self.forward_addr) {
             Ok(sent) => {
+                self.metrics
+                    .forwarded_packets_total
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .forwarded_bytes_total
+                    .fetch_add(sent as u64, Ordering::Relaxed);
                 log::trace!("Sent {} bytes to local service", sent);
             }
             Err(e) => {
@@ -1504,6 +1661,9 @@ impl Connector {
 
                         self.token_to_flow.insert(token, flow_key);
                         self.tcp_sessions.insert(flow_key, session);
+                        self.metrics
+                            .tcp_sessions_total
+                            .fetch_add(1, Ordering::Relaxed);
                         log::debug!(
                             "TCP non-blocking connect initiated to {} (token={:?})",
                             self.forward_addr,
@@ -1513,6 +1673,9 @@ impl Connector {
                 }
                 Err(e) => {
                     log::warn!("TCP connect to {} failed: {}", self.forward_addr, e);
+                    self.metrics
+                        .tcp_errors_total
+                        .fetch_add(1, Ordering::Relaxed);
                     packets_to_send.push(build_tcp_packet(
                         dst_ip,
                         dst_port,
@@ -1588,6 +1751,12 @@ impl Connector {
                     if !payload.is_empty() && !session.draining {
                         match session.stream.write(payload) {
                             Ok(n) => {
+                                self.metrics
+                                    .forwarded_packets_total
+                                    .fetch_add(1, Ordering::Relaxed);
+                                self.metrics
+                                    .forwarded_bytes_total
+                                    .fetch_add(n as u64, Ordering::Relaxed);
                                 session.their_seq = seq_num.wrapping_add(n as u32);
                                 packets_to_send.push(build_tcp_packet(
                                     dst_ip,
@@ -1612,6 +1781,9 @@ impl Connector {
                                 log::trace!("TCP write WouldBlock for {}:{}", src_ip, src_port);
                             }
                             Err(e) => {
+                                self.metrics
+                                    .tcp_errors_total
+                                    .fetch_add(1, Ordering::Relaxed);
                                 log::debug!("TCP write to backend failed: {}", e);
                                 packets_to_send.push(build_tcp_packet(
                                     dst_ip,
@@ -1776,6 +1948,9 @@ impl Connector {
                                     session.agent_port,
                                     e
                                 );
+                                self.metrics
+                                    .tcp_errors_total
+                                    .fetch_add(1, Ordering::Relaxed);
                                 packets_to_send.push(build_tcp_packet(
                                     session.service_ip,
                                     session.service_port,
@@ -1828,6 +2003,12 @@ impl Connector {
                                     break;
                                 }
                                 Ok(n) => {
+                                    self.metrics
+                                        .forwarded_packets_total
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    self.metrics
+                                        .forwarded_bytes_total
+                                        .fetch_add(n as u64, Ordering::Relaxed);
                                     packets_to_send.push(build_tcp_packet(
                                         session.service_ip,
                                         session.service_port,
@@ -1856,6 +2037,9 @@ impl Connector {
                                         session.agent_port,
                                         e
                                     );
+                                    self.metrics
+                                        .tcp_errors_total
+                                        .fetch_add(1, Ordering::Relaxed);
                                     packets_to_send.push(build_tcp_packet(
                                         session.service_ip,
                                         session.service_port,
@@ -1971,16 +2155,23 @@ impl Connector {
     }
 
     fn process_local_socket(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut buf = vec![0u8; 65535];
-
         loop {
-            match self.local_socket.recv_from(&mut buf) {
+            match self.local_socket.recv_from(&mut self.recv_buf) {
                 Ok((len, from)) => {
+                    // Validate source address — only accept traffic from the expected backend
+                    if from.ip() != self.forward_addr.ip() {
+                        log::warn!(
+                            "Dropping UDP from unexpected source {}, expected {}",
+                            from.ip(),
+                            self.forward_addr.ip()
+                        );
+                        continue;
+                    }
+
                     log::trace!("Received {} bytes from local service at {}", len, from);
 
-                    // For MVP, we need to re-encapsulate and send back
-                    // Find the original flow to construct return packet
-                    self.send_return_traffic(&buf[..len], from)?;
+                    let data = self.recv_buf[..len].to_vec();
+                    self.send_return_traffic(&data, from)?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => {
@@ -2275,6 +2466,63 @@ impl Connector {
         }
 
         Ok(())
+    }
+
+    /// Phase 2: Accept and handle a metrics/health HTTP connection.
+    ///
+    /// Metrics connections are short-lived (Prometheus scrapes), so we handle them
+    /// synchronously: accept, read the HTTP request line, write the response, close.
+    fn handle_metrics_accept(&self) {
+        let listener = match self.metrics_listener {
+            Some(ref l) => l,
+            None => return,
+        };
+
+        // Accept all pending connections (edge-triggered)
+        loop {
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    log::debug!("Metrics connection from {}", addr);
+                    self.handle_metrics_connection(stream);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    log::debug!("Metrics accept error: {:?}", e);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Handle a single metrics/health HTTP request synchronously.
+    fn handle_metrics_connection(&self, stream: mio::net::TcpStream) {
+        let mut buf = [0u8; 1024];
+        match (&stream).read(&mut buf) {
+            Ok(n) if n > 0 => {
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let response = if request.starts_with("GET /healthz ")
+                    || request.starts_with("GET /healthz\r")
+                {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok\n".to_string()
+                } else if request.starts_with("GET /metrics ")
+                    || request.starts_with("GET /metrics\r")
+                {
+                    let body = self.metrics.render();
+                    format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/plain; version=0.0.4\r\n\
+                         Content-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                };
+                let _ = (&stream).write_all(response.as_bytes());
+            }
+            Ok(_) => {}
+            Err(e) => log::debug!("Metrics connection read error: {:?}", e),
+        }
     }
 
     fn cleanup_closed_p2p(&mut self) {
