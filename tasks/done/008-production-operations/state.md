@@ -5,7 +5,7 @@
 **Priority:** P2
 **Depends On:** 007-security-hardening
 **Branch:** feature/008-production-operations
-**Last Updated:** 2026-02-27
+**Last Updated:** 2026-02-28
 
 ---
 
@@ -48,11 +48,26 @@ Track the current state of production operations implementation including monito
   2. P2: Reconnect backoff thread::sleep blocks SIGTERM up to 30s → split into 500ms interruptible chunks
   3. P2: Default metrics port causes AddrInUse in tests → added --metrics-port 0 to integration tests
 
-### Deferred Items
+### Live AWS Verification (2026-02-28)
+
+All three deferred live tests completed successfully:
+
+| Test | Result | Details |
+|------|--------|---------|
+| Terraform plan | PASS | 12 resources, exit 0, AWS provider v5.100.0 |
+| Metrics endpoints | PASS | All 3 /healthz → "ok", all 3 /metrics → Prometheus format |
+| Auto-reconnect | PASS | Connector detected restart via QUIC idle timeout (~38s), reconnected in 1 attempt, re-registered, `reconnections_total` 0→1 |
+
+**Deployment notes discovered:**
+- Task 007 changed `verify_peer` default to `true` — connectors need `--no-verify-peer` with self-signed certs
+- Multiple connectors on same host need different `--metrics-port` values (default 9091 conflicts)
+- `source ~/.cargo/env` required for cargo in non-login SSH shells
+- Intermediate metrics bind to configured bind address (10.0.2.126), not 0.0.0.0
+
+### Remaining Deferred Items
 - Grafana dashboard JSON (needs Grafana instance)
 - E2E tests in CI (needs Docker infrastructure in GitHub Actions)
 - K8s manifest updates (existing kustomize works)
-- Live AWS testing (restart/reconnect, zero-downtime)
 - Network mock tests for UDP injection validation
 - Allocation benchmarks for buffer reuse
 
