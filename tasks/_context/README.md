@@ -164,6 +164,9 @@ git push -u origin feature/XXX-task-name
 | Packet Encapsulation | QUIC DATAGRAM | RFC 9221 |
 | Address Discovery | QAD | Replaces STUN |
 | Linting | clippy + rustfmt, SwiftLint, ShellCheck | GitHub Actions CI + pre-commit hooks |
+| Metrics | Prometheus text format (lock-free atomics) | mio TcpListener HTTP, `--metrics-port` CLI flag |
+| Deployment | Terraform, Ansible, Docker, Kustomize | `deploy/terraform/`, `deploy/ansible/`, `deploy/docker/` |
+| CI/CD | GitHub Actions | `test.yml` (5-crate matrix), `release.yml` (cross-compile + Docker) |
 
 ---
 
@@ -343,8 +346,49 @@ log stream --predicate 'subsystem CONTAINS "ztna"' --info
 # Recent macOS Agent logs
 log show --last 5m --predicate 'subsystem CONTAINS "ztna"' --info
 
-# Server/Connector logs
+# Server/Connector logs (local E2E)
 tail -f tests/e2e/artifacts/logs/*.log
+
+# AWS service logs (real-time)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-intermediate -f'
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-connector -f'
+```
+
+### Metrics & Health (Task 008)
+
+Both Intermediate Server and App Connector expose Prometheus metrics and health endpoints.
+Configurable via `--metrics-port` CLI flag (default 9090/9091, pass `0` to disable).
+
+```bash
+# From AWS host (metrics bound to localhost by default)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9090/healthz'   # → "ok"
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9091/healthz'   # → "ok"
+
+# Intermediate Server metrics (9 counters, port 9090)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9090/metrics'
+# Key counters: ztna_active_connections, ztna_relay_bytes_total,
+#   ztna_registrations_total, ztna_registration_rejections_total,
+#   ztna_datagrams_relayed_total, ztna_signaling_sessions_total,
+#   ztna_retry_tokens_validated, ztna_retry_token_failures, ztna_uptime_seconds
+
+# App Connector metrics (6 counters, port 9091)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'curl -s localhost:9091/metrics'
+# Key counters: ztna_connector_forwarded_packets_total, ztna_connector_forwarded_bytes_total,
+#   ztna_connector_tcp_sessions_total, ztna_connector_tcp_errors_total,
+#   ztna_connector_reconnections_total, ztna_connector_uptime_seconds
+
+# Watch metrics live (refreshes every 2s)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'watch -n2 "curl -s localhost:9090/metrics | grep -v ^#"'
+
+# Note: Metrics ports (9090/9091) are NOT in the AWS security group by default.
+# To reach externally, set Terraform enable_metrics_port=true (opens 9090 only)
+# or use SSH tunnel: ssh -L 9090:localhost:9090 -L 9091:localhost:9091 ubuntu@10.0.2.126
+
+# Graceful restart (demonstrates drain + auto-reconnect)
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo systemctl restart ztna-intermediate'
+# Watch connector reconnect:
+ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 'sudo journalctl -u ztna-connector -f'
+# Look for: "Reconnecting (attempt 1) in 1000ms..." then "Reconnected to Intermediate Server"
 ```
 
 ---
@@ -366,6 +410,10 @@ tail -f tests/e2e/artifacts/logs/*.log
 | **Registration ACK** | Server confirms registration with 0x12 ACK or 0x13 NACK; clients retry with backoff (Task 007) |
 | **CID Rotation** | Periodic QUIC Connection ID rotation for privacy (Task 007) |
 | **ZTNA_MAGIC** | `0x5A` prefix byte distinguishing P2P control messages from QUIC packets (Task 007) |
+| **Prometheus Metrics** | Lock-free atomic counters exposed at `/metrics` in Prometheus text format (Task 008) |
+| **Health Check** | HTTP 200 `ok` response at `/healthz` endpoint — indicates component is running (Task 008) |
+| **Graceful Shutdown** | SIGTERM/SIGINT triggers `drain_and_shutdown()` — APPLICATION_CLOSE to all clients, 3s drain period (Task 008) |
+| **Auto-Reconnect** | Connector reconnects to Intermediate with exponential backoff (1s→30s cap) on connection loss (Task 008) |
 
 ### Registration & Routing Protocol
 
@@ -565,7 +613,7 @@ See [Task 006: Cloud Deployment](../done/006-cloud-deployment/) for implementati
 - macOS Agent with SwiftUI config UI + 23 FFI functions
 - AWS EC2 deployment (Intermediate + 2 Connectors + echo + HTTP services)
 - Pi k8s deployment (Kustomize + Cilium L2 LoadBalancer)
-- 177+ tests (116 unit + 61+ E2E)
+- 214+ tests (153 unit + 61+ E2E)
 - Performance: P2P 32.6ms vs Relay 76ms (2.3x faster), 10-min 0% loss, seamless failover
 
 **Post-MVP completions (merged in PR #7):**
