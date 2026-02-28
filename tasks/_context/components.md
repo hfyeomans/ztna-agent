@@ -1,6 +1,6 @@
 # Component Status & Dependencies
 
-**Last Updated:** 2026-02-27 (Task 016 created — infrastructure architecture. Separate components onto independent AWS infra per Oracle recommendation.)
+**Last Updated:** 2026-02-27 (Task 008 complete — production operations: metrics, graceful shutdown, auto-reconnection, deployment automation, CI/CD.)
 
 ---
 
@@ -47,6 +47,11 @@
   - Registration ACK/NACK (0x12/0x13) with sender authorization
   - CID rotation (5-min timer, `cid_aliases` HashMap)
   - SIGHUP cert hot-reload (re-creates `quiche::Config`)
+- **Task 008 additions:**
+  - Prometheus metrics endpoint (`/metrics`, 9 atomic counters: active_connections, relay_bytes_total, registrations_total, registration_rejections_total, datagrams_relayed_total, signaling_sessions_total, retry_tokens_validated, retry_token_failures, uptime_seconds)
+  - Health check endpoint (`/healthz`, HTTP 200 if running)
+  - `--metrics-port` CLI flag (default 9090, 0 to disable)
+  - SIGTERM/SIGINT graceful shutdown with `drain_and_shutdown()` (3s drain, APPLICATION_CLOSE to all clients)
 
 **Critical Compatibility:**
 - ALPN: `b"ztna-v1"` (matches Agent)
@@ -104,6 +109,14 @@ Currently on single shared EC2 (MVP). Planned: dedicated EC2 with Docker + `--ne
   - TCP half-close draining (`TCP_DRAIN_TIMEOUT_SECS = 5`)
   - CID rotation (5-min timer, client-side)
   - P2P keepalive: 6-byte wire format `[ZTNA_MAGIC(0x5A), type, 4-byte nonce]`
+- **Task 008 additions:**
+  - Auto-reconnection with exponential backoff (1s→30s cap, interruptible 500ms sleep chunks)
+  - SIGTERM handler for clean exit via `signal-hook` + `Arc<AtomicBool>`
+  - Prometheus metrics endpoint (`/metrics`, 6 atomic counters: forwarded_packets_total, forwarded_bytes_total, tcp_sessions_total, tcp_errors_total, reconnections_total, uptime_seconds)
+  - Health check endpoint (`/healthz`)
+  - `--metrics-port` CLI flag (default 9091, 0 to disable)
+  - Source IP validation in `process_local_socket()` — drops UDP from unexpected sources (Oracle Finding 7)
+  - Buffer reuse — `self.recv_buf` instead of per-poll `vec![0u8; 65535]` (Oracle Finding 14)
 
 **P2P Server Mode (Port 4434):**
 - Dual-mode: QUIC client (to Intermediate on 4433) + QUIC server (for Agents on 4434)
