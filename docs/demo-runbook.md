@@ -27,6 +27,15 @@ export ZTNA_INTERMEDIATE_METRICS_PORT="9090"
 # Connector metrics (binds to 0.0.0.0, accessible via localhost)
 export ZTNA_CONNECTOR_METRICS_PORT="9091"
 export ZTNA_CONNECTOR_WEB_METRICS_PORT="9092"
+
+# Virtual Service IPs (routes inside QUIC tunnel)
+export ZTNA_ECHO_VIRTUAL_IP="10.100.0.1"
+export ZTNA_WEB_VIRTUAL_IP="10.100.0.2"
+export ZTNA_WEB_PORT="8080"
+
+# k8s LoadBalancer (Pi cluster demo, if applicable)
+export K8S_LB_HOST="10.0.150.205"
+export K8S_LB_PORT="4433"
 ```
 
 ## Prerequisites Checklist
@@ -35,7 +44,7 @@ Before starting the demo, verify:
 
 - [ ] SSH access: `$ZTNA_SSH 'hostname'`
 - [ ] macOS Agent app built (Xcode or `xcodebuild`)
-- [ ] Agent configured: Host=$ZTNA_PUBLIC_IP, Port=$ZTNA_QUIC_PORT, Services=echo-service,web-app
+- [ ] Agent configured: Host=$ZTNA_PUBLIC_IP, Port=$ZTNA_QUIC_PORT, VirtualIPs=$ZTNA_ECHO_VIRTUAL_IP/$ZTNA_WEB_VIRTUAL_IP, Services=echo-service,web-app
 - [ ] AWS services running (see Verify Services below)
 - [ ] Metrics endpoints reachable (see Verify Metrics below)
 
@@ -129,7 +138,7 @@ Demonstrate direct P2P path with sub-35ms latency.
 
 **T4:**
 ```bash
-ping -c 10 10.100.0.1
+ping -c 10 $ZTNA_ECHO_VIRTUAL_IP
 ```
 
 **Expected output:**
@@ -157,7 +166,7 @@ Demonstrate TCP HTTP through the relay path.
 
 **T4:**
 ```bash
-curl -v http://10.100.0.2:8080/
+curl -v http://${ZTNA_WEB_VIRTUAL_IP}:${ZTNA_WEB_PORT}/
 ```
 
 **Expected output:**
@@ -181,7 +190,7 @@ curl -v http://10.100.0.2:8080/
 Run multiple requests to show consistency:
 ```bash
 for i in $(seq 1 5); do
-    curl -s -o /dev/null -w "Request $i: HTTP %{http_code} in %{time_total}s\n" http://10.100.0.2:8080/
+    curl -s -o /dev/null -w "Request $i: HTTP %{http_code} in %{time_total}s\n" http://${ZTNA_WEB_VIRTUAL_IP}:${ZTNA_WEB_PORT}/
 done
 ```
 
@@ -200,7 +209,7 @@ $ZTNA_SSH
 
 **T4 — Start a sustained ping:**
 ```bash
-ping -c 60 10.100.0.1
+ping -c 60 $ZTNA_ECHO_VIRTUAL_IP
 ```
 
 While ping is running, switch to T5:
@@ -271,8 +280,8 @@ ztna_uptime_seconds 3421
 
 **T4 — Generate some traffic while watching T6:**
 ```bash
-ping -c 20 10.100.0.1
-curl http://10.100.0.2:8080/
+ping -c 20 $ZTNA_ECHO_VIRTUAL_IP
+curl http://${ZTNA_WEB_VIRTUAL_IP}:${ZTNA_WEB_PORT}/
 ```
 
 **What you'll see in T6:**
@@ -312,7 +321,7 @@ Demonstrate that the Intermediate Server drains connections on restart, and the 
 
 **T4 — Start a sustained ping (background traffic):**
 ```bash
-ping -c 120 10.100.0.1
+ping -c 120 $ZTNA_ECHO_VIRTUAL_IP
 ```
 
 **T6 — Watch the connector's reconnection counter:**
@@ -334,8 +343,8 @@ $ZTNA_SSH 'sudo systemctl restart ztna-intermediate'
 
 **T4 — Verify traffic resumes:**
 ```bash
-ping -c 10 10.100.0.1
-curl http://10.100.0.2:8080/
+ping -c 10 $ZTNA_ECHO_VIRTUAL_IP
+curl http://${ZTNA_WEB_VIRTUAL_IP}:${ZTNA_WEB_PORT}/
 ```
 
 **Talking point:** The Intermediate Server handles SIGTERM gracefully — it sends QUIC APPLICATION_CLOSE to all connected clients and waits up to 3 seconds for acknowledgments before exiting. The Connector detects the lost connection and auto-reconnects with exponential backoff (1s, 2s, 4s... up to 30s cap). No manual intervention, no systemd restart needed. The backoff sleep is interruptible — if SIGTERM arrives during reconnection delay, the Connector exits within 500ms.

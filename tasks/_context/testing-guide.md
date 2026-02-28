@@ -46,6 +46,28 @@ grep -rl '#!/bin/bash' --include='*.sh' . | grep -v target | xargs shellcheck --
 
 ---
 
+## Configuration
+
+Set these shell variables before running any remote commands below. Values match `docs/demo-runbook.md`.
+
+```bash
+export ZTNA_SSH_KEY="~/.ssh/hfymba.aws.pem"
+export ZTNA_SSH_HOST="ubuntu@10.0.2.126"
+export ZTNA_SSH="ssh -i $ZTNA_SSH_KEY $ZTNA_SSH_HOST"
+export ZTNA_PUBLIC_IP="3.128.36.92"
+export ZTNA_QUIC_PORT="4433"
+export K8S_LB_HOST="10.0.150.205"
+export K8S_LB_PORT="4433"
+export ZTNA_ECHO_VIRTUAL_IP="10.100.0.1"
+export ZTNA_WEB_VIRTUAL_IP="10.100.0.2"
+export ZTNA_WEB_PORT="8080"
+export ZTNA_INTERMEDIATE_BIND="10.0.2.126"
+export ZTNA_INTERMEDIATE_METRICS_PORT="9090"
+export ZTNA_CONNECTOR_METRICS_PORT="9091"
+```
+
+---
+
 ## AWS Cloud Comprehensive Demo (Task 006 Current) - RECOMMENDED
 
 This is the primary demo showing the complete ZTNA stack with all current capabilities.
@@ -91,14 +113,14 @@ Open 5 terminal windows to run the complete demo:
 **Terminal 1 - AWS Server Logs (Intermediate):**
 ```bash
 # SSH to AWS instance and watch intermediate-server logs
-ssh ubuntu@3.128.36.92  # or via Tailscale: ssh ubuntu@10.0.2.126
+$ZTNA_SSH
 sudo journalctl -u ztna-intermediate -f
 ```
 *Watch for: "New connection", "Registration", "Relayed X bytes", "0x2F service datagram"*
 
 **Terminal 2 - AWS Server Logs (Connector):**
 ```bash
-ssh ubuntu@3.128.36.92
+$ZTNA_SSH
 sudo journalctl -u ztna-connector -f
 ```
 *Watch for: "Registered as Connector", "Forward to local", "TCP session", "ICMP Echo Reply"*
@@ -116,7 +138,7 @@ xcodebuild -project ios-macos/ZtnaAgent/ZtnaAgent.xcodeproj \
     -scheme ZtnaAgent -configuration Debug \
     -derivedDataPath /tmp/ZtnaAgent-build build
 
-# Launch (configure UI: Host=3.128.36.92, Port=4433, Service=echo-service)
+# Launch (configure UI: Host=$ZTNA_PUBLIC_IP, Port=$ZTNA_QUIC_PORT, Service=echo-service)
 open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
 
 # Or with auto-start for testing
@@ -232,9 +254,9 @@ kubectl --context k8s1 get svc -n ztna
 
 # Connect to k8s intermediate-server
 ./app-connector/target/release/app-connector \
-  --server 10.0.150.205:4433 \
+  --server $K8S_LB_HOST:$K8S_LB_PORT \
   --service test-from-mac \
-  --insecure
+  --no-verify-peer
 ```
 
 **Expected output:**
@@ -270,9 +292,9 @@ watch -n2 'kubectl --context k8s1 get pods -n ztna -o wide'
 **Terminal 4 - Run Test:**
 ```bash
 ./app-connector/target/release/app-connector \
-  --server 10.0.150.205:4433 \
+  --server $K8S_LB_HOST:$K8S_LB_PORT \
   --service test-external \
-  --insecure
+  --no-verify-peer
 ```
 
 ### Quick Copy Commands
@@ -294,7 +316,7 @@ kubectl --context k8s1 logs -n ztna deployment/intermediate-server --tail=50
 kubectl --context k8s1 logs -n ztna deployment/app-connector --tail=50
 
 # Test UDP connectivity from Mac
-nc -u -v -z 10.0.150.205 4433
+nc -u -v -z $K8S_LB_HOST $K8S_LB_PORT
 ```
 
 ### Troubleshooting
@@ -424,7 +446,7 @@ ifconfig utun6
 netstat -rn | grep utun6
 
 # Check UDP connection to k8s
-netstat -an | grep "10.0.150.205.4433"
+netstat -an | grep "$K8S_LB_HOST.$K8S_LB_PORT"
 
 # Check Extension process
 pgrep -fl Extension | grep tmp
@@ -458,13 +480,12 @@ open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
 ping -c 3 10.100.0.1  # Should work
 
 # Terminal 2: Restart intermediate server on AWS
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'sudo systemctl restart ztna-intermediate'
+$ZTNA_SSH 'sudo systemctl restart ztna-intermediate'
 
 # Terminal 3: Watch macOS logs
 log stream --predicate 'subsystem CONTAINS "ztna"' --info
 # Expect: "Scheduling reconnect in 1.0s (reason: ...)"
-# Then:   "Attempting reconnect to 3.128.36.92:4433"
+# Then:   "Attempting reconnect to $ZTNA_PUBLIC_IP:$ZTNA_QUIC_PORT"
 # Then:   "QUIC connection established"
 
 # Terminal 1: Verify recovery
@@ -481,8 +502,7 @@ ping -c 3 10.100.0.1  # Should work again
 **Test 3: Backoff Verification**
 ```bash
 # Stop intermediate server entirely (don't restart)
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'sudo systemctl stop ztna-intermediate'
+$ZTNA_SSH 'sudo systemctl stop ztna-intermediate'
 
 # Watch logs — should see increasing backoff:
 # "Scheduling reconnect in 1.0s"
@@ -491,8 +511,7 @@ ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
 # ... up to 30.0s cap
 
 # Restart server — next successful connect resets backoff to 1s
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'sudo systemctl start ztna-intermediate'
+$ZTNA_SSH 'sudo systemctl start ztna-intermediate'
 ```
 
 **Expected behavior summary:**
@@ -1448,13 +1467,13 @@ log stream --predicate 'subsystem CONTAINS "ztna"' --info
 
 **Terminal 1 — AWS Intermediate logs:**
 ```bash
-ssh ubuntu@3.128.36.92
+$ZTNA_SSH
 sudo journalctl -u ztna-intermediate -f
 ```
 
 **Terminal 2 — AWS Connector logs:**
 ```bash
-ssh ubuntu@3.128.36.92
+$ZTNA_SSH
 sudo journalctl -u ztna-connector -f
 ```
 
@@ -1470,7 +1489,7 @@ open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
 ping -c 3 10.100.0.1
 
 # Check for direct traffic (non-relay):
-sudo tcpdump -i en0 udp and not host 3.128.36.92
+sudo tcpdump -i en0 udp and not host $ZTNA_PUBLIC_IP
 ```
 
 **Verified outcomes (2026-01-31):**
@@ -1925,7 +1944,7 @@ ping -c 1 8.8.8.8  # Works via normal routing
 
 ```bash
 # SSH to AWS EC2
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
+$ZTNA_SSH
 
 # Check bidirectional relay
 sudo journalctl -u ztna-intermediate --since "1 min ago" | grep "Relayed"
@@ -1978,7 +1997,7 @@ ping -c 3 10.100.0.1
 ### AWS Service Management
 
 ```bash
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
+$ZTNA_SSH
 
 # Check all services
 systemctl status ztna-intermediate ztna-connector ztna-connector-web http-server echo-server
@@ -2046,7 +2065,7 @@ Block P2P traffic on the external interface only, preserving Connector↔Interme
 
 ```bash
 # SSH to AWS
-ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126
+$ZTNA_SSH
 
 # 1. Verify P2P baseline
 ping -c 5 10.100.0.1  # Should get replies at ~32ms
@@ -2104,7 +2123,7 @@ sudo iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP
 
 > **See also:** `docs/demo-runbook.md` for the full 5-terminal demo with talking points.
 
-All commands assume SSH to AWS: `ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126`
+All commands assume SSH to AWS: `$ZTNA_SSH`
 
 ### Block P2P (Force Relay Fallback)
 

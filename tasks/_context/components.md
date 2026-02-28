@@ -332,6 +332,9 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Path stats logging via `agent_get_path_stats()`
 
 **P2P NAT Testing Results (2026-01-31):**
+
+> *Values below are from a specific AWS test run (EC2 Elastic IP `3.128.36.92`). See `docs/demo-runbook.md` § Configuration for current infrastructure variables.*
+
 - Direct P2P QUIC path achieved: macOS (home NAT) → AWS Connector (port 4434)
 - Hole punch succeeds via server-reflexive candidate (3.128.36.92:4434)
 - 0.0.0.0:4434 candidate fails as expected (non-routable)
@@ -368,6 +371,8 @@ QUIC Client → Intermediate → Connector → Echo Server → back
 - Enable NAT testing with real public IPs
 - Validate P2P hole punching with real NATs
 - Prepare infrastructure for production
+
+> **Configuration:** IP addresses, SSH endpoints, and security group IDs in this section reflect the current AWS deployment. For canonical variable definitions, see `docs/demo-runbook.md` § Configuration. Update references here if infrastructure changes.
 
 **Status:**
 

@@ -293,7 +293,7 @@ kubectl --context k8s1 get svc -n ztna
 
 # 3. Test connection from macOS
 ./app-connector/target/release/app-connector \
-  --server 10.0.150.205:4433 \
+  --server ${K8S_LB_HOST}:${K8S_LB_PORT} \
   --service test-from-mac \
   --no-verify-peer
 
@@ -332,8 +332,8 @@ open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app --args --auto-start
 kubectl --context k8s1 logs -n ztna -l app.kubernetes.io/name=intermediate-server -f
 # Look for: "New connection from 10.0.0.22:XXXXX"
 
-# 5. Send UDP test traffic to echo-service (10.100.0.1 = virtual service IP)
-echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
+# 5. Send UDP test traffic to echo-service ($ZTNA_ECHO_VIRTUAL_IP = virtual service IP)
+echo "ZTNA-TEST" | nc -u -w1 $ZTNA_ECHO_VIRTUAL_IP 9999
 # K8s logs: "Received XX bytes to relay" (UDP packet tunneled)
 ```
 
@@ -359,7 +359,7 @@ $ZTNA_SSH 'sudo journalctl -u ztna-connector -f'
 Both Intermediate Server and App Connector expose Prometheus metrics and health endpoints.
 Configurable via `--metrics-port` CLI flag (default 9090/9091, pass `0` to disable).
 
-Commands use variables from demo-runbook.md Configuration section (`$ZTNA_SSH`, etc.).
+Commands use variables from demo-runbook.md Configuration section and testing-guide.md Configuration section (`$ZTNA_SSH`, `$ZTNA_ECHO_VIRTUAL_IP`, etc.).
 
 ```bash
 # Health checks (Intermediate binds to --bind addr, connectors bind to 0.0.0.0)
