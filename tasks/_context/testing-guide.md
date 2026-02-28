@@ -64,6 +64,7 @@ export ZTNA_WEB_PORT="8080"
 export ZTNA_INTERMEDIATE_BIND="10.0.2.126"
 export ZTNA_INTERMEDIATE_METRICS_PORT="9090"
 export ZTNA_CONNECTOR_METRICS_PORT="9091"
+export ZTNA_CONNECTOR_WEB_METRICS_PORT="9092"
 ```
 
 ---
@@ -149,11 +150,11 @@ open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app \
 **Terminal 5 - Test Traffic:**
 ```bash
 # Test 1: ICMP ping through tunnel (full E2E with return-path)
-ping -c 3 10.100.0.1
+ping -c 3 $ZTNA_ECHO_VIRTUAL_IP
 # Expected: 3 packets transmitted, 3 received, RTT ~80-150ms
 
 # Test 2: UDP echo through tunnel
-echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
+echo "ZTNA-TEST" | nc -u -w1 $ZTNA_ECHO_VIRTUAL_IP 9999
 
 # Test 3: Verify split tunnel - this should NOT go through QUIC
 ping -c 1 8.8.8.8  # Should work via normal routing, not tunnel
@@ -169,7 +170,7 @@ netstat -rn | grep utun
 2. **Terminal 3:** See "QUIC connection established", "Registered for service 'echo-service'"
 3. **Terminal 1:** See "New connection from...", "Registration: Agent for service 'echo-service'"
 4. **Terminal 2:** See "Registered as Connector for 'echo-service'"
-5. **Terminal 5:** Run `ping -c 3 10.100.0.1`
+5. **Terminal 5:** Run `ping -c 3 $ZTNA_ECHO_VIRTUAL_IP`
 6. **Terminal 1:** See "Service-routed datagram: 84 bytes" and "Relayed 84 bytes" (both directions)
 7. **Terminal 2:** See Connector processing ICMP Echo Requests
 8. **Terminal 3:** See "Injected 1 return packet(s) into TUN"
@@ -427,8 +428,8 @@ log stream --predicate 'subsystem CONTAINS "ztna"' --info
 
 3. **Traffic tunneled successfully:**
    ```bash
-   # Send UDP traffic through tunnel to echo-service (10.100.0.1 = virtual IP)
-   echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
+   # Send UDP traffic through tunnel to echo-service ($ZTNA_ECHO_VIRTUAL_IP)
+   echo "ZTNA-TEST" | nc -u -w1 $ZTNA_ECHO_VIRTUAL_IP 9999
 
    # K8s logs should show:
    # [INFO] Received 84 bytes to relay from ...
@@ -477,7 +478,7 @@ The macOS Agent now auto-recovers when the QUIC connection drops.
 ```bash
 # Terminal 1: Start VPN, verify connected
 open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
-ping -c 3 10.100.0.1  # Should work
+ping -c 3 $ZTNA_ECHO_VIRTUAL_IP  # Should work
 
 # Terminal 2: Restart intermediate server on AWS
 $ZTNA_SSH 'sudo systemctl restart ztna-intermediate'
@@ -489,14 +490,14 @@ log stream --predicate 'subsystem CONTAINS "ztna"' --info
 # Then:   "QUIC connection established"
 
 # Terminal 1: Verify recovery
-ping -c 3 10.100.0.1  # Should work again
+ping -c 3 $ZTNA_ECHO_VIRTUAL_IP  # Should work again
 ```
 
 **Test 2: WiFi Toggle Recovery**
 ```bash
 # Disconnect WiFi in macOS System Settings, wait 5s, reconnect
 # Watch logs for: "Network path unsatisfied" → "Network path changed (satisfied), scheduling reconnect"
-# Verify: ping 10.100.0.1 works after reconnection
+# Verify: ping $ZTNA_ECHO_VIRTUAL_IP works after reconnection
 ```
 
 **Test 3: Backoff Verification**
@@ -1486,7 +1487,7 @@ log stream --predicate 'subsystem CONTAINS "ztna"' --info
 ```bash
 open /tmp/ZtnaAgent-build/Build/Products/Debug/ZtnaAgent.app
 # After connected:
-ping -c 3 10.100.0.1
+ping -c 3 $ZTNA_ECHO_VIRTUAL_IP
 
 # Check for direct traffic (non-relay):
 sudo tcpdump -i en0 udp and not host $ZTNA_PUBLIC_IP
@@ -1930,11 +1931,11 @@ pkill -f udp-echo
 
 ```bash
 # ICMP ping through tunnel (Connector generates Echo Reply)
-ping -c 3 10.100.0.1
+ping -c 3 $ZTNA_ECHO_VIRTUAL_IP
 # Expected: 3 packets transmitted, 3 received, 0% packet loss, RTT ~80-150ms
 
 # UDP echo through tunnel
-echo "ZTNA-TEST" | nc -u -w1 10.100.0.1 9999
+echo "ZTNA-TEST" | nc -u -w1 $ZTNA_ECHO_VIRTUAL_IP 9999
 
 # Split tunnel (should NOT go through QUIC)
 ping -c 1 8.8.8.8  # Works via normal routing
@@ -1980,17 +1981,17 @@ Plus:
 # And: "Registered for service 'web-app'"
 
 # 2. Test HTTP through tunnel (relay path)
-curl -v http://10.100.0.2:8080/
+curl -v http://${ZTNA_WEB_VIRTUAL_IP}:${ZTNA_WEB_PORT}/
 # Expected: 200 OK with HTML content "ZTNA Test Page"
 
 # 3. Multiple concurrent requests
 for i in $(seq 1 10); do
-    curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" http://10.100.0.2:8080/
+    curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" http://${ZTNA_WEB_VIRTUAL_IP}:${ZTNA_WEB_PORT}/
 done
 # Expected: all 200, ~70-80ms each
 
 # 4. Regression check — UDP echo still works
-ping -c 3 10.100.0.1
+ping -c 3 $ZTNA_ECHO_VIRTUAL_IP
 # Expected: replies via P2P direct path (~32ms)
 ```
 
@@ -2024,17 +2025,17 @@ sudo journalctl -u ztna-connector-web -f
 ### P2P Latency Test
 
 ```bash
-# 50-sample ping via P2P direct path (10.100.0.1 → echo-service)
-ping -c 50 10.100.0.1
+# 50-sample ping via P2P direct path ($ZTNA_ECHO_VIRTUAL_IP → echo-service)
+ping -c 50 $ZTNA_ECHO_VIRTUAL_IP
 # Expected: ~32ms avg, 0% loss after hole punch completes
 ```
 
 ### Relay Latency Test
 
 ```bash
-# HTTP timing via relay (10.100.0.2 → web-app, relay-only)
+# HTTP timing via relay ($ZTNA_WEB_VIRTUAL_IP → web-app, relay-only)
 for i in $(seq 1 50); do
-    curl -s -o /dev/null -w "%{time_total}\n" http://10.100.0.2:8080/
+    curl -s -o /dev/null -w "%{time_total}\n" http://${ZTNA_WEB_VIRTUAL_IP}:${ZTNA_WEB_PORT}/
 done
 # Expected: ~76ms avg
 ```
@@ -2043,7 +2044,7 @@ done
 
 ```bash
 # 600 pings via P2P path
-ping -c 600 10.100.0.1
+ping -c 600 $ZTNA_ECHO_VIRTUAL_IP
 # Expected: 600/600 received, 0.0% loss
 
 # Monitor Agent logs during test
@@ -2068,7 +2069,7 @@ Block P2P traffic on the external interface only, preserving Connector↔Interme
 $ZTNA_SSH
 
 # 1. Verify P2P baseline
-ping -c 5 10.100.0.1  # Should get replies at ~32ms
+ping -c 5 $ZTNA_ECHO_VIRTUAL_IP  # Should get replies at ~32ms
 
 # 2. Block P2P on external interface only
 sudo iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP
@@ -2076,7 +2077,7 @@ sudo iptables -A INPUT -i ens5 -p udp --dport 4434 -j DROP
 # This preserves: Connector → Intermediate relay (loopback, not ens5)
 
 # 3. Run sustained ping (3 minutes)
-ping -c 180 10.100.0.1
+ping -c 180 $ZTNA_ECHO_VIRTUAL_IP
 # Expected: 180/180, 0% loss, ~32ms avg (relay path)
 
 # 4. Monitor Intermediate logs (separate terminal)
@@ -2086,7 +2087,7 @@ sudo journalctl -u ztna-intermediate -f | grep -E "Relayed|echo-service"
 # 5. Verify recovery — unblock P2P
 sudo iptables -F INPUT
 sleep 60
-ping -c 5 10.100.0.1  # Should work at ~32ms (P2P may re-establish)
+ping -c 5 $ZTNA_ECHO_VIRTUAL_IP  # Should work at ~32ms (P2P may re-establish)
 
 # 6. Clean up
 sudo iptables -F INPUT
@@ -2160,7 +2161,7 @@ sudo systemctl restart ztna-intermediate
 ```bash
 # Stop echo-service connector
 sudo systemctl stop ztna-connector
-# Traffic to 10.100.0.1 will have no backend — packets relayed but undelivered
+# Traffic to $ZTNA_ECHO_VIRTUAL_IP will have no backend — packets relayed but undelivered
 
 # Restart
 sudo systemctl start ztna-connector
@@ -2171,7 +2172,7 @@ sudo systemctl start ztna-connector
 
 ```bash
 sudo systemctl stop ztna-connector-web
-# curl http://10.100.0.2:8080/ will timeout (no backend)
+# curl http://${ZTNA_WEB_VIRTUAL_IP}:${ZTNA_WEB_PORT}/ will timeout (no backend)
 
 sudo systemctl start ztna-connector-web
 # HTTP resumes

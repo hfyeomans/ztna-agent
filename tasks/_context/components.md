@@ -126,7 +126,7 @@ Currently on single shared EC2 (MVP). Planned: dedicated EC2 with Docker + `--ne
 - Keepalive protocol: raw UDP, 6 bytes: `[ZTNA_MAGIC(0x5A), type_byte, nonce_u32_be]`
 
 **Multi-Service Architecture (Phase 7):**
-- Per-service routing requires separate Connector instances (each with own --forward-addr)
+- Per-service routing requires separate Connector instances (each with own --forward)
 - AWS deployment: `ztna-connector.service` (echo-service, port 4434, P2P enabled) + `ztna-connector-web.service` (web-app, port 4435, relay-only)
 - Agent registers for multiple services via providerConfiguration `services` array
 - Intermediate routes 0x2F datagrams to matching Connector by service ID
