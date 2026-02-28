@@ -3,7 +3,7 @@
 **Task ID:** 010-admin-dashboard
 **Status:** Not Started
 **Priority:** P3
-**Depends On:** 008-production-operations, 009-multi-service-architecture
+**Depends On:** 008-production-operations, 009-multi-service-architecture, 016-infrastructure-architecture
 **Branch:** (not yet created)
 **Last Updated:** 2026-02-21
 

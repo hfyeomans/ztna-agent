@@ -611,13 +611,16 @@ After E2E testing validates local relay functionality, components will be deploy
 
 ### AWS Systemd Services
 
-| Service | Binary | Default Metrics Port | Description |
-|---------|--------|---------------------|-------------|
-| `ztna-intermediate` | `intermediate-server` | 9090 | QUIC relay + registry |
-| `ztna-connector` | `app-connector` | 9091 | echo-service connector |
-| `ztna-connector-web` | `app-connector` | 9092 | web-app connector |
-| `echo-server` | Python | N/A | TCP echo test service |
-| `http-server` | HTTP backend | N/A | Web test service |
+| Service | Binary | Default Metrics Port | Managed By | Description |
+|---------|--------|---------------------|------------|-------------|
+| `ztna-intermediate` | `intermediate-server` | 9090 | Ansible | QUIC relay + registry |
+| `ztna-connector` | `app-connector` | 9091 | Ansible | echo-service connector |
+| `echo-server` | Python | N/A | Ansible | TCP echo test service |
+| `ztna-connector-web` | `app-connector` | 9092 (manual) | Manual | web-app connector (not in Ansible) |
+| `http-server` | HTTP backend | N/A | Manual | Web test service (not in Ansible) |
+
+**Note:** `ztna-connector-web` and `http-server` are manually configured on the current EC2 instance.
+Port 9092 is not a code default — it requires explicit `--metrics-port 9092` when running a second connector.
 
 ### AWS Build & Deploy
 

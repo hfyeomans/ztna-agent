@@ -32,11 +32,11 @@ ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
 
 ### Verify Metrics
 
-From the AWS host (metrics bind to `0.0.0.0` by default, reachable on any interface):
+From the AWS host (Intermediate metrics bind to `--bind` address; Connector metrics bind to `0.0.0.0`):
 
 ```bash
 ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'curl -s http://localhost:9090/healthz && echo " intermediate" && curl -s http://localhost:9091/healthz && echo " connector"'
+    'curl -s http://10.0.2.126:9090/healthz && echo " intermediate" && curl -s http://localhost:9091/healthz && echo " connector"'
 ```
 
 Expected: `ok intermediate` and `ok connector`.
@@ -236,7 +236,7 @@ Demonstrate built-in Prometheus metrics and health checks.
 **T6 — Watch Intermediate Server metrics live:**
 ```bash
 ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'watch -n2 "curl -s http://localhost:9090/metrics | grep -v ^#"'
+    'watch -n2 "curl -s http://10.0.2.126:9090/metrics | grep -v ^#"'
 ```
 
 **What you'll see (counter names and live values):**
@@ -282,7 +282,7 @@ ztna_connector_uptime_seconds 3400
 **T6 — Health check (one-liner):**
 ```bash
 ssh -i ~/.ssh/hfymba.aws.pem ubuntu@10.0.2.126 \
-    'echo "Intermediate: $(curl -s localhost:9090/healthz)  Connector: $(curl -s localhost:9091/healthz)"'
+    'echo "Intermediate: $(curl -s 10.0.2.126:9090/healthz)  Connector: $(curl -s localhost:9091/healthz)"'
 ```
 
 Expected: `Intermediate: ok  Connector: ok`
@@ -409,17 +409,17 @@ sudo systemctl restart ztna-intermediate ztna-connector ztna-connector-web http-
 # --- Metrics & Health (Task 008) ---
 
 # Intermediate Server metrics (9 counters)
-curl -s http://localhost:9090/metrics | grep -v ^#
+curl -s http://10.0.2.126:9090/metrics | grep -v ^#
 
 # App Connector metrics (6 counters)
 curl -s http://localhost:9091/metrics | grep -v ^#
 
 # Health checks
-curl -s http://localhost:9090/healthz    # Intermediate → "ok"
+curl -s http://10.0.2.126:9090/healthz    # Intermediate → "ok"
 curl -s http://localhost:9091/healthz    # Connector → "ok"
 
 # Watch metrics live (refreshes every 2s)
-watch -n2 'curl -s http://localhost:9090/metrics | grep -v ^#'
+watch -n2 'curl -s http://10.0.2.126:9090/metrics | grep -v ^#'
 
 # Check connector reconnection count
 curl -s http://localhost:9091/metrics | grep reconnections
